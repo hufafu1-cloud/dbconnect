@@ -29,6 +29,13 @@ contextBridge.exposeInMainWorld('api', {
     exportRows: (connId, t) => inv('db:exportRows', { connId, ...t }),
     cancel: (connId) => inv('db:cancel', { connId }),
     allColumns: (connId, db, schema) => inv('db:allColumns', { connId, db, schema }),
+    objectCaps: (connId) => inv('db:objectCaps', { connId }),
+    routines: (connId, db, schema) => inv('db:routines', { connId, db, schema }),
+    triggers: (connId, db, schema) => inv('db:triggers', { connId, db, schema }),
+    events: (connId, db) => inv('db:events', { connId, db }),
+    sequences: (connId, db, schema) => inv('db:sequences', { connId, db, schema }),
+    users: (connId) => inv('db:users', { connId }),
+    objectDdl: (connId, t) => inv('db:objectDdl', { connId, ...t }),
   },
   queries: {
     list: (connId) => inv('queries:list', { connId }),

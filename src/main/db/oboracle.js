@@ -81,6 +81,56 @@ class OBOracleAdapter extends BaseAdapter {
     }
   }
 
+  get objectCaps() {
+    return { routines: true, triggers: true, events: false, sequences: true, users: false };
+  }
+
+  async listRoutines(db) {
+    const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);
+    const rows = await this._q(
+      `SELECT object_name, object_type FROM all_objects
+       WHERE owner = ${this.literal(db)} AND object_type IN ('PROCEDURE', 'FUNCTION')
+       ORDER BY object_name`);
+    return rows.map((r) => ({ name: val(r, 'object_name'), type: val(r, 'object_type'), comment: '' }));
+  }
+
+  async listTriggers(db) {
+    const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);
+    const rows = await this._q(
+      `SELECT trigger_name, table_name FROM all_triggers
+       WHERE owner = ${this.literal(db)} ORDER BY trigger_name`);
+    return rows.map((r) => ({ name: val(r, 'trigger_name'), table: val(r, 'table_name') }));
+  }
+
+  async listSequences(db) {
+    const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);
+    const rows = await this._q(
+      `SELECT sequence_name FROM all_sequences
+       WHERE sequence_owner = ${this.literal(db)} ORDER BY sequence_name`);
+    return rows.map((r) => ({ name: val(r, 'sequence_name') }));
+  }
+
+  async objectDdl(db, _schema, kind, name) {
+    const L = (v) => this.literal(v);
+    const kindMap = { PROCEDURE: 'PROCEDURE', FUNCTION: 'FUNCTION', TRIGGER: 'TRIGGER', SEQUENCE: 'SEQUENCE' };
+    const mk = kindMap[kind];
+    if (!mk) throw new Error('不支持的对象类型: ' + kind);
+    try {
+      const rows = await this._q(
+        `SELECT dbms_metadata.get_ddl(${L(mk)}, ${L(name)}, ${L(db)}) AS "DDL" FROM dual`);
+      const ddl = String(rows[0].DDL || '').trim();
+      if (ddl) return ddl;
+    } catch (e) { /* fallthrough */ }
+    // 退化：从 all_source 拼接（过程/函数/触发器）
+    const src = await this._q(
+      `SELECT text FROM all_source WHERE owner = ${L(db)} AND name = ${L(name)} ORDER BY line`);
+    if (src.length) {
+      const val = (r) => (r.TEXT !== undefined ? r.TEXT : r.text);
+      return 'CREATE OR REPLACE ' + src.map(val).join('');
+    }
+    throw new Error('无法获取定义');
+  }
+
   async listAllColumns(db) {
     const rows = await this._q(
       `SELECT table_name, column_name FROM all_tab_columns

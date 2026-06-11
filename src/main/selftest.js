@@ -375,6 +375,50 @@ async function runSelfTest() {
   try { await my.cancel(); } catch (e) { myCancelOk = false; }
   check('mysql cancel 空闲安全', myCancelOk);
 
+  // ---- 对象覆盖面 ----
+  check('base objectCaps 默认关闭', Object.values(new SQLiteAdapter({}).objectCaps).filter(Boolean).length === 1); // 仅 triggers
+  check('mysql objectCaps', my.objectCaps.routines && my.objectCaps.triggers && my.objectCaps.events && my.objectCaps.users && !my.objectCaps.sequences);
+  check('mysql dropUserSql', my.dropUserSql('u1', 'localhost') === "DROP USER 'u1'@'localhost'");
+  check('pg dropTriggerSql', pgA.dropTriggerSql('d', 'public', 'trg', 't1') === 'DROP TRIGGER "trg" ON "public"."t1"');
+  check('ob 无事件', new (require('./db/oceanbase').OceanBaseAdapter)({}).objectCaps.events === false);
+
+  // SQLite 触发器全链路
+  const file4 = path.join(os.tmpdir(), `dbconnect-trg-${Date.now()}.db`);
+  const ad4 = new SQLiteAdapter({ id: 't4', type: 'sqlite', file: file4 });
+  await ad4.connect();
+  await ad4.runScript('main', `
+    CREATE TABLE logs (id INTEGER PRIMARY KEY, msg TEXT, at TEXT);
+    CREATE TRIGGER trg_at AFTER INSERT ON logs BEGIN UPDATE logs SET at = datetime('now') WHERE id = NEW.id; END;
+  `);
+  const trgs = await ad4.listTriggers('main');
+  check('sqlite listTriggers', trgs.length === 1 && trgs[0].name === 'trg_at' && trgs[0].table === 'logs', trgs);
+  const trgDdl = await ad4.objectDdl('main', null, 'TRIGGER', 'trg_at');
+  check('sqlite trigger ddl', /CREATE TRIGGER trg_at/i.test(trgDdl), trgDdl);
+  await ad4.runScript('main', "INSERT INTO logs (msg) VALUES ('x')");
+  const trgFired = await ad4.runScript('main', 'SELECT at FROM logs WHERE id = 1');
+  check('sqlite trigger 生效', trgFired[0].rows[0][0] !== null);
+  await ad4.action('main', { action: 'dropTrigger', name: 'trg_at', table: 'logs' });
+  check('sqlite dropTrigger', (await ad4.listTriggers('main')).length === 0);
+  await ad4.close();
+  try { fs.unlinkSync(file4); } catch (e) { /* ignore */ }
+
+  // 存储过程整段执行启发式（MySQL 方言：过程体内分号不拆分）
+  const procSql = 'CREATE PROCEDURE p1(IN x INT)\nBEGIN\n  SELECT x;\n  SELECT x + 1;\nEND';
+  let capturedStmts = null;
+  const fakeMy = new MySQLAdapter({});
+  fakeMy.withSession = async (_db, fn) => fn(async (s) => { (capturedStmts = capturedStmts || []).push(s); return { affected: 0 }; });
+  await fakeMy.runScript('d1', procSql);
+  check('mysql 过程整段执行', capturedStmts && capturedStmts.length === 1 && capturedStmts[0].includes('SELECT x + 1'), capturedStmts && capturedStmts.length);
+  capturedStmts = null;
+  await fakeMy.runScript('d1', 'SELECT 1; SELECT 2');
+  check('mysql 普通语句仍拆分', capturedStmts && capturedStmts.length === 2);
+
+  // 混合脚本中的过程体感知拆分
+  const mixed = splitSql(
+    "CREATE TABLE a (x INT); CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE a SET x = 1; UPDATE a SET x = 2; END; SELECT 1",
+    'sqlite');
+  check('split 触发器体感知', mixed.length === 3 && /END$/i.test(mixed[1]) && mixed[2] === 'SELECT 1', mixed.map((s) => s.slice(0, 30)));
+
   console.log(`[SELFTEST] 通过 ${pass} 项, 失败 ${fail} 项`);
   return fail === 0 ? 0 : 1;
 }

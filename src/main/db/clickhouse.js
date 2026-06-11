@@ -97,6 +97,47 @@ class ClickHouseAdapter extends BaseAdapter {
     }
   }
 
+  get objectCaps() {
+    return { routines: true, triggers: false, events: false, sequences: false, users: true };
+  }
+
+  /** 用户自定义函数（UDF） */
+  async listRoutines() {
+    try {
+      const r = await this._run(null,
+        "SELECT name, create_query FROM system.functions WHERE origin = 'SQLUserDefined' ORDER BY name");
+      return r.rows.map(([name]) => ({ name, type: 'FUNCTION', comment: '' }));
+    } catch (e) { return []; }
+  }
+
+  async listUsers() {
+    try {
+      const r = await this._run(null, 'SELECT name FROM system.users ORDER BY name');
+      return r.rows.map(([name]) => ({ name }));
+    } catch (e) { return []; }
+  }
+
+  async objectDdl(_db, _schema, kind, name) {
+    if (kind === 'FUNCTION' || kind === 'PROCEDURE') {
+      const r = await this._run(null,
+        `SELECT create_query FROM system.functions WHERE name = ${this.literal(name)}`);
+      if (!r.rows.length || !r.rows[0][0]) throw new Error('函数不存在或为内置函数');
+      return r.rows[0][0];
+    }
+    if (kind === 'USER') {
+      const r = await this._run(null, `SHOW CREATE USER ${this.quoteIdent(name)}`);
+      return (r.rows[0] && r.rows[0][0]) || '';
+    }
+    throw new Error('不支持的对象类型: ' + kind);
+  }
+
+  async action(db, a) {
+    if (a.action === 'dropRoutine') {
+      return this.exec(null, `DROP FUNCTION ${this.quoteIdent(a.name)}`);
+    }
+    return super.action(db, a);
+  }
+
   async listAllColumns(db) {
     const r = await this._run(null,
       `SELECT table, name FROM system.columns WHERE database = ${this.literal(db)} ORDER BY table, position`);

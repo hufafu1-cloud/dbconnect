@@ -60,6 +60,15 @@ function register(getWin) {
   h('db:cancel', (a) => dbm.get(a.connId).cancel());
   h('db:allColumns', (a) => dbm.get(a.connId).listAllColumns(a.db, a.schema));
 
+  // ---- 扩展对象（函数/触发器/事件/序列/用户） ----
+  h('db:objectCaps', (a) => dbm.get(a.connId).objectCaps);
+  h('db:routines', (a) => dbm.get(a.connId).listRoutines(a.db, a.schema));
+  h('db:triggers', (a) => dbm.get(a.connId).listTriggers(a.db, a.schema));
+  h('db:events', (a) => dbm.get(a.connId).listEvents(a.db));
+  h('db:sequences', (a) => dbm.get(a.connId).listSequences(a.db, a.schema));
+  h('db:users', (a) => dbm.get(a.connId).listUsers());
+  h('db:objectDdl', (a) => dbm.get(a.connId).objectDdl(a.db, a.schema, a.kind, a.name, a.extra));
+
   // ---- 保存的查询 ----
   const queries = require('./queries');
   h('queries:list', (a) => queries.list(a.connId));

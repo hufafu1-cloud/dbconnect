@@ -42,6 +42,10 @@ async function buildSampleDb() {
     CREATE VIEW v_order_summary AS
       SELECT c.name, COUNT(o.id) AS order_count, SUM(o.amount) AS total_amount
       FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.id;
+    CREATE TRIGGER trg_order_time AFTER INSERT ON orders
+    BEGIN
+      UPDATE orders SET created_at = COALESCE(created_at, datetime('now')) WHERE id = NEW.id;
+    END;
   `;
   for (let i = 0; i < 20; i++) {
     sql += `INSERT INTO customers (name, email, city, created_at) VALUES ('${names[i]}', 'user${i + 1}@example.com', '${cities[i % cities.length]}', '2025-0${(i % 9) + 1}-1${i % 10} 10:2${i % 10}:00');\n`;
@@ -91,6 +95,14 @@ async function runDemo(createWindow) {
   await wait(600);
   await ej(`window.__test.expandDatabase(${id}, 'main')`);
   await wait(800);
+  // 展开“触发器”对象文件夹
+  await ej(`(() => {
+    const rows = [...document.querySelectorAll('#tree .tree-row')];
+    const r = rows.find((x) => x.querySelector('.tree-label') && x.querySelector('.tree-label').textContent === '触发器');
+    if (r) r.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    return !!r;
+  })()`);
+  await wait(600);
   await shot('shot-1-objects.png');
 
   await ej(`window.__test.openTable(${id}, 'main', null, 'orders')`);

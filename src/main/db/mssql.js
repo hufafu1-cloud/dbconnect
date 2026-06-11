@@ -89,6 +89,93 @@ class MSSQLAdapter extends BaseAdapter {
     });
   }
 
+  // ---------- 对象覆盖：存储过程 / 函数 / 触发器 / 序列 / 登录 ----------
+  get objectCaps() {
+    return { routines: true, triggers: true, events: false, sequences: true, users: true };
+  }
+
+  async listRoutines(db) {
+    const rows = await this._q(db,
+      `SELECT s.name AS sch, o.name AS name, o.type AS t FROM sys.objects o
+       JOIN sys.schemas s ON s.schema_id = o.schema_id
+       WHERE o.type IN ('P', 'FN', 'IF', 'TF') ORDER BY o.name`);
+    return rows.map((r) => ({
+      name: r.name,
+      schema: r.sch,
+      type: String(r.t).trim() === 'P' ? 'PROCEDURE' : 'FUNCTION',
+      comment: '',
+    }));
+  }
+
+  async listTriggers(db) {
+    const rows = await this._q(db,
+      `SELECT tr.name AS name, OBJECT_NAME(tr.parent_id) AS tbl,
+              OBJECT_SCHEMA_NAME(tr.object_id) AS sch
+       FROM sys.triggers tr WHERE tr.is_ms_shipped = 0 AND tr.parent_class = 1 ORDER BY tr.name`);
+    return rows.map((r) => ({ name: r.name, table: r.tbl, schema: r.sch }));
+  }
+
+  async listSequences(db) {
+    try {
+      const rows = await this._q(db,
+        `SELECT s.name AS sch, sq.name AS name FROM sys.sequences sq
+         JOIN sys.schemas s ON s.schema_id = sq.schema_id ORDER BY sq.name`);
+      return rows.map((r) => ({ name: r.name, schema: r.sch }));
+    } catch (e) { return []; }
+  }
+
+  async listUsers() {
+    try {
+      const rows = await this._q(null,
+        `SELECT name, type_desc, is_disabled FROM sys.server_principals
+         WHERE type IN ('S', 'U', 'G') AND name NOT LIKE '##%' ORDER BY name`);
+      return rows.map((r) => ({ name: r.name, note: [r.type_desc, r.is_disabled ? '已禁用' : ''].filter(Boolean).join(' · ') }));
+    } catch (e) { return []; }
+  }
+
+  async objectDdl(db, schema, kind, name) {
+    const sch = schema || 'dbo';
+    if (kind === 'PROCEDURE' || kind === 'FUNCTION' || kind === 'TRIGGER') {
+      const rows = await this._q(db,
+        `SELECT OBJECT_DEFINITION(OBJECT_ID(${this.literal(sch + '.' + name)})) AS def`);
+      const def = rows[0] && rows[0].def;
+      return def || '-- 无法获取定义（可能已加密或缺少权限）';
+    }
+    if (kind === 'SEQUENCE') {
+      const rows = await this._q(db,
+        `SELECT start_value, increment, minimum_value, maximum_value, current_value, is_cycling
+         FROM sys.sequences WHERE name = ${this.literal(name)} AND schema_id = SCHEMA_ID(${this.literal(sch)})`);
+      if (!rows.length) throw new Error('序列不存在');
+      const s = rows[0];
+      return `CREATE SEQUENCE ${this.quoteIdent(sch)}.${this.quoteIdent(name)}\n` +
+        `  START WITH ${s.start_value}\n  INCREMENT BY ${s.increment}\n` +
+        `  MINVALUE ${s.minimum_value}\n  MAXVALUE ${s.maximum_value}${s.is_cycling ? '\n  CYCLE' : ''};\n` +
+        `-- 当前值: ${s.current_value}`;
+    }
+    if (kind === 'USER') {
+      const rows = await this._q(null,
+        `SELECT p.name, p.type_desc, p.is_disabled, p.create_date,
+                STUFF((SELECT ', ' + r.name FROM sys.server_role_members rm
+                       JOIN sys.server_principals r ON r.principal_id = rm.role_principal_id
+                       WHERE rm.member_principal_id = p.principal_id FOR XML PATH('')), 1, 2, '') AS roles
+         FROM sys.server_principals p WHERE p.name = ${this.literal(name)}`);
+      if (!rows.length) throw new Error('登录不存在');
+      const r = rows[0];
+      return [
+        `-- 登录 ${r.name}`,
+        `类型: ${r.type_desc}`,
+        `状态: ${r.is_disabled ? '已禁用' : '启用'}`,
+        `服务器角色: ${r.roles || '(无)'}`,
+        `创建时间: ${r.create_date}`,
+      ].join('\n');
+    }
+    throw new Error('不支持的对象类型: ' + kind);
+  }
+
+  dropUserSql(name) {
+    return `DROP LOGIN ${this.quoteIdent(name)}`;
+  }
+
   async listAllColumns(db) {
     const rows = await this._q(db,
       `SELECT TABLE_SCHEMA AS s, TABLE_NAME AS t, COLUMN_NAME AS c

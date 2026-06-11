@@ -103,6 +103,24 @@ class SQLiteAdapter extends BaseAdapter {
     return { tables, views: v.rows.map((r) => ({ name: r[0] })) };
   }
 
+  get objectCaps() {
+    return { routines: false, triggers: true, events: false, sequences: false, users: false };
+  }
+
+  async listTriggers() {
+    const r = this._execRaw("SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
+    return r.rows.map(([name, tbl]) => ({ name, table: tbl }));
+  }
+
+  async objectDdl(_db, _schema, kind, name) {
+    if (kind === 'TRIGGER') {
+      const r = this._execRaw(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ${this.literal(name)}`);
+      if (!r.rows.length) throw new Error('触发器不存在');
+      return (r.rows[0][0] || '') + ';';
+    }
+    throw new Error('不支持的对象类型: ' + kind);
+  }
+
   async listAllColumns() {
     const t = this._execRaw("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name");
     const map = {};

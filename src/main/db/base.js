@@ -25,6 +25,22 @@ class BaseAdapter {
   /** 整库列清单 {表名: [列名...]}，供编辑器补全；默认空 */
   async listAllColumns(_db, _schema) { return {}; }
 
+  /** 各类对象的支持情况（树上据此决定显示哪些节点） */
+  get objectCaps() {
+    return { routines: false, triggers: false, events: false, sequences: false, users: false };
+  }
+
+  async listRoutines(_db, _schema) { return []; }   // [{name, type:'PROCEDURE'|'FUNCTION', comment?, extra?}]
+  async listTriggers(_db, _schema) { return []; }   // [{name, table, timing?, event?}]
+  async listEvents(_db) { return []; }              // [{name, status?, schedule?}]
+  async listSequences(_db, _schema) { return []; }  // [{name}]
+  async listUsers() { return []; }                  // [{name, host?, note?}]
+
+  /** 查看对象定义（kind: PROCEDURE/FUNCTION/TRIGGER/EVENT/SEQUENCE/USER） */
+  async objectDdl(_db, _schema, _kind, _name, _extra) {
+    throw new Error('该数据库不支持查看此对象的定义');
+  }
+
   /** 取消正在执行的查询；默认不支持 */
   async cancel() { throw new Error('该数据库类型不支持取消查询'); }
 
@@ -56,7 +72,15 @@ class BaseAdapter {
   /** 执行 SQL 脚本（多语句），返回每条语句的结果 */
   async runScript(db, sql, opts) {
     const maxRows = (opts && opts.maxRows) || 2000;
-    const stmts = splitSql(sql, this.dialect);
+    // 存储过程/触发器等过程体内含分号：整段作为单条语句执行（MySQL 系 / Oracle 方言）
+    const ROUTINE_START = {
+      mysql: /^\s*CREATE\s+(DEFINER\s*=\s*\S+\s+)?(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i,
+      oracle: /^\s*(CREATE\s+(OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION|TRIGGER|PACKAGE)\b|DECLARE\b|BEGIN\b)/i,
+    };
+    const re = ROUTINE_START[this.dialect];
+    const stmts = re && re.test(sql)
+      ? [sql.trim().replace(/;\s*$/, '')]
+      : splitSql(sql, this.dialect);
     if (!stmts.length) return [];
     const out = [];
     await this.withSession(db, async (run) => {
@@ -214,6 +238,12 @@ class BaseAdapter {
       case 'rename': return this.exec(db, this.renameSql(db, a.schema, a.table, a.newName));
       case 'dropDatabase': return this.exec(null, `DROP DATABASE ${this.quoteIdent(a.db)}`);
       case 'createDatabase': return this.exec(null, `CREATE DATABASE ${this.quoteIdent(a.newName)}`);
+      case 'dropRoutine':
+        return this.exec(db, `DROP ${a.routineType === 'PROCEDURE' ? 'PROCEDURE' : 'FUNCTION'} ${this.qualify(db, a.schema, a.name)}`);
+      case 'dropTrigger': return this.exec(db, this.dropTriggerSql(db, a.schema, a.name, a.table));
+      case 'dropEvent': return this.exec(db, `DROP EVENT ${this.qualify(db, a.schema, a.name)}`);
+      case 'dropSequence': return this.exec(db, `DROP SEQUENCE ${this.qualify(db, a.schema, a.name)}`);
+      case 'dropUser': return this.exec(null, this.dropUserSql(a.name, a.host));
       default: throw new Error('未知操作: ' + a.action);
     }
   }
@@ -221,6 +251,14 @@ class BaseAdapter {
   truncateSql(T) { return `TRUNCATE TABLE ${T}`; }
 
   dropViewSql(T) { return `DROP VIEW ${T}`; }
+
+  dropTriggerSql(db, schema, name, _table) {
+    return `DROP TRIGGER ${this.qualify(db, schema, name)}`;
+  }
+
+  dropUserSql(name, _host) {
+    return `DROP USER ${this.quoteIdent(name)}`;
+  }
 
   renameSql(db, schema, table, newName) {
     return `ALTER TABLE ${this.qualify(db, schema, table)} RENAME TO ${this.quoteIdent(newName)}`;

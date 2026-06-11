@@ -67,6 +67,107 @@ class PostgresAdapter extends BaseAdapter {
     }
   }
 
+  // ---------- 对象覆盖：函数 / 触发器 / 序列 / 角色 ----------
+  get objectCaps() {
+    return { routines: true, triggers: true, events: false, sequences: true, users: true };
+  }
+
+  async listRoutines(db, schema) {
+    const rows = await this._q(db,
+      `SELECT p.proname AS name,
+              CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS type,
+              pg_get_function_identity_arguments(p.oid) AS args,
+              obj_description(p.oid, 'pg_proc') AS comment
+       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = $1 AND p.prokind IN ('f', 'p')
+       ORDER BY p.proname`, [schema || 'public']);
+    return rows.map((r) => ({ name: r.name, type: r.type, comment: r.comment || '', extra: r.args || '' }));
+  }
+
+  async listTriggers(db, schema) {
+    const rows = await this._q(db,
+      `SELECT t.tgname AS name, c.relname AS tbl FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = $1 AND NOT t.tgisinternal ORDER BY t.tgname`, [schema || 'public']);
+    return rows.map((r) => ({ name: r.name, table: r.tbl }));
+  }
+
+  async listSequences(db, schema) {
+    const rows = await this._q(db,
+      `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE c.relkind = 'S' AND n.nspname = $1 ORDER BY c.relname`, [schema || 'public']);
+    return rows.map((r) => ({ name: r.name }));
+  }
+
+  async listUsers() {
+    const rows = await this._q(null,
+      `SELECT rolname AS name, rolsuper, rolcanlogin FROM pg_roles
+       WHERE rolname NOT LIKE 'pg\\_%' ORDER BY rolname`);
+    return rows.map((r) => ({
+      name: r.name,
+      note: [r.rolsuper ? '超级用户' : '', r.rolcanlogin ? '' : '不可登录'].filter(Boolean).join(' · '),
+    }));
+  }
+
+  async objectDdl(db, schema, kind, name, extra) {
+    const sch = schema || 'public';
+    if (kind === 'PROCEDURE' || kind === 'FUNCTION') {
+      const rows = await this._q(db,
+        `SELECT pg_get_functiondef(p.oid) AS def FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = $1 AND p.proname = $2
+           AND pg_get_function_identity_arguments(p.oid) = $3`, [sch, name, extra || '']);
+      if (!rows.length) throw new Error('函数不存在');
+      return rows[0].def;
+    }
+    if (kind === 'TRIGGER') {
+      const rows = await this._q(db,
+        `SELECT pg_get_triggerdef(t.oid) AS def FROM pg_trigger t
+         JOIN pg_class c ON c.oid = t.tgrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND t.tgname = $2 AND NOT t.tgisinternal`, [sch, name]);
+      if (!rows.length) throw new Error('触发器不存在');
+      return rows.map((r) => r.def + ';').join('\n');
+    }
+    if (kind === 'SEQUENCE') {
+      const rows = await this._q(db,
+        `SELECT * FROM pg_sequences WHERE schemaname = $1 AND sequencename = $2`, [sch, name]);
+      if (!rows.length) throw new Error('序列不存在');
+      const s = rows[0];
+      return `CREATE SEQUENCE ${this.quoteIdent(sch)}.${this.quoteIdent(name)}\n` +
+        `  INCREMENT BY ${s.increment_by}\n  MINVALUE ${s.min_value}\n  MAXVALUE ${s.max_value}\n` +
+        `  START WITH ${s.start_value}\n  CACHE ${s.cache_size}${s.cycle ? '\n  CYCLE' : ''};\n` +
+        `-- 当前值: ${s.last_value === null ? '(未使用)' : s.last_value}`;
+    }
+    if (kind === 'USER') {
+      const rows = await this._q(null,
+        `SELECT r.*, ARRAY(SELECT b.rolname FROM pg_auth_members m
+                JOIN pg_roles b ON b.oid = m.roleid WHERE m.member = r.oid) AS member_of
+         FROM pg_roles r WHERE r.rolname = $1`, [name]);
+      if (!rows.length) throw new Error('角色不存在');
+      const r = rows[0];
+      return [
+        `-- 角色 ${r.rolname} 的属性`,
+        `超级用户: ${r.rolsuper ? '是' : '否'}`,
+        `可登录: ${r.rolcanlogin ? '是' : '否'}`,
+        `可建库: ${r.rolcreatedb ? '是' : '否'}`,
+        `可建角色: ${r.rolcreaterole ? '是' : '否'}`,
+        `连接数限制: ${r.rolconnlimit === -1 ? '无限制' : r.rolconnlimit}`,
+        `所属角色: ${(r.member_of || []).join(', ') || '(无)'}`,
+      ].join('\n');
+    }
+    throw new Error('不支持的对象类型: ' + kind);
+  }
+
+  dropTriggerSql(db, schema, name, table) {
+    return `DROP TRIGGER ${this.quoteIdent(name)} ON ${this.qualify(db, schema, table)}`;
+  }
+
+  dropUserSql(name) {
+    return `DROP ROLE ${this.quoteIdent(name)}`;
+  }
+
   async listAllColumns(db, schema) {
     const rows = await this._q(db,
       `SELECT table_name AS t, column_name AS c FROM information_schema.columns

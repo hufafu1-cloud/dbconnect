@@ -111,6 +111,8 @@ function renderConnNode(conn) {
       loading.remove();
       for (const db of dbs) children.append(renderDbNode(conn, db));
       children.append(renderQueriesFolder(conn));
+      const caps = await getObjectCaps(conn.id);
+      if (caps.users) children.append(renderUsersFolder(conn));
       loaded = true;
     } catch (err) {
       loading.textContent = '加载失败: ' + err.message;
@@ -204,8 +206,9 @@ function renderDbNode(conn, db) {
         for (const sch of schemas) children.append(renderSchemaNode(conn, db, sch));
       } else {
         const objs = await fetchObjects(conn.id, db, null);
+        const caps = await getObjectCaps(conn.id);
         loading.remove();
-        children.append(renderFolders(conn, db, null, objs, 2));
+        children.append(renderFolders(conn, db, null, objs, 2, caps));
       }
       loaded = true;
     } catch (err) {
@@ -264,8 +267,9 @@ function renderSchemaNode(conn, db, schema) {
     children.append(loading);
     try {
       const objs = await fetchObjects(conn.id, db, schema);
+      const caps = await getObjectCaps(conn.id);
       loading.remove();
-      children.append(renderFolders(conn, db, schema, objs, 3));
+      children.append(renderFolders(conn, db, schema, objs, 3, caps));
       loaded = true;
     } catch (err) {
       loading.textContent = '加载失败: ' + err.message;
@@ -379,6 +383,95 @@ function renderQueryLeaf(conn, q, defaultTarget) {
   return el('div', { class: 'tree-node', 'data-leaf-node': '1' }, row);
 }
 
+// ---------------- 用户（连接级） ----------------
+function renderUsersFolder(conn) {
+  const container = el('div', { class: 'tree-node' });
+  const children = makeBranch();
+  let loaded = false;
+
+  const { row, tw } = nodeRow({
+    depth: 1,
+    icon: 'user',
+    label: '用户',
+    twisty: true,
+    onToggle: () => toggle(),
+    onDblClick: () => toggle(),
+    onMenu: (e) => {
+      showMenu(e.clientX, e.clientY, [
+        { label: '刷新', icon: 'refresh', onClick: reload },
+      ]);
+    },
+  });
+
+  async function toggle() {
+    const opened = children.classList.contains('open');
+    if (!opened && !loaded) await load();
+    setOpen(tw, children, !opened);
+  }
+
+  async function load() {
+    children.innerHTML = '';
+    const loading = el('div', { class: 'tree-loading', style: { paddingLeft: '54px' } }, '加载中…');
+    children.append(loading);
+    try {
+      const users = await window.api.db.users(conn.id);
+      loading.remove();
+      for (const u of users) {
+        const label = u.host ? `${u.name}@${u.host}` : u.name;
+        const openDef = async () => {
+          const { openDefTab } = await import('./defTab.js');
+          openDefTab({ connId: conn.id, db: null, kind: 'USER', name: u.name, extra: u.host });
+        };
+        const { row: r } = nodeRow({
+          depth: 2,
+          icon: 'user',
+          label,
+          meta: u.note || '',
+          twisty: false,
+          onDblClick: openDef,
+          onMenu: (e) => {
+            showMenu(e.clientX, e.clientY, [
+              { label: '查看权限 / 定义', icon: 'struct', onClick: openDef },
+              { label: '复制名称', icon: 'copy', onClick: () => navigator.clipboard.writeText(label) },
+              { sep: true },
+              { label: '删除用户', icon: 'trash', danger: true, onClick: async () => {
+                const ok = await confirmDialog('删除用户', `确定删除用户 “${label}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' });
+                if (!ok) return;
+                try {
+                  await window.api.db.action(conn.id, { action: 'dropUser', name: u.name, host: u.host });
+                  toast.success(`用户 ${label} 已删除`);
+                  reload();
+                } catch (err) { toast.error(err.message); }
+              } },
+            ]);
+          },
+        });
+        r.dataset.leaf = label.toLowerCase();
+        children.append(el('div', { class: 'tree-node', 'data-leaf-node': '1' }, r));
+      }
+      if (!users.length) {
+        children.append(el('div', { class: 'tree-loading', style: { paddingLeft: '54px' } }, '（无权限查看或无用户）'));
+      }
+      const old = row.querySelector('.tree-meta');
+      if (old) old.remove();
+      row.append(el('span', { class: 'tree-meta' }, String(users.length)));
+      loaded = true;
+    } catch (err) {
+      loading.textContent = '加载失败: ' + err.message;
+    }
+  }
+
+  async function reload() {
+    loaded = false;
+    children.innerHTML = '';
+    await load();
+    setOpen(tw, children, true);
+  }
+
+  container.append(row, children);
+  return container;
+}
+
 // ---------------- 表/视图 文件夹与叶子 ----------------
 async function fetchObjects(connId, db, schema, force) {
   const oc = state.open.get(connId);
@@ -389,11 +482,154 @@ async function fetchObjects(connId, db, schema, force) {
   return objs;
 }
 
-function renderFolders(conn, db, schema, objs, depth) {
+async function getObjectCaps(connId) {
+  const oc = state.open.get(connId);
+  if (!oc) return {};
+  if (!oc.objectCaps) {
+    try { oc.objectCaps = await window.api.db.objectCaps(connId); } catch (e) { oc.objectCaps = {}; }
+  }
+  return oc.objectCaps;
+}
+
+function renderFolders(conn, db, schema, objs, depth, caps) {
   const frag = document.createDocumentFragment();
   frag.append(renderFolder(conn, db, schema, '表', 'folder', objs.tables, depth, false));
   frag.append(renderFolder(conn, db, schema, '视图', 'folder', objs.views, depth, true));
+  caps = caps || {};
+  if (caps.routines) frag.append(renderObjFolder(conn, db, schema, depth, OBJ_KINDS.routine));
+  if (caps.triggers) frag.append(renderObjFolder(conn, db, schema, depth, OBJ_KINDS.trigger));
+  if (caps.events && !schema) frag.append(renderObjFolder(conn, db, schema, depth, OBJ_KINDS.event));
+  if (caps.sequences) frag.append(renderObjFolder(conn, db, schema, depth, OBJ_KINDS.sequence));
   return frag;
+}
+
+// ---------------- 扩展对象文件夹（函数/触发器/事件/序列） ----------------
+const OBJ_KINDS = {
+  routine: {
+    key: 'routine', title: '函数', icon: 'func', tplKind: 'routine',
+    load: (c, db, sch) => window.api.db.routines(c, db, sch),
+    leafKind: (it) => it.type === 'PROCEDURE' ? 'PROCEDURE' : 'FUNCTION',
+    meta: (it) => it.type === 'PROCEDURE' ? '过程' : '函数',
+    dropAction: (it) => ({ action: 'dropRoutine', routineType: it.type, name: it.name }),
+  },
+  trigger: {
+    key: 'trigger', title: '触发器', icon: 'trigger', tplKind: 'trigger',
+    load: (c, db, sch) => window.api.db.triggers(c, db, sch),
+    leafKind: () => 'TRIGGER',
+    meta: (it) => it.table || '',
+    dropAction: (it) => ({ action: 'dropTrigger', name: it.name, table: it.table }),
+  },
+  event: {
+    key: 'event', title: '事件', icon: 'eventIcon', tplKind: 'event',
+    load: (c, db) => window.api.db.events(c, db),
+    leafKind: () => 'EVENT',
+    meta: (it) => it.schedule || it.status || '',
+    dropAction: (it) => ({ action: 'dropEvent', name: it.name }),
+  },
+  sequence: {
+    key: 'sequence', title: '序列', icon: 'sequence', tplKind: 'sequence',
+    load: (c, db, sch) => window.api.db.sequences(c, db, sch),
+    leafKind: () => 'SEQUENCE',
+    meta: () => '',
+    dropAction: (it) => ({ action: 'dropSequence', name: it.name }),
+  },
+};
+
+function renderObjFolder(conn, db, schema, depth, kindDef) {
+  const container = el('div', { class: 'tree-node' });
+  const children = makeBranch();
+  let loaded = false;
+  const metaEl = { current: null };
+
+  const { row, tw } = nodeRow({
+    depth,
+    icon: kindDef.icon,
+    label: kindDef.title,
+    twisty: true,
+    onToggle: () => toggle(),
+    onDblClick: () => toggle(),
+    onMenu: (e) => {
+      showMenu(e.clientX, e.clientY, [
+        kindDef.tplKind && { label: `新建${kindDef.title}（模板）`, icon: 'plus', onClick: async () => {
+          const { objTemplate } = await import('./objTemplates.js');
+          const tpl = objTemplate(conn.type, kindDef.tplKind);
+          actions.newQuery({ connId: conn.id, db, schema }, tpl || `-- 该数据库暂无${kindDef.title}模板`);
+        } },
+        { label: '刷新', icon: 'refresh', onClick: reload },
+      ].filter(Boolean));
+    },
+  });
+
+  async function toggle() {
+    const opened = children.classList.contains('open');
+    if (!opened && !loaded) await load();
+    setOpen(tw, children, !opened);
+  }
+
+  async function load() {
+    children.innerHTML = '';
+    const loading = el('div', { class: 'tree-loading', style: { paddingLeft: depth * 16 + 38 + 'px' } }, '加载中…');
+    children.append(loading);
+    try {
+      const items = await kindDef.load(conn.id, db, schema);
+      loading.remove();
+      for (const it of items) children.append(renderObjLeaf(conn, db, schema, depth + 1, kindDef, it, reload));
+      if (!items.length) {
+        children.append(el('div', { class: 'tree-loading', style: { paddingLeft: depth * 16 + 38 + 'px' } }, `（无${kindDef.title}）`));
+      }
+      // 更新数量
+      const old = row.querySelector('.tree-meta');
+      if (old) old.remove();
+      row.append(el('span', { class: 'tree-meta' }, String(items.length)));
+      loaded = true;
+    } catch (err) {
+      loading.textContent = '加载失败: ' + err.message;
+    }
+  }
+
+  async function reload() {
+    loaded = false;
+    children.innerHTML = '';
+    await load();
+    setOpen(tw, children, true);
+  }
+
+  container.append(row, children);
+  return container;
+}
+
+function renderObjLeaf(conn, db, schema, depth, kindDef, it, reloadFolder) {
+  const kind = kindDef.leafKind(it);
+  const openDef = async () => {
+    const { openDefTab } = await import('./defTab.js');
+    openDefTab({ connId: conn.id, db, schema: it.schema || schema, kind, name: it.name, extra: it.extra });
+  };
+  const { row } = nodeRow({
+    depth,
+    icon: kindDef.icon,
+    label: it.name,
+    meta: kindDef.meta(it),
+    twisty: false,
+    onDblClick: openDef,
+    onMenu: (e) => {
+      showMenu(e.clientX, e.clientY, [
+        { label: '查看定义', icon: 'struct', onClick: openDef },
+        { label: '复制名称', icon: 'copy', onClick: () => navigator.clipboard.writeText(it.name) },
+        { sep: true },
+        { label: `删除${kindDef.title}`, icon: 'trash', danger: true, onClick: async () => {
+          const ok = await confirmDialog(`删除${kindDef.title}`, `确定删除 “${it.name}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' });
+          if (!ok) return;
+          try {
+            await window.api.db.action(conn.id, { db, schema: it.schema || schema, ...kindDef.dropAction(it) });
+            toast.success(`${kindDef.title} ${it.name} 已删除`);
+            reloadFolder();
+          } catch (err) { toast.error(err.message); }
+        } },
+      ]);
+    },
+  });
+  row.dataset.leaf = it.name.toLowerCase();
+  return el('div', { class: 'tree-node', 'data-leaf-node': '1' }, row);
 }
 
 function renderFolder(conn, db, schema, title, icon, items, depth, isView) {

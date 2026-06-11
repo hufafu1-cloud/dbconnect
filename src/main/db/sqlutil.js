@@ -5,6 +5,10 @@
  * 处理：单引号/双引号字符串、MySQL 反引号、MySQL 反斜杠转义、MSSQL [] 标识符、
  * PostgreSQL $tag$ 美元引用、行注释(-- 与 MySQL #)、块注释。
  */
+// 过程体（BEGIN…END）感知：命中后只在语句以 END 结尾时才允许按分号拆分
+const ROUTINE_BODY_RE = /\bCREATE\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+\s+)?(TEMP(ORARY)?\s+)?(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i;
+const BODY_END_RE = /\bEND\s*$/i;
+
 function splitSql(sql, dialect) {
   const out = [];
   let cur = '';
@@ -13,6 +17,8 @@ function splitSql(sql, dialect) {
   const isMysql = dialect === 'mysql';
   const isPg = dialect === 'postgres';
   const isMs = dialect === 'mssql';
+  // MySQL 与 SQLite 的过程/触发器体内含分号，需特殊处理（pg 用 $$ 引用天然安全）
+  const bodyAware = isMysql || dialect === 'sqlite';
   // MySQL 与 ClickHouse：反引号标识符 + 字符串内反斜杠转义
   const backtickStyle = isMysql || dialect === 'clickhouse';
 
@@ -81,6 +87,11 @@ function splitSql(sql, dialect) {
       }
     }
     if (ch === ';') {
+      if (bodyAware && ROUTINE_BODY_RE.test(cur) && !BODY_END_RE.test(cur.trimEnd())) {
+        cur += ch; // 仍在过程体内，分号属于语句体
+        i++;
+        continue;
+      }
       if (cur.trim()) out.push(cur.trim());
       cur = '';
       i++;

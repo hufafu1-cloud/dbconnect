@@ -80,6 +80,66 @@ class MySQLAdapter extends BaseAdapter {
     return map;
   }
 
+  // ---------- 对象覆盖：函数 / 触发器 / 事件 / 用户 ----------
+  get objectCaps() {
+    return { routines: true, triggers: true, events: true, sequences: false, users: true };
+  }
+
+  async listRoutines(db) {
+    try {
+      const rows = await this._q(
+        `SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS type, ROUTINE_COMMENT AS comment
+         FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ${this.literal(db)}
+         ORDER BY ROUTINE_NAME`);
+      return rows.map((r) => ({ name: r.name, type: r.type, comment: r.comment || '' }));
+    } catch (e) { return []; }
+  }
+
+  async listTriggers(db) {
+    try {
+      const rows = await this._q(`SHOW TRIGGERS FROM ${this.quoteIdent(db)}`);
+      return rows.map((r) => ({ name: r.Trigger, table: r.Table, timing: r.Timing, event: r.Event }));
+    } catch (e) { return []; }
+  }
+
+  async listEvents(db) {
+    try {
+      const rows = await this._q(`SHOW EVENTS FROM ${this.quoteIdent(db)}`);
+      return rows.map((r) => ({ name: r.Name, status: r.Status || '', schedule: r['Interval value'] ? `每 ${r['Interval value']} ${r['Interval field']}` : (r['Execute at'] || '') }));
+    } catch (e) { return []; }
+  }
+
+  async listUsers() {
+    try {
+      const rows = await this._q('SELECT User AS name, Host AS host FROM mysql.user ORDER BY User, Host');
+      return rows.map((r) => ({ name: r.name, host: r.host }));
+    } catch (e) { return []; }
+  }
+
+  async objectDdl(db, _schema, kind, name, extra) {
+    const T = this.qualify(db, null, name);
+    const pick = async (stmt, col) => {
+      const rows = await this._q(stmt);
+      const v = rows[0] && (rows[0][col] !== undefined ? rows[0][col] : Object.values(rows[0])[2]);
+      return v || `-- 无法获取定义（可能缺少权限）`;
+    };
+    switch (kind) {
+      case 'PROCEDURE': return pick(`SHOW CREATE PROCEDURE ${T}`, 'Create Procedure');
+      case 'FUNCTION': return pick(`SHOW CREATE FUNCTION ${T}`, 'Create Function');
+      case 'TRIGGER': return pick(`SHOW CREATE TRIGGER ${T}`, 'SQL Original Statement');
+      case 'EVENT': return pick(`SHOW CREATE EVENT ${T}`, 'Create Event');
+      case 'USER': {
+        const rows = await this._q(`SHOW GRANTS FOR ${this.literal(name)}@${this.literal(extra || '%')}`);
+        return rows.map((r) => Object.values(r)[0] + ';').join('\n');
+      }
+      default: throw new Error('不支持的对象类型: ' + kind);
+    }
+  }
+
+  dropUserSql(name, host) {
+    return `DROP USER ${this.literal(name)}@${this.literal(host || '%')}`;
+  }
+
   async _run(conn, sql) {
     const [rows, fields] = await conn.query({ sql, rowsAsArray: true });
     // CALL 存储过程等可能返回多结果集：fields 为二维数组

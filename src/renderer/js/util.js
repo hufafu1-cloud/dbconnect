@@ -111,6 +111,15 @@ export const icons = {
   history: svg(`<path d="M8 1.8a6.2 6.2 0 1 1-5.9 4.3" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" fill="none"/>
     <path d="M2 2.4v3.7h3.7" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
     <path d="M8 4.8V8l2.6 1.6" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`),
+  func: svg(`<path d="M10.5 2.2c-1.6 0-2.2.9-2.4 2.3L7.2 11c-.2 1.5-.9 2.7-2.6 2.7" stroke="#7c5cd6" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+    <path d="M4.6 6h5M9.6 9.6l3.4 3.4M13 9.6l-3.4 3.4" stroke="#7c5cd6" stroke-width="1.4" stroke-linecap="round"/>`),
+  trigger: svg(`<path d="M8.8 1.6L3.6 9h3.2l-1 5.4L11.4 7H8.2l.6-5.4z" fill="#d97706"/>`),
+  eventIcon: svg(`<circle cx="8" cy="8.6" r="5.2" stroke="#1a9e57" stroke-width="1.4" fill="none"/>
+    <path d="M8 5.8v2.8l2 1.3M5.2 1.8L2.6 3.8M10.8 1.8l2.6 2" stroke="#1a9e57" stroke-width="1.4" stroke-linecap="round" fill="none"/>`),
+  sequence: svg(`<path d="M2.4 4.6l1.6-1v4.6M7 4.4c0-.7.6-1.2 1.3-1.2s1.3.5 1.3 1.2c0 1.4-2.6 2.3-2.6 3.8h2.8" stroke="#0f80cc" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M2.5 11h11M11 8.6l2.6 2.4L11 13.4" stroke="#0f80cc" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`),
+  user: svg(`<circle cx="8" cy="5.2" r="2.8" stroke="#5b6470" stroke-width="1.4" fill="none"/>
+    <path d="M2.8 13.6c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4" stroke="#5b6470" stroke-width="1.4" stroke-linecap="round" fill="none"/>`),
   format: svg(`<path d="M2.5 3h11M2.5 6.2h7M5.5 9.4h8M5.5 12.6h5" stroke="#7c5cd6" stroke-width="1.6" stroke-linecap="round"/>`),
 };
 

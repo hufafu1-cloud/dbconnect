@@ -6,6 +6,11 @@
 const { MySQLAdapter } = require('./mysql');
 
 class OceanBaseAdapter extends MySQLAdapter {
+  /** OB MySQL 模式不支持事件调度器 */
+  get objectCaps() {
+    return { ...super.objectCaps, events: false };
+  }
+
   async connect() {
     if (!this.cfg.port) this.cfg.port = 2881;
     await super.connect();
