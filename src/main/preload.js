@@ -1,0 +1,74 @@
+// 预加载脚本：以最小面暴露 IPC API
+const { contextBridge, ipcRenderer } = require('electron');
+
+const inv = (channel, ...args) =>
+  ipcRenderer.invoke(channel, ...args).then((r) => {
+    if (r && r.ok) return r.data;
+    throw new Error((r && r.error) || '未知错误');
+  });
+
+contextBridge.exposeInMainWorld('api', {
+  conn: {
+    list: () => inv('conn:list'),
+    save: (c) => inv('conn:save', c),
+    remove: (id) => inv('conn:delete', id),
+    test: (cfg) => inv('conn:test', cfg),
+  },
+  db: {
+    open: (connId) => inv('db:open', connId),
+    close: (connId) => inv('db:close', connId),
+    databases: (connId) => inv('db:databases', connId),
+    schemas: (connId, db) => inv('db:schemas', { connId, db }),
+    objects: (connId, db, schema) => inv('db:objects', { connId, db, schema }),
+    tableInfo: (connId, t) => inv('db:tableInfo', { connId, ...t }),
+    tableData: (connId, t) => inv('db:tableData', { connId, ...t }),
+    query: (connId, t) => inv('db:query', { connId, ...t }),
+    applyEdits: (connId, t) => inv('db:applyEdits', { connId, ...t }),
+    action: (connId, t) => inv('db:action', { connId, ...t }),
+    exportTable: (connId, t) => inv('db:exportTable', { connId, ...t }),
+    exportRows: (connId, t) => inv('db:exportRows', { connId, ...t }),
+    cancel: (connId) => inv('db:cancel', { connId }),
+    allColumns: (connId, db, schema) => inv('db:allColumns', { connId, db, schema }),
+  },
+  queries: {
+    list: (connId) => inv('queries:list', { connId }),
+    save: (q) => inv('queries:save', q),
+    rename: (id, name) => inv('queries:rename', { id, name }),
+    remove: (id) => inv('queries:delete', { id }),
+  },
+  design: {
+    meta: (connId) => inv('design:meta', { connId }),
+    model: (connId, t) => inv('design:model', { connId, ...t }),
+    ddl: (connId, t) => inv('design:ddl', { connId, ...t }),
+    apply: (connId, t) => inv('design:apply', { connId, ...t }),
+  },
+  imp: {
+    parse: (opts) => inv('import:parse', opts),
+    run: (connId, t) => inv('import:run', { connId, ...t }),
+    onProgress: (cb) => {
+      const listener = (_e, p) => cb(p);
+      ipcRenderer.on('import:progress', listener);
+      return () => ipcRenderer.removeListener('import:progress', listener);
+    },
+  },
+  dlg: {
+    openFile: (opts) => inv('dlg:openFile', opts),
+    saveFile: (opts) => inv('dlg:saveFile', opts),
+  },
+  file: {
+    read: (p) => inv('file:read', p),
+    write: (p, content) => inv('file:write', p, content),
+  },
+  history: {
+    list: (opts) => inv('history:list', opts),
+    clear: () => inv('history:clear'),
+  },
+  sql: {
+    format: (opts) => inv('sql:format', opts),
+  },
+  app: {
+    info: () => inv('app:info'),
+    confirmClose: () => ipcRenderer.send('app:confirm-close'),
+    onCloseRequest: (cb) => ipcRenderer.on('app:close-request', () => cb()),
+  },
+});
