@@ -144,6 +144,10 @@ function renderConnNode(conn) {
         const { openTransferDialog } = await import('./dbaTools.js');
         openTransferDialog({ connId: c.id });
       } },
+      { label: '结构同步 / 数据同步…', icon: 'transfer', disabled: !opened, onClick: async () => {
+        const { openSyncDialog } = await import('./syncDialog.js');
+        openSyncDialog({ connId: c.id });
+      } },
       { label: '运行 SQL 文件…', icon: 'openFile', disabled: !opened, onClick: async () => {
         const { openRunSqlFileDialog } = await import('./dbaTools.js');
         openRunSqlFileDialog({ connId: c.id, db: c.type === 'sqlite' ? 'main' : (c.database || null) });
@@ -204,6 +208,10 @@ function renderDbNode(conn, db) {
         { label: '数据传输（以此为源）…', icon: 'transfer', onClick: async () => {
           const { openTransferDialog } = await import('./dbaTools.js');
           openTransferDialog({ connId: conn.id, db });
+        } },
+        { label: '同步到其它库…', icon: 'transfer', onClick: async () => {
+          const { openSyncDialog } = await import('./syncDialog.js');
+          openSyncDialog({ connId: conn.id, db });
         } },
         { label: '运行 SQL 文件…', icon: 'openFile', onClick: async () => {
           const { openRunSqlFileDialog } = await import('./dbaTools.js');

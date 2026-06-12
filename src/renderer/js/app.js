@@ -143,6 +143,11 @@ function setupTestHooks() {
       await openTransferDialog({ connId, db });
       return true;
     },
+    openSync: async (connId, db) => {
+      const { openSyncDialog } = await import('./syncDialog.js');
+      await openSyncDialog({ connId, db });
+      return true;
+    },
     openHistory: async () => {
       const { openHistoryTab } = await import('./historyTab.js');
       openHistoryTab();

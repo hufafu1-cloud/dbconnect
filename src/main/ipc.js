@@ -90,6 +90,15 @@ function register(getWin) {
   ipcMain.handle('dba:runSqlFile', dbaHandler((a, prog) =>
     transfer.runSqlFile(dbm.get(a.connId), a, prog)));
 
+  // ---- 结构同步 / 数据同步 ----
+  const sync = require('./sync');
+  ipcMain.handle('dba:structDiff', dbaHandler((a, prog) =>
+    sync.diffStructure(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog)));
+  ipcMain.handle('dba:execSqls', dbaHandler((a, prog) =>
+    sync.execMany(dbm.get(a.connId), a.db, a.sqls, prog)));
+  ipcMain.handle('dba:dataSync', dbaHandler((a, prog) =>
+    sync.syncData(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog)));
+
   // ---- 保存的查询 ----
   const queries = require('./queries');
   h('queries:list', (a) => queries.list(a.connId));

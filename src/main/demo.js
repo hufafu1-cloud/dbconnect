@@ -143,6 +143,12 @@ async function runDemo(createWindow) {
   await ej(`window.__test.openTransfer(${id}, 'main')`);
   await wait(1000);
   await shot('shot-10-transfer.png');
+  await ej('window.__test.closeMenus()');
+  await wait(300);
+
+  await ej(`window.__test.openSync(${id}, 'main')`);
+  await wait(1000);
+  await shot('shot-11-sync.png');
 
   // 勾选 SSH 隧道，验证展开后的表单
   await ej(`(() => {

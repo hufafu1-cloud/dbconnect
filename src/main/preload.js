@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('api', {
     transfer: (t) => inv('dba:transfer', t),
     dump: (connId, t) => inv('dba:dump', { connId, ...t }),
     runSqlFile: (connId, t) => inv('dba:runSqlFile', { connId, ...t }),
+    structDiff: (t) => inv('dba:structDiff', t),
+    execSqls: (connId, db, sqls) => inv('dba:execSqls', { connId, db, sqls }),
+    dataSync: (t) => inv('dba:dataSync', t),
     onProgress: (cb) => {
       const listener = (_e, p) => cb(p);
       ipcRenderer.on('dba:progress', listener);

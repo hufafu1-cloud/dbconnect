@@ -496,6 +496,74 @@ async function runSelfTest() {
   check('processes caps', my.objectCaps.processes === true && pgA.objectCaps.processes === true
     && !new SQLiteAdapter({}).objectCaps.processes);
 
+  // ---- 结构同步 / 数据同步 ----
+  const sync = require('./sync');
+  check('cmpNum 基本', sync.cmpNum(2, 10) < 0 && sync.cmpNum('10', '9') > 0 && sync.cmpNum(5, 5) === 0);
+  check('cmpNum 大整数', sync.cmpNum('9007199254740993', '9007199254740992') > 0
+    && sync.cmpNum('-100', '99') < 0);
+  check('normVal 数字归一', sync.normVal('3.50') === sync.normVal(3.5)
+    && sync.normVal('007') === sync.normVal(7)
+    && sync.normVal(null) !== sync.normVal(''));
+  check('normVal 日期归一', sync.normVal('2025-01-02T10:00:00') === sync.normVal('2025-01-02 10:00:00'));
+
+  // 结构同步端到端（SQLite 双库）
+  const fS1 = path.join(os.tmpdir(), `dbc-ss-src-${Date.now()}.db`);
+  const fS2 = path.join(os.tmpdir(), `dbc-ss-dst-${Date.now()}.db`);
+  const adS1 = new SQLiteAdapter({ id: 'x', type: 'sqlite', file: fS1 });
+  const adS2 = new SQLiteAdapter({ id: 'y', type: 'sqlite', file: fS2 });
+  await adS1.connect();
+  await adS2.connect();
+  await adS1.runScript('main', `
+    CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT, extra_col TEXT);
+    CREATE INDEX ix_t1_name ON t1(name);
+    CREATE TABLE t2 (id INTEGER PRIMARY KEY, v REAL);
+  `);
+  await adS2.runScript('main', 'CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT)');
+  const sd = await sync.diffStructure(adS1, adS2, {
+    srcDb: 'main', dstDb: 'main',
+    tables: [{ name: 't1' }, { name: 't2' }],
+  }, () => {});
+  const t1d = sd.tables.find((x) => x.table === 't1');
+  const t2d = sd.tables.find((x) => x.table === 't2');
+  check('结构比对 修改+新建', t1d.status === 'alter' && t2d.status === 'create',
+    sd.tables.map((x) => `${x.table}:${x.status}`));
+  check('结构比对 加列加索引', t1d.sqls.some((s) => s.includes('ADD COLUMN "extra_col"'))
+    && t1d.sqls.some((s) => s.includes('CREATE INDEX "ix_t1_name"')), t1d.sqls);
+  const allSyncSqls = [...t1d.sqls, ...t2d.sqls];
+  await sync.execMany(adS2, 'main', allSyncSqls, () => {});
+  const sd2 = await sync.diffStructure(adS1, adS2, {
+    srcDb: 'main', dstDb: 'main', tables: [{ name: 't1' }, { name: 't2' }],
+  }, () => {});
+  check('结构同步收敛', sd2.tables.every((x) => x.status === 'same'),
+    sd2.tables.map((x) => `${x.table}:${x.status}(${x.sqls.join('|')})`));
+
+  // 数据同步端到端（数字主键归并 + 应用）
+  await adS1.runScript('main', `
+    INSERT INTO t1 (id, name, extra_col) VALUES (1, '甲', 'a');
+    INSERT INTO t1 (id, name, extra_col) VALUES (2, '乙', 'b');
+    INSERT INTO t1 (id, name, extra_col) VALUES (3, '丙', NULL);
+  `);
+  await adS2.runScript('main', `
+    INSERT INTO t1 (id, name, extra_col) VALUES (2, '乙旧', 'b');
+    INSERT INTO t1 (id, name, extra_col) VALUES (9, '多余', NULL);
+  `);
+  const ds = await sync.syncData(adS1, adS2, {
+    srcDb: 'main', dstDb: 'main', tables: [{ name: 't1' }],
+    mode: 'apply', doInsert: true, doUpdate: true, doDelete: true, batchSize: 2,
+  }, () => {});
+  const dst1 = ds.tables[0];
+  check('数据同步计数', dst1.inserts === 2 && dst1.updates === 1 && dst1.deletes === 1 && !dst1.skipped, dst1);
+  const after1 = await adS2.exec('main', 'SELECT id, name FROM t1 ORDER BY id');
+  check('数据同步应用结果', after1.rows.length === 3 && after1.rows[1][1] === '乙'
+    && Number(after1.rows[2][0]) === 3, after1.rows);
+  // 再次同步应无差异
+  const ds2 = await sync.syncData(adS1, adS2, {
+    srcDb: 'main', dstDb: 'main', tables: [{ name: 't1' }], mode: 'count',
+  }, () => {});
+  check('数据同步收敛', ds2.tables[0].inserts === 0 && ds2.tables[0].updates === 0 && ds2.tables[0].deletes === 0, ds2.tables[0]);
+  await adS1.close(); await adS2.close();
+  for (const f of [fS1, fS2]) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
+
   console.log(`[SELFTEST] 通过 ${pass} 项, 失败 ${fail} 项`);
   return fail === 0 ? 0 : 1;
 }
