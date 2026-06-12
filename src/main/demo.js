@@ -71,6 +71,8 @@ async function runDemo(createWindow) {
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const dbFile = await buildSampleDb();
   const saved = store.save({ name: '演示连接 SQLite', type: 'sqlite', file: dbFile, color: '#e5484d', group: '演示分组' });
+  // 一个保持未打开状态的连接（验证置灰显示）
+  store.save({ name: '未打开的 MySQL', type: 'mysql', host: '10.0.0.99', port: 3306, user: 'root' });
 
   const win = createWindow(true);
   win.webContents.setBackgroundThrottling(false);

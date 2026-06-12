@@ -175,7 +175,12 @@ body {
 .tree-children { display: none; }
 .tree-children.open { display: block; }
 .tree-loading { color: var(--text-muted); font-size: 12px; padding: 3px 0; }
-.conn-closed .tree-label { color: var(--text-muted); }
+/* 打开/未打开状态区分（Navicat 式）：未打开的图标置灰、文字变淡 */
+.tree-row .tree-icon { transition: filter 0.15s, opacity 0.15s; }
+.conn-closed > .tree-row .tree-icon,
+.tree-row.dim .tree-icon { filter: grayscale(1); opacity: 0.5; }
+.conn-closed > .tree-row .tree-label { color: var(--text-muted); }
+.tree-row.dim .tree-label { color: var(--text-muted); }
 .conn-open > .tree-row .tree-label { font-weight: 600; }
 
 /* ---------- 标签页 ---------- */

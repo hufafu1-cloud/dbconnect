@@ -62,8 +62,10 @@ export const icons = {
   database: svg(`<ellipse cx="8" cy="3.8" rx="5.4" ry="2.2" fill="#3fa34d"/>
     <path d="M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8" stroke="#3fa34d" stroke-width="1.6"/>
     <path d="M2.6 8c0 1.2 2.4 2.2 5.4 2.2S13.4 9.2 13.4 8" stroke="#3fa34d" stroke-width="1.2"/>`),
-  schema: svg(`<rect x="2" y="2.5" width="12" height="11" rx="1.6" stroke="#7c5cd6" stroke-width="1.5"/>
-    <path d="M2 6h12" stroke="#7c5cd6" stroke-width="1.5"/>`),
+  schema: svg(`<rect x="5.4" y="1.6" width="5.2" height="3.8" rx="0.9" fill="#7c5cd6"/>
+    <path d="M8 5.4v1.6M3.6 8.6V7h8.8v1.6" stroke="#7c5cd6" stroke-width="1.3" fill="none"/>
+    <rect x="1" y="9" width="5.2" height="3.8" rx="0.9" fill="#9b7ee0"/>
+    <rect x="9.8" y="9" width="5.2" height="3.8" rx="0.9" fill="#9b7ee0"/>`),
   folder: svg(`<path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3.2l1.5 1.6h5.3c.7 0 1.2.5 1.2 1.2v6.4c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2V4.2z" fill="#f6c244"/>`),
   table: svg(`<rect x="1.8" y="2.5" width="12.4" height="11" rx="1.2" stroke="#2b7de9" stroke-width="1.4"/>
     <path d="M1.8 6h12.4M6 6v7.5M10.2 6v7.5" stroke="#2b7de9" stroke-width="1.2"/>

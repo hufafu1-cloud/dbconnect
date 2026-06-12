@@ -192,6 +192,7 @@ function renderDbNode(conn, db) {
     depth: 1,
     icon: 'database',
     label: db,
+    cls: 'dim',
     twisty: true,
     onToggle: () => toggle(),
     onDblClick: () => toggle(),
@@ -249,6 +250,7 @@ function renderDbNode(conn, db) {
         children.append(renderFolders(conn, db, null, objs, 2, caps));
       }
       loaded = true;
+      row.classList.remove('dim'); // 已打开的库点亮
     } catch (err) {
       loading.textContent = '加载失败: ' + err.message;
     }
@@ -279,6 +281,7 @@ function renderSchemaNode(conn, db, schema) {
     depth: 2,
     icon: 'schema',
     label: schema,
+    cls: 'dim',
     twisty: true,
     onToggle: () => toggle(),
     onDblClick: () => toggle(),
@@ -313,6 +316,7 @@ function renderSchemaNode(conn, db, schema) {
       loading.remove();
       children.append(renderFolders(conn, db, schema, objs, 3, caps));
       loaded = true;
+      row.classList.remove('dim'); // 已打开的模式点亮
     } catch (err) {
       loading.textContent = '加载失败: ' + err.message;
     }
