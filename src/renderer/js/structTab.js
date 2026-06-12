@@ -1,6 +1,6 @@
 // 设计表（结构查看）标签页：列 / 索引 / DDL
 import { el } from './util.js';
-import { connLabel } from './state.js';
+import { connLabel, connColor } from './state.js';
 import { addTab } from './tabs.js';
 import { toast } from './toast.js';
 
@@ -10,6 +10,7 @@ export function openStructTab(target) {
     id: tabId,
     title: `设计 - ${target.table}`,
     icon: 'struct',
+    color: connColor(target.connId),
     tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}`,
   });
   if (tab.pane.childElementCount) return tab;

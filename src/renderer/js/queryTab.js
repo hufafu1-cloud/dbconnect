@@ -1,6 +1,6 @@
 // 查询标签页：CodeMirror SQL 编辑器 + 多结果集 + 信息面板
 import { el, iconEl, fmtCount } from './util.js';
-import { state, connLabel, objectsCacheKey, emit } from './state.js';
+import { state, connLabel, connColor, objectsCacheKey, emit } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, promptDialog } from './toast.js';
@@ -13,7 +13,7 @@ export function openQueryTab(target, initialSql, opts) {
   queryNo++;
   const tabId = uid('query');
   let savedQuery = (opts && opts.saved) || null; // {id, name} 绑定到连接的查询
-  const tab = addTab({ id: tabId, title: savedQuery ? savedQuery.name : `查询 ${queryNo}`, icon: 'query' });
+  const tab = addTab({ id: tabId, title: savedQuery ? savedQuery.name : `查询 ${queryNo}`, icon: 'query', color: connColor(target && target.connId) });
 
   let connId = target && target.connId;
   let db = target && target.db;
@@ -246,7 +246,10 @@ export function openQueryTab(target, initialSql, opts) {
         if (!r.columns) continue;
         n++;
         const host = el('div', { style: { flex: '1', minHeight: '0', display: 'flex', flexDirection: 'column' } });
-        const grid = new DataGrid(host, { editable: false });
+        const grid = new DataGrid(host, {
+          editable: false,
+          copyContext: { table: 'result_table', connType: connTypeOf(connId) },
+        });
         grid.setData({ columns: r.columns, rows: r.rows, pk: [] });
         const bar = el('div', { class: 'pane-info' },
           el('span', {}, `${fmtCount(r.rowCount)} 行 · ${r.ms} ms` + (r.truncated ? `（仅显示前 ${r.rows.length} 行）` : '')),

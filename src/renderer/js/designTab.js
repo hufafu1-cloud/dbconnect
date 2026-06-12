@@ -1,6 +1,6 @@
 // 可视化表设计器：栏位 / 索引 / SQL 预览，支持新建表与修改表
 import { el, iconEl, debounce } from './util.js';
-import { connLabel, emit } from './state.js';
+import { connLabel, connColor, emit } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { toast, confirmDialog } from './toast.js';
 
@@ -14,6 +14,7 @@ export function openDesignTab(target) {
     id: tabId,
     title: isNew ? '新建表' : `设计 - ${target.table}`,
     icon: 'struct',
+    color: connColor(target.connId),
     tooltip: `${connLabel(target.connId)} / ${target.db || ''}`,
   });
   if (tab.pane.childElementCount) return tab;

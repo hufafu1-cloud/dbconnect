@@ -5,6 +5,49 @@ import { cellViewer, toast } from './toast.js';
 
 const NUM_RE = /int|decimal|numeric|float|double|real|money|number/i;
 
+/** 多格式复制文本构建：tsv / tsvHeader / csv / markdown / insert */
+function buildCopyText(format, names, rows, ctx) {
+  const plain = (v) => (v === null || v === undefined) ? ''
+    : (typeof v === 'object' && v.__blob) ? '0x' + v.hex : String(v);
+  if (format === 'tsv' || format === 'tsvHeader') {
+    const lines = rows.map((r) => r.map((v) => plain(v).replace(/[\t\r\n]/g, ' ')).join('\t'));
+    if (format === 'tsvHeader') lines.unshift(names.join('\t'));
+    return lines.join('\r\n');
+  }
+  if (format === 'csv') {
+    const cell = (v) => {
+      const s = plain(v);
+      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    return [names.map(cell).join(','), ...rows.map((r) => r.map(cell).join(','))].join('\r\n');
+  }
+  if (format === 'markdown') {
+    const cell = (v) => plain(v).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
+    return [
+      '| ' + names.map(cell).join(' | ') + ' |',
+      '| ' + names.map(() => '---').join(' | ') + ' |',
+      ...rows.map((r) => '| ' + r.map(cell).join(' | ') + ' |'),
+    ].join('\r\n');
+  }
+  // insert
+  const mysqlFamily = ['mysql', 'oceanbase', 'clickhouse'].includes(ctx.connType);
+  const qi = (n) => ctx.connType === 'mssql' ? '[' + String(n).replace(/]/g, ']]') + ']'
+    : mysqlFamily ? '`' + String(n).replace(/`/g, '``') + '`'
+      : '"' + String(n).replace(/"/g, '""') + '"';
+  const lit = (v) => {
+    if (v === null || v === undefined) return 'NULL';
+    if (typeof v === 'object' && v.__blob) return 'NULL /* BLOB 预览不完整，未复制 */';
+    if (typeof v === 'number') return String(v);
+    if (typeof v === 'boolean') return v ? '1' : '0';
+    let s = String(v);
+    if (mysqlFamily) s = s.replace(/\\/g, '\\\\');
+    return "'" + s.replace(/'/g, "''") + "'";
+  };
+  const T = qi(ctx.table || 'table_name');
+  return rows.map((r) =>
+    `INSERT INTO ${T} (${names.map(qi).join(', ')}) VALUES (${r.map(lit).join(', ')});`).join('\r\n');
+}
+
 export class DataGrid {
   /**
    * @param {HTMLElement} host
@@ -243,7 +286,13 @@ export class DataGrid {
     const canEdit = this.editable || isNew;
     showMenu(e.clientX, e.clientY, [
       { label: '查看单元格', icon: 'info', onClick: () => cellViewer(this.columns[i].name, v === undefined ? null : v) },
-      { label: '复制', icon: 'copy', onClick: () => { navigator.clipboard.writeText(cellText(v)); } },
+      { label: '复制单元格', icon: 'copy', onClick: () => { navigator.clipboard.writeText(cellText(v)); } },
+      { sep: true },
+      { label: '复制行（Tab 分隔）', icon: 'copy', onClick: () => this._copyRows('tsv', r) },
+      { label: '复制行（带表头，贴 Excel）', icon: 'copy', onClick: () => this._copyRows('tsvHeader', r) },
+      { label: '复制为 INSERT 语句', icon: 'copy', onClick: () => this._copyRows('insert', r) },
+      { label: '复制为 CSV', icon: 'copy', onClick: () => this._copyRows('csv', r) },
+      { label: '复制为 Markdown', icon: 'copy', onClick: () => this._copyRows('markdown', r) },
       { sep: true },
       canEdit && { label: '编辑', icon: 'edit', onClick: () => {
         const tr = this.tbody && this.tbody.querySelector(`tr[data-r="${r}"]${isNew ? '[data-new="1"]' : ':not([data-new="1"])'}`);
@@ -256,6 +305,22 @@ export class DataGrid {
         this._setCell(r, i, null, isNew, td);
       } },
     ].filter(Boolean));
+  }
+
+  // ---------- 多格式复制 ----------
+  _copyRows(format, fallbackRow) {
+    const idxs = this.selection.size
+      ? [...this.selection].sort((a, b) => a - b)
+      : (fallbackRow !== undefined ? [fallbackRow] : []);
+    if (!idxs.length) { toast.info('请先选中要复制的行'); return; }
+    const names = this.columns.map((c) => c.name);
+    const rows = idxs.map((r) => this.columns.map((_, i) => {
+      const v = this._currentVal(r, i, false);
+      return v === undefined ? null : v;
+    }));
+    const text = buildCopyText(format, names, rows, this.opts.copyContext || {});
+    navigator.clipboard.writeText(text);
+    toast.success(`已复制 ${rows.length} 行`);
   }
 
   // ---------- 新增 / 删除 ----------

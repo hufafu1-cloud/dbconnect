@@ -56,12 +56,15 @@ function renderConnNode(conn) {
     icon: typeIcons[conn.type] || 'connection',
     label: conn.name,
     meta: typeLabels[conn.type] || conn.type,
+    cls: conn.color ? 'conn-colored' : '',
     twisty: true,
     onToggle: () => toggle(),
     onSelect: () => { state.activeTarget = { connId: conn.id }; },
     onDblClick: () => toggle(),
     onMenu: (e) => connMenu(e, conn, isOpenNow(), toggle),
   });
+
+  if (conn.color) row.style.setProperty('--conn-color', conn.color);
 
   const isOpenNow = () => state.open.has(conn.id);
 
@@ -757,7 +760,43 @@ export function renderTree() {
     treeRoot.append(el('div', { style: { padding: '24px 16px', color: 'var(--text-muted)', fontSize: '12.5px', lineHeight: '1.8' } },
       '还没有连接。', el('br'), '点击工具栏“新建连接”开始。'));
   }
+  // 按分组渲染：有分组的进文件夹（默认展开），未分组的在根
+  const groups = new Map();
+  const ungrouped = [];
   for (const conn of state.connections) {
+    if (conn.group && conn.group.trim()) {
+      const g = conn.group.trim();
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(conn);
+    } else {
+      ungrouped.push(conn);
+    }
+  }
+  for (const [gname, conns] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const container = el('div', { class: 'tree-node' });
+    const children = el('div', { class: 'tree-children open', style: { paddingLeft: '14px' } });
+    const { row, tw } = nodeRow({
+      depth: 0,
+      icon: 'folder',
+      label: gname,
+      meta: String(conns.length),
+      twisty: true,
+      cls: 'tree-group',
+      onToggle: () => {
+        const open = children.classList.contains('open');
+        setOpen(tw, children, !open);
+      },
+      onDblClick: () => {
+        const open = children.classList.contains('open');
+        setOpen(tw, children, !open);
+      },
+    });
+    tw.classList.add('open');
+    for (const conn of conns) children.append(renderConnNode(conn));
+    container.append(row, children);
+    treeRoot.append(container);
+  }
+  for (const conn of ungrouped) {
     treeRoot.append(renderConnNode(conn));
   }
   // 空白处右键

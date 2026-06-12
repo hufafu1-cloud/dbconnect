@@ -1,6 +1,6 @@
 // 进程/会话监控页（MySQL/OB、PostgreSQL、SQL Server、ClickHouse）
 import { el, iconEl, fmtCount } from './util.js';
-import { connLabel } from './state.js';
+import { connLabel, connColor } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, confirmDialog } from './toast.js';
@@ -19,6 +19,7 @@ export function openProcTab(connId) {
     id: `proc:${connId}`,
     title: `进程 - ${connLabel(connId)}`,
     icon: 'monitor',
+    color: connColor(connId),
     tooltip: `${connLabel(connId)} 进程列表`,
   });
   if (tab.pane.childElementCount) return tab;

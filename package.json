@@ -1,7 +1,7 @@
 {
   "name": "dbconnect",
   "productName": "DBConnect",
-  "version": "1.9.0",
+  "version": "2.0.0",
   "description": "Navicat 风格的数据库连接管理工具 (MySQL / PostgreSQL / SQLite / SQL Server)",
   "main": "src/main/main.js",
   "author": "dbconnect",

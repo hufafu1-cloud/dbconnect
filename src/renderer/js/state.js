@@ -19,6 +19,12 @@ export function connLabel(id) {
   return c ? c.name : '(未知连接)';
 }
 
+/** 连接的颜色标记（未设置返回 null） */
+export function connColor(id) {
+  const c = connById(id);
+  return (c && c.color) || null;
+}
+
 export async function reloadConnections() {
   state.connections = await window.api.conn.list();
   emit('connections-changed');

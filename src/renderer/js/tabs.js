@@ -49,6 +49,7 @@ export function addTab(opts) {
 
   const titleEl = el('span', { class: 'tab-title' }, opts.title);
   const tabEl = el('div', { class: 'tab', title: opts.tooltip || opts.title, onClick: () => activate(id) },
+    opts.color ? el('span', { class: 'tab-dot', style: { background: opts.color } }) : null,
     iconEl(opts.icon || 'table'),
     titleEl);
   if (!opts.permanent) {

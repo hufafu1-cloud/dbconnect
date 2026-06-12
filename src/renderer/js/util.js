@@ -125,6 +125,8 @@ export const icons = {
   monitor: svg(`<path d="M2.2 12.8a6 6 0 1 1 11.6 0" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" fill="none"/>
     <path d="M8 12.8l3-4.4" stroke="#d93026" stroke-width="1.5" stroke-linecap="round"/>
     <circle cx="8" cy="12.6" r="1.1" fill="#d93026"/>`),
+  theme: svg(`<circle cx="8" cy="8" r="5.6" stroke="#5b6470" stroke-width="1.4" fill="none"/>
+    <path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="#5b6470"/>`),
   format: svg(`<path d="M2.5 3h11M2.5 6.2h7M5.5 9.4h8M5.5 12.6h5" stroke="#7c5cd6" stroke-width="1.6" stroke-linecap="round"/>`),
 };
 

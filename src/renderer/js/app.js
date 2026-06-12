@@ -46,8 +46,27 @@ function buildToolbar() {
   } }, iconEl('history'), '历史');
 
   const btnAbout = el('button', { class: 'tbtn', onClick: showAbout }, iconEl('info'), '关于');
+  const btnTheme = el('button', { class: 'tbtn', title: '切换浅色/深色主题', onClick: toggleTheme }, iconEl('theme'), '主题');
 
-  tb.append(btnConn, btnQuery, btnHistory, el('span', { class: 'toolbar-spring' }), btnAbout);
+  tb.append(btnConn, btnQuery, btnHistory, el('span', { class: 'toolbar-spring' }), btnTheme, btnAbout);
+}
+
+// ---------------- 主题 ----------------
+export function applyTheme(t) {
+  if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+  else document.documentElement.removeAttribute('data-theme');
+  try { localStorage.setItem('dbc-theme', t); } catch (e) { /* ignore */ }
+  // Chromium 对 sticky 合成层在 CSS 变量切换后可能不重绘：整页强制重排（单帧内完成，无闪烁）
+  const b = document.body;
+  if (b) {
+    b.style.display = 'none';
+    void b.offsetHeight;
+    b.style.display = '';
+  }
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  applyTheme(cur === 'dark' ? 'light' : 'dark');
 }
 
 async function showAbout() {
@@ -166,11 +185,13 @@ function setupTestHooks() {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       return true;
     },
+    setTheme: (t) => { applyTheme(t); return true; },
   };
 }
 
 // ---------------- 启动 ----------------
 async function boot() {
+  try { applyTheme(localStorage.getItem('dbc-theme') || 'light'); } catch (e) { /* ignore */ }
   buildToolbar();
   initObjectsTab();
   setupSplitter();

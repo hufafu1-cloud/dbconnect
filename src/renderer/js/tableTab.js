@@ -1,6 +1,6 @@
 // 表数据标签页：分页浏览 + 筛选 + 排序 + 行内编辑
 import { el, iconEl, fmtCount } from './util.js';
-import { connLabel, state } from './state.js';
+import { connLabel, connColor, state } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, confirmDialog } from './toast.js';
@@ -10,7 +10,7 @@ const PAGE_SIZES = [100, 500, 1000];
 
 export function openTableTab(target) {
   const tabId = `table:${target.connId}|${target.db}|${target.schema || ''}|${target.table}`;
-  const tab = addTab({ id: tabId, title: target.table, icon: 'table', tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}` });
+  const tab = addTab({ id: tabId, title: target.table, icon: 'table', color: connColor(target.connId), tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}` });
   if (tab.pane.childElementCount) return tab; // 已存在则只激活
 
   let page = 1;
@@ -31,6 +31,10 @@ export function openTableTab(target) {
     editable: true,
     onSort: (col, dir) => { orderBy = col; orderDir = dir; load(); },
     onChange: () => updateDirty(),
+    copyContext: {
+      table: target.table,
+      connType: (state.connections.find((c) => c.id === target.connId) || {}).type,
+    },
   });
 
   const mkBtn = (icon, label, onClick, extra) =>

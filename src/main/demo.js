@@ -70,12 +70,15 @@ async function buildSampleDb() {
 async function runDemo(createWindow) {
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const dbFile = await buildSampleDb();
-  const saved = store.save({ name: '演示连接 SQLite', type: 'sqlite', file: dbFile });
+  const saved = store.save({ name: '演示连接 SQLite', type: 'sqlite', file: dbFile, color: '#e5484d', group: '演示分组' });
 
   const win = createWindow(true);
+  win.webContents.setBackgroundThrottling(false);
   const ej = (code) => win.webContents.executeJavaScript(code, true);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const shot = async (name) => {
+    win.webContents.invalidate(); // 强制重绘，避免截到过期合成帧
+    await wait(200);
     const img = await win.webContents.capturePage();
     fs.writeFileSync(path.join(SHOT_DIR, name), img.toPNG());
     console.log('[DEMO] 截图', name);
@@ -149,6 +152,21 @@ async function runDemo(createWindow) {
   await ej(`window.__test.openSync(${id}, 'main')`);
   await wait(1000);
   await shot('shot-11-sync.png');
+  await ej('window.__test.closeMenus()');
+  await wait(300);
+
+  // 深色模式：持久化后整页重载（等同用户重启后的暗色状态），再开表截屏
+  await ej("window.__test.setTheme('dark')");
+  await wait(300);
+  win.webContents.reload();
+  await new Promise((resolve) => win.webContents.once('did-finish-load', resolve));
+  await wait(1000);
+  await ej(`window.__test.openConnection(${id})`);
+  await wait(600);
+  await ej(`window.__test.openTable(${id}, 'main', null, 'orders')`);
+  await wait(1000);
+  await shot('shot-12-dark.png');
+  await ej("window.__test.setTheme('light')");
 
   // 勾选 SSH 隧道，验证展开后的表单
   await ej(`(() => {

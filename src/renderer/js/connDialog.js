@@ -32,6 +32,37 @@ export function openConnDialog(existing, presetType) {
     el('option', { value: v, selected: v === cfg.type ? 'selected' : null }, n)));
   typeSel.value = cfg.type;
   const nameInput = field('text', cfg.name, '如: 本地 MySQL');
+
+  // 分组 + 颜色标记（生产库标红防误操作）
+  const groupInput = el('input', { type: 'text', value: cfg.group || '', placeholder: '（可选）如: 生产 / 测试', spellcheck: false, list: 'conn-groups' });
+  let groupDl = document.getElementById('conn-groups');
+  if (!groupDl) { groupDl = el('datalist', { id: 'conn-groups' }); document.body.append(groupDl); }
+  groupDl.innerHTML = '';
+  import('./state.js').then(({ state }) => {
+    const groups = [...new Set(state.connections.map((c) => c.group).filter(Boolean))];
+    for (const g of groups) groupDl.append(el('option', { value: g }));
+  });
+  const COLORS = [
+    ['', '无'], ['#e5484d', '红'], ['#f76b15', '橙'], ['#ffb224', '黄'],
+    ['#30a46c', '绿'], ['#0091ff', '蓝'], ['#8e4ec6', '紫'], ['#d6409f', '粉'],
+  ];
+  let pickedColor = cfg.color || '';
+  const swatchEls = [];
+  const swatches = el('div', { class: 'color-swatches' },
+    ...COLORS.map(([c, label]) => {
+      const sw = el('span', {
+        class: 'color-swatch' + (c ? '' : ' none') + (pickedColor === c ? ' active' : ''),
+        title: label,
+        style: c ? { background: c } : {},
+        onClick: () => {
+          pickedColor = c;
+          for (const x of swatchEls) x.classList.remove('active');
+          sw.classList.add('active');
+        },
+      }, c ? '' : '∅');
+      swatchEls.push(sw);
+      return sw;
+    }));
   const fieldsBox = el('div', { style: { display: 'contents' } });
   const testResult = el('span', { class: 'test-result' }, '');
 
@@ -171,6 +202,8 @@ export function openConnDialog(existing, presetType) {
       id: cfg.id,
       name: nameInput.value.trim(),
       type: t,
+      group: groupInput.value.trim(),
+      color: pickedColor,
     };
     if (t === 'sqlite') {
       out.file = f.file.value.trim();
@@ -211,6 +244,8 @@ export function openConnDialog(existing, presetType) {
   const body = el('div', { class: 'form-grid' },
     el('label', {}, '连接类型'), typeSel,
     el('label', {}, '连接名'), nameInput,
+    el('label', {}, '分组'), groupInput,
+    el('label', {}, '颜色标记'), swatches,
     fieldsBox);
 
   const m = openModal({

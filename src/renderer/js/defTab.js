@@ -1,6 +1,6 @@
 // 对象定义查看页（存储过程 / 函数 / 触发器 / 事件 / 序列 / 用户）
 import { el, iconEl } from './util.js';
-import { connLabel } from './state.js';
+import { connLabel, connColor } from './state.js';
 import { addTab } from './tabs.js';
 import { toast } from './toast.js';
 
@@ -18,6 +18,7 @@ export function openDefTab(target) {
     id: tabId,
     title: `${KIND_LABELS[target.kind] || target.kind} - ${target.name}`,
     icon: 'struct',
+    color: connColor(target.connId),
     tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.name}`,
   });
   if (tab.pane.childElementCount) return tab;
