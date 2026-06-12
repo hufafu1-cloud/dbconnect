@@ -419,6 +419,83 @@ async function runSelfTest() {
     'sqlite');
   check('split 触发器体感知', mixed.length === 3 && /END$/i.test(mixed[1]) && mixed[2] === 'SELECT 1', mixed.map((s) => s.slice(0, 30)));
 
+  // ---- DBA 工具：类型映射 / BLOB 字面量 / 传输 / 转储回环 ----
+  const transfer = require('./transfer');
+  const srcModel = {
+    table: 'tt', comment: '', options: '',
+    columns: [
+      { name: 'id', origName: 'id', type: 'int', length: '', scale: '', notNull: true, pk: true, autoInc: false, def: '', comment: '' },
+      { name: 'flag', origName: 'flag', type: 'tinyint', length: '1', scale: '', notNull: false, pk: false, autoInc: false, def: '', comment: '' },
+      { name: 'body', origName: 'body', type: 'longtext', length: '', scale: '', notNull: false, pk: false, autoInc: false, def: '', comment: '' },
+      { name: 'created', origName: 'created', type: 'datetime', length: '', scale: '', notNull: false, pk: false, autoInc: false, def: '', comment: '' },
+      { name: 'amount', origName: 'amount', type: 'decimal', length: '10', scale: '2', notNull: false, pk: false, autoInc: false, def: '', comment: '' },
+    ],
+    indexes: [],
+  };
+  const trPg = ddl.translateModel(srcModel, 'mysql', 'postgres').model;
+  check('类型映射 mysql→pg',
+    trPg.columns[1].type === 'boolean' && trPg.columns[2].type === 'text' &&
+    trPg.columns[3].type === 'timestamp' && trPg.columns[4].type === 'numeric' && trPg.columns[4].length === '10', trPg.columns.map((c) => c.type));
+  const trMs = ddl.translateModel(srcModel, 'mysql', 'mssql').model;
+  check('类型映射 mysql→mssql', trMs.columns[2].type === 'nvarchar' && trMs.columns[2].length === 'max' && trMs.columns[3].type === 'datetime2', trMs.columns.map((c) => `${c.type}(${c.length})`));
+  const trLite = ddl.translateModel(srcModel, 'mysql', 'sqlite').model;
+  check('类型映射 mysql→sqlite', trLite.columns[0].type === 'INTEGER' && trLite.columns[2].type === 'TEXT');
+  check('同方言不变', ddl.translateModel(srcModel, 'mysql', 'mysql').model.columns[2].type === 'longtext');
+
+  const buf = Buffer.from([0x01, 0xab, 0xff]);
+  check('blob mysql', my.blobLiteral(buf) === '0x01abff');
+  check('blob pg', pgA.blobLiteral(buf) === "'\\x01abff'");
+  check('blob sqlite', new SQLiteAdapter({}).blobLiteral(buf) === "X'01abff'");
+  check('blob oracle', obo.blobLiteral(buf) === "HEXTORAW('01abff')");
+  check('valueLiteral 混合', transfer.valueLiteral(my, null) === 'NULL'
+    && transfer.valueLiteral(my, 12.5) === '12.5'
+    && transfer.valueLiteral(my, buf) === '0x01abff'
+    && transfer.valueLiteral(my, "a'b") === "'a''b'");
+
+  // 传输端到端：sqlite → sqlite（结构 + 数据 + BLOB 保真）
+  const fSrc = path.join(os.tmpdir(), `dbc-tr-src-${Date.now()}.db`);
+  const fDst = path.join(os.tmpdir(), `dbc-tr-dst-${Date.now()}.db`);
+  const adSrc = new SQLiteAdapter({ id: 's', type: 'sqlite', file: fSrc });
+  const adDst = new SQLiteAdapter({ id: 'd', type: 'sqlite', file: fDst });
+  await adSrc.connect();
+  await adDst.connect();
+  await adSrc.runScript('main', `
+    CREATE TABLE goods (id INTEGER PRIMARY KEY, name TEXT, data BLOB, price REAL);
+    INSERT INTO goods VALUES (1, '苹果''s', X'00ff10', 3.5);
+    INSERT INTO goods VALUES (2, NULL, NULL, NULL);
+    CREATE TABLE empty_t (a INT);
+  `);
+  const trReport = await transfer.runTransfer(adSrc, adDst, {
+    srcDb: 'main', dstDb: 'main',
+    tables: [{ name: 'goods' }, { name: 'empty_t' }],
+    createTable: true, copyData: true, batchSize: 1,
+  }, () => {});
+  check('传输报告', trReport.tables.length === 2 && trReport.tables[0].rows === 2 && !trReport.errors.length, trReport);
+  const dstRows = await adDst.exec('main', 'SELECT id, name, hex(data), price FROM goods ORDER BY id');
+  check('传输数据保真', dstRows.rows[0][1] === "苹果's" && dstRows.rows[0][2] === '00FF10' && dstRows.rows[1][1] === null, dstRows.rows);
+
+  // 转储 → 运行 SQL 文件回环
+  const dumpFile = path.join(os.tmpdir(), `dbc-dump-${Date.now()}.sql`);
+  const dumpRes = await transfer.dumpSql(adSrc, {
+    db: 'main', tables: [{ name: 'goods' }], file: dumpFile, includeDrop: true, includeData: true,
+  }, () => {});
+  check('转储统计', dumpRes.tables === 1 && dumpRes.rows === 2, dumpRes);
+  const dumpTxt = fs.readFileSync(dumpFile, 'utf8');
+  check('转储内容', dumpTxt.includes('DROP TABLE IF EXISTS') && dumpTxt.includes('CREATE TABLE') && dumpTxt.includes("X'00ff10'"), dumpTxt.slice(0, 120));
+  const fRt = path.join(os.tmpdir(), `dbc-rt-${Date.now()}.db`);
+  const adRt = new SQLiteAdapter({ id: 'r', type: 'sqlite', file: fRt });
+  await adRt.connect();
+  const runRes = await transfer.runSqlFile(adRt, { db: 'main', file: dumpFile, stopOnError: false }, () => {});
+  check('SQL 文件执行', runRes.failed === 0 && runRes.executed >= 4, runRes);
+  const rtCount = await adRt.exec('main', 'SELECT COUNT(*) FROM goods');
+  check('回环行数', Number(rtCount.rows[0][0]) === 2);
+  await adSrc.close(); await adDst.close(); await adRt.close();
+  for (const f of [fSrc, fDst, fRt, dumpFile]) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
+
+  // 进程监控能力
+  check('processes caps', my.objectCaps.processes === true && pgA.objectCaps.processes === true
+    && !new SQLiteAdapter({}).objectCaps.processes);
+
   console.log(`[SELFTEST] 通过 ${pass} 项, 失败 ${fail} 项`);
   return fail === 0 ? 0 : 1;
 }

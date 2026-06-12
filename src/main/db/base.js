@@ -27,8 +27,18 @@ class BaseAdapter {
 
   /** 各类对象的支持情况（树上据此决定显示哪些节点） */
   get objectCaps() {
-    return { routines: false, triggers: false, events: false, sequences: false, users: false };
+    return { routines: false, triggers: false, events: false, sequences: false, users: false, processes: false };
   }
+
+  /** 二进制字面量（数据传输/转储用），默认 X'hex' */
+  blobLiteral(buf) {
+    return "X'" + buf.toString('hex') + "'";
+  }
+
+  /** 进程/会话列表 [{id, user, db, state, timeSec, info}] */
+  async listProcesses() { throw new Error('该数据库不支持进程列表'); }
+
+  async killProcess(_id) { throw new Error('该数据库不支持结束进程'); }
 
   async listRoutines(_db, _schema) { return []; }   // [{name, type:'PROCEDURE'|'FUNCTION', comment?, extra?}]
   async listTriggers(_db, _schema) { return []; }   // [{name, table, timing?, event?}]

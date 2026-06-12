@@ -91,7 +91,31 @@ class MSSQLAdapter extends BaseAdapter {
 
   // ---------- 对象覆盖：存储过程 / 函数 / 触发器 / 序列 / 登录 ----------
   get objectCaps() {
-    return { routines: true, triggers: true, events: false, sequences: true, users: true };
+    return { routines: true, triggers: true, events: false, sequences: true, users: true, processes: true };
+  }
+
+  blobLiteral(buf) { return '0x' + buf.toString('hex'); }
+
+  async listProcesses() {
+    const rows = await this._q(null,
+      `SELECT s.session_id AS id, s.login_name AS u, DB_NAME(s.database_id) AS db,
+              s.status AS st, r.command AS cmd,
+              ISNULL(r.total_elapsed_time, 0) / 1000 AS sec,
+              ISNULL(t.text, '') AS info
+       FROM sys.dm_exec_sessions s
+       LEFT JOIN sys.dm_exec_requests r ON r.session_id = s.session_id
+       OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) t
+       WHERE s.is_user_process = 1 ORDER BY s.session_id`);
+    return rows.map((r) => ({
+      id: String(r.id), user: r.u || '', db: r.db || '',
+      state: [r.st, r.cmd].filter(Boolean).join(' · '),
+      timeSec: Number(r.sec) || 0, info: r.info || '',
+    }));
+  }
+
+  async killProcess(id) {
+    const req = this.pool.request();
+    await req.batch('KILL ' + Number(id));
   }
 
   async listRoutines(db) {

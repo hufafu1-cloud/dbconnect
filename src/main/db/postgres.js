@@ -69,7 +69,24 @@ class PostgresAdapter extends BaseAdapter {
 
   // ---------- 对象覆盖：函数 / 触发器 / 序列 / 角色 ----------
   get objectCaps() {
-    return { routines: true, triggers: true, events: false, sequences: true, users: true };
+    return { routines: true, triggers: true, events: false, sequences: true, users: true, processes: true };
+  }
+
+  blobLiteral(buf) { return "'\\x" + buf.toString('hex') + "'"; }
+
+  async listProcesses() {
+    const rows = await this._q(null,
+      `SELECT pid, usename, datname, state,
+              COALESCE(EXTRACT(EPOCH FROM now() - query_start), 0)::int AS sec, query
+       FROM pg_stat_activity WHERE pid <> pg_backend_pid() ORDER BY pid`);
+    return rows.map((r) => ({
+      id: String(r.pid), user: r.usename || '', db: r.datname || '',
+      state: r.state || '', timeSec: Number(r.sec) || 0, info: r.query || '',
+    }));
+  }
+
+  async killProcess(id) {
+    await this._getPool(null).query('SELECT pg_terminate_backend($1)', [Number(id)]);
   }
 
   async listRoutines(db, schema) {

@@ -400,4 +400,100 @@ function infoToModel(info, table, dialect) {
   };
 }
 
-module.exports = { typeOptions, caps, buildCreateTable, buildAlterTable, infoToModel, composeType, composeDefault };
+// ---------------- 跨方言类型映射（数据传输用） ----------------
+// 源类型 → 通用类型
+const TO_GENERIC = {
+  tinyint: 'tinyint', smallint: 'smallint', mediumint: 'int', int: 'int', integer: 'int', bigint: 'bigint',
+  decimal: 'decimal', numeric: 'decimal', number: 'decimal', money: 'decimal', smallmoney: 'decimal',
+  float: 'float', real: 'float', double: 'double', 'double precision': 'double',
+  binary_float: 'float', binary_double: 'double',
+  varchar: 'varchar', 'character varying': 'varchar', nvarchar: 'varchar', varchar2: 'varchar', nvarchar2: 'varchar',
+  char: 'char', character: 'char', nchar: 'char', fixedstring: 'char',
+  text: 'text', tinytext: 'text', mediumtext: 'text', longtext: 'text', ntext: 'text', clob: 'text', nclob: 'text', string: 'text',
+  date: 'date', date32: 'date',
+  datetime: 'datetime', datetime2: 'datetime', smalldatetime: 'datetime', datetime64: 'datetime',
+  timestamp: 'datetime', timestamptz: 'datetime', 'timestamp without time zone': 'datetime', 'timestamp with time zone': 'datetime',
+  time: 'time', timetz: 'time', 'time without time zone': 'time', year: 'int',
+  bool: 'bool', boolean: 'bool', bit: 'bool',
+  blob: 'blob', tinyblob: 'blob', mediumblob: 'blob', longblob: 'blob', binary: 'blob', varbinary: 'blob',
+  bytea: 'blob', image: 'blob', raw: 'blob',
+  json: 'json', jsonb: 'json',
+  uuid: 'uuid', uniqueidentifier: 'uuid',
+  enum: 'varchar', set: 'varchar', inet: 'varchar', interval: 'varchar',
+  int8: 'tinyint', int16: 'smallint', int32: 'int', int64: 'bigint',
+  uint8: 'smallint', uint16: 'int', uint32: 'bigint', uint64: 'bigint',
+  float32: 'float', float64: 'double',
+  serial: 'int', bigserial: 'bigint',
+};
+// 通用类型 → 目标方言 [类型, 长度?, 小数?]；'L'/'S' 表示沿用源长度/小数
+const FROM_GENERIC = {
+  mysql: {
+    tinyint: ['tinyint'], smallint: ['smallint'], int: ['int'], bigint: ['bigint'],
+    decimal: ['decimal', 'L', 'S'], float: ['float'], double: ['double'],
+    varchar: ['varchar', 'L'], char: ['char', 'L'], text: ['longtext'],
+    date: ['date'], datetime: ['datetime'], time: ['time'],
+    bool: ['tinyint', '1'], blob: ['longblob'], json: ['json'], uuid: ['char', '36'],
+  },
+  postgres: {
+    tinyint: ['smallint'], smallint: ['smallint'], int: ['integer'], bigint: ['bigint'],
+    decimal: ['numeric', 'L', 'S'], float: ['real'], double: ['double precision'],
+    varchar: ['varchar', 'L'], char: ['char', 'L'], text: ['text'],
+    date: ['date'], datetime: ['timestamp'], time: ['time'],
+    bool: ['boolean'], blob: ['bytea'], json: ['jsonb'], uuid: ['uuid'],
+  },
+  mssql: {
+    tinyint: ['tinyint'], smallint: ['smallint'], int: ['int'], bigint: ['bigint'],
+    decimal: ['decimal', 'L', 'S'], float: ['real'], double: ['float'],
+    varchar: ['nvarchar', 'L'], char: ['nchar', 'L'], text: ['nvarchar', 'max'],
+    date: ['date'], datetime: ['datetime2'], time: ['time'],
+    bool: ['bit'], blob: ['varbinary', 'max'], json: ['nvarchar', 'max'], uuid: ['uniqueidentifier'],
+  },
+  sqlite: {
+    tinyint: ['INTEGER'], smallint: ['INTEGER'], int: ['INTEGER'], bigint: ['INTEGER'],
+    decimal: ['NUMERIC'], float: ['REAL'], double: ['REAL'],
+    varchar: ['TEXT'], char: ['TEXT'], text: ['TEXT'],
+    date: ['TEXT'], datetime: ['TEXT'], time: ['TEXT'],
+    bool: ['INTEGER'], blob: ['BLOB'], json: ['TEXT'], uuid: ['TEXT'],
+  },
+  clickhouse: {
+    tinyint: ['Int8'], smallint: ['Int16'], int: ['Int32'], bigint: ['Int64'],
+    decimal: ['Decimal', 'L', 'S'], float: ['Float32'], double: ['Float64'],
+    varchar: ['String'], char: ['String'], text: ['String'],
+    date: ['Date'], datetime: ['DateTime'], time: ['String'],
+    bool: ['Bool'], blob: ['String'], json: ['String'], uuid: ['UUID'],
+  },
+  oracle: {
+    tinyint: ['NUMBER', '3'], smallint: ['NUMBER', '5'], int: ['NUMBER', '10'], bigint: ['NUMBER', '19'],
+    decimal: ['NUMBER', 'L', 'S'], float: ['BINARY_FLOAT'], double: ['BINARY_DOUBLE'],
+    varchar: ['VARCHAR2', 'L'], char: ['CHAR', 'L'], text: ['CLOB'],
+    date: ['DATE'], datetime: ['TIMESTAMP'], time: ['VARCHAR2', '16'],
+    bool: ['NUMBER', '1'], blob: ['BLOB'], json: ['CLOB'], uuid: ['VARCHAR2', '36'],
+  },
+};
+
+/** 把设计器模型的列类型翻译到目标方言；返回 warnings 数组 */
+function translateModel(model, fromDialect, toDialect) {
+  if (fromDialect === toDialect) return { model, warnings: [] };
+  const warnings = [];
+  const out = JSON.parse(JSON.stringify(model));
+  const toMap = FROM_GENERIC[toDialect] || FROM_GENERIC.mysql;
+  for (const col of out.columns) {
+    let base = String(col.type || '').toLowerCase().trim().replace(/\s+unsigned$/, '');
+    let generic = TO_GENERIC[base];
+    if (base === 'tinyint' && String(col.length) === '1') generic = 'bool';
+    if (!generic) {
+      generic = 'text';
+      warnings.push(`栏位 ${col.name}: 未识别类型 ${col.type}，按文本处理`);
+    }
+    const spec = toMap[generic] || toMap.text;
+    col.type = spec[0];
+    col.length = spec[1] === 'L' ? col.length : (spec[1] || '');
+    col.scale = spec[2] === 'S' ? col.scale : (spec[2] || '');
+    if (generic === 'blob' && toDialect === 'clickhouse') {
+      warnings.push(`栏位 ${col.name}: ClickHouse 无二进制类型，按 String 存储`);
+    }
+  }
+  return { model: out, warnings };
+}
+
+module.exports = { typeOptions, caps, buildCreateTable, buildAlterTable, infoToModel, composeType, composeDefault, translateModel };

@@ -98,7 +98,25 @@ class ClickHouseAdapter extends BaseAdapter {
   }
 
   get objectCaps() {
-    return { routines: true, triggers: false, events: false, sequences: false, users: true };
+    return { routines: true, triggers: false, events: false, sequences: false, users: true, processes: true };
+  }
+
+  /** ClickHouse 无二进制字面量类型：按 UTF-8/base64 字符串处理（结合 translateModel 的 String 列） */
+  blobLiteral(buf) {
+    return this.literal(buf.toString('base64'));
+  }
+
+  async listProcesses() {
+    const r = await this._run(null,
+      `SELECT query_id, user, toInt32(elapsed) AS sec, query FROM system.processes ORDER BY elapsed DESC`);
+    return r.rows.map(([id, user, sec, info]) => ({
+      id: String(id), user: user || '', db: '', state: 'running',
+      timeSec: Number(sec) || 0, info: info || '',
+    }));
+  }
+
+  async killProcess(id) {
+    await this._run(null, `KILL QUERY WHERE query_id = ${this.literal(String(id))}`);
   }
 
   /** 用户自定义函数（UDF） */

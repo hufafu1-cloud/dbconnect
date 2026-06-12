@@ -36,6 +36,18 @@ contextBridge.exposeInMainWorld('api', {
     sequences: (connId, db, schema) => inv('db:sequences', { connId, db, schema }),
     users: (connId) => inv('db:users', { connId }),
     objectDdl: (connId, t) => inv('db:objectDdl', { connId, ...t }),
+    processes: (connId) => inv('db:processes', { connId }),
+    killProcess: (connId, pid) => inv('db:killProcess', { connId, pid }),
+  },
+  dba: {
+    transfer: (t) => inv('dba:transfer', t),
+    dump: (connId, t) => inv('dba:dump', { connId, ...t }),
+    runSqlFile: (connId, t) => inv('dba:runSqlFile', { connId, ...t }),
+    onProgress: (cb) => {
+      const listener = (_e, p) => cb(p);
+      ipcRenderer.on('dba:progress', listener);
+      return () => ipcRenderer.removeListener('dba:progress', listener);
+    },
   },
   queries: {
     list: (connId) => inv('queries:list', { connId }),

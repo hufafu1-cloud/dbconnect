@@ -139,6 +139,20 @@ function renderConnNode(conn) {
       { sep: true },
       { label: '新建查询', icon: 'query', disabled: !opened, onClick: () => actions.newQuery({ connId: c.id, db: c.type === 'sqlite' ? 'main' : (c.database || null) }) },
       (c.type !== 'sqlite' && c.type !== 'oboracle') && { label: '新建数据库…', icon: 'database', disabled: !opened, onClick: () => actions.createDatabase(c.id) },
+      { sep: true },
+      { label: '数据传输…', icon: 'transfer', disabled: !opened, onClick: async () => {
+        const { openTransferDialog } = await import('./dbaTools.js');
+        openTransferDialog({ connId: c.id });
+      } },
+      { label: '运行 SQL 文件…', icon: 'openFile', disabled: !opened, onClick: async () => {
+        const { openRunSqlFileDialog } = await import('./dbaTools.js');
+        openRunSqlFileDialog({ connId: c.id, db: c.type === 'sqlite' ? 'main' : (c.database || null) });
+      } },
+      ['mysql', 'oceanbase', 'postgres', 'mssql', 'clickhouse'].includes(c.type) &&
+        { label: '进程列表', icon: 'monitor', disabled: !opened, onClick: async () => {
+          const { openProcTab } = await import('./procTab.js');
+          openProcTab(c.id);
+        } },
       { label: '刷新', icon: 'refresh', disabled: !opened, onClick: loadDatabases },
       { sep: true },
       { label: '编辑连接…', icon: 'edit', onClick: () => openConnDialog(c) },
@@ -182,6 +196,19 @@ function renderDbNode(conn, db) {
       showMenu(e.clientX, e.clientY, [
         { label: '新建查询', icon: 'query', onClick: () => actions.newQuery({ connId: conn.id, db }) },
         { label: '刷新', icon: 'refresh', onClick: reload },
+        { sep: true },
+        { label: '转储 SQL 文件…', icon: 'save', onClick: async () => {
+          const { openDumpDialog } = await import('./dbaTools.js');
+          openDumpDialog({ connId: conn.id, db, schema: null });
+        } },
+        { label: '数据传输（以此为源）…', icon: 'transfer', onClick: async () => {
+          const { openTransferDialog } = await import('./dbaTools.js');
+          openTransferDialog({ connId: conn.id, db });
+        } },
+        { label: '运行 SQL 文件…', icon: 'openFile', onClick: async () => {
+          const { openRunSqlFileDialog } = await import('./dbaTools.js');
+          openRunSqlFileDialog({ connId: conn.id, db });
+        } },
         { sep: true },
         (conn.type !== 'sqlite' && conn.type !== 'oboracle') &&
           { label: '删除数据库', icon: 'trash', danger: true, onClick: () => actions.dropDatabase({ connId: conn.id, db }) },
@@ -251,6 +278,10 @@ function renderSchemaNode(conn, db, schema) {
     onMenu: (e) => {
       showMenu(e.clientX, e.clientY, [
         { label: '新建查询', icon: 'query', onClick: () => actions.newQuery({ connId: conn.id, db, schema }) },
+        { label: '转储 SQL 文件…', icon: 'save', onClick: async () => {
+          const { openDumpDialog } = await import('./dbaTools.js');
+          openDumpDialog({ connId: conn.id, db, schema });
+        } },
         { label: '刷新', icon: 'refresh', onClick: reload },
       ]);
     },

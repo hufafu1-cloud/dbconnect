@@ -69,6 +69,27 @@ function register(getWin) {
   h('db:users', (a) => dbm.get(a.connId).listUsers());
   h('db:objectDdl', (a) => dbm.get(a.connId).objectDdl(a.db, a.schema, a.kind, a.name, a.extra));
 
+  // ---- 进程监控 ----
+  h('db:processes', (a) => dbm.get(a.connId).listProcesses());
+  h('db:killProcess', (a) => dbm.get(a.connId).killProcess(a.pid));
+
+  // ---- DBA 工具：数据传输 / 转储 / 运行 SQL 文件（带进度推送） ----
+  const transfer = require('./transfer');
+  const dbaHandler = (fn) => async (event, a) => {
+    try {
+      const prog = (p) => { try { event.sender.send('dba:progress', p); } catch (e) { /* ignore */ } };
+      return { ok: true, data: await fn(a, prog) };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  };
+  ipcMain.handle('dba:transfer', dbaHandler((a, prog) =>
+    transfer.runTransfer(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog)));
+  ipcMain.handle('dba:dump', dbaHandler((a, prog) =>
+    transfer.dumpSql(dbm.get(a.connId), a, prog)));
+  ipcMain.handle('dba:runSqlFile', dbaHandler((a, prog) =>
+    transfer.runSqlFile(dbm.get(a.connId), a, prog)));
+
   // ---- 保存的查询 ----
   const queries = require('./queries');
   h('queries:list', (a) => queries.list(a.connId));

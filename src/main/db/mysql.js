@@ -82,7 +82,23 @@ class MySQLAdapter extends BaseAdapter {
 
   // ---------- 对象覆盖：函数 / 触发器 / 事件 / 用户 ----------
   get objectCaps() {
-    return { routines: true, triggers: true, events: true, sequences: false, users: true };
+    return { routines: true, triggers: true, events: true, sequences: false, users: true, processes: true };
+  }
+
+  blobLiteral(buf) { return '0x' + buf.toString('hex'); }
+
+  async listProcesses() {
+    const rows = await this._q('SHOW FULL PROCESSLIST');
+    return rows.map((r) => ({
+      id: String(r.Id), user: r.User || '', db: r.db || '',
+      state: [r.Command, r.State].filter(Boolean).join(' · '),
+      timeSec: Number(r.Time) || 0,
+      info: r.Info || '',
+    }));
+  }
+
+  async killProcess(id) {
+    await this.pool.query('KILL ' + Number(id));
   }
 
   async listRoutines(db) {

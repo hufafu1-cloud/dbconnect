@@ -82,8 +82,10 @@ class OBOracleAdapter extends BaseAdapter {
   }
 
   get objectCaps() {
-    return { routines: true, triggers: true, events: false, sequences: true, users: false };
+    return { routines: true, triggers: true, events: false, sequences: true, users: false, processes: false };
   }
+
+  blobLiteral(buf) { return `HEXTORAW('${buf.toString('hex')}')`; }
 
   async listRoutines(db) {
     const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);

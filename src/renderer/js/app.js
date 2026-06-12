@@ -138,6 +138,11 @@ function setupTestHooks() {
       return true;
     },
     openConnDialog: (type) => { openConnDialog(null, type); return true; },
+    openTransfer: async (connId, db) => {
+      const { openTransferDialog } = await import('./dbaTools.js');
+      await openTransferDialog({ connId, db });
+      return true;
+    },
     openHistory: async () => {
       const { openHistoryTab } = await import('./historyTab.js');
       openHistoryTab();

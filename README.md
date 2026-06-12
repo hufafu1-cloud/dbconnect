@@ -80,6 +80,15 @@
 - **CSV**（UTF-8 BOM）、**Excel xlsx**（流式写出，支持大表）、**JSON**、**SQL INSERT**（按连接方言转义）、**Markdown 表格**
 - 整表导出走分页拉取，亦可带 WHERE 筛选导出
 
+### DBA 工具
+- **数据传输**：跨连接/跨库复制表结构+数据，**支持跨数据库类型**（内置类型映射，如
+  MySQL `datetime`→PG `timestamp`、`longtext`→`nvarchar(max)`），多表选择、批量事务、进度显示、
+  出错继续选项；BLOB 按方言十六进制字面量保真复制
+- **转储 SQL 文件**：库/模式右键一键导出全部表的 DROP+CREATE+INSERT 脚本
+- **运行 SQL 文件**：大 .sql 文件流式执行（不进编辑器），UTF-8/GBK、进度与失败统计、出错继续
+- **进程列表**：连接右键打开会话监控（MySQL/OB、PG、MSSQL、ClickHouse），自动刷新、过滤、
+  结束选中会话（KILL / pg_terminate_backend / KILL QUERY）
+
 ### 其它
 - 多标签页工作区（Ctrl+W 关闭），未保存更改关闭时提示
 - 状态栏显示当前上下文、行数与耗时；操作结果 Toast 提示
