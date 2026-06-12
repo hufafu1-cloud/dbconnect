@@ -22,11 +22,11 @@ const TYPE_NAMES = [
   ['oboracle', 'OceanBase (Oracle 模式)'],
 ];
 
-export function openConnDialog(existing, presetType) {
+export function openConnDialog(existing, presetType, presetGroup) {
   const isEdit = !!existing;
   // 新建连接时 port/user/database 留空，由各类型的 TYPE_DEFAULTS 填充（切换类型时跟随变化）
   const cfg = existing ? { ...existing, options: { ...(existing.options || {}) } }
-    : { type: presetType || 'mysql', name: '', host: 'localhost', port: undefined, user: undefined, password: '', database: undefined, file: '', options: {} };
+    : { type: presetType || 'mysql', name: '', host: 'localhost', port: undefined, user: undefined, password: '', database: undefined, file: '', options: {}, group: presetGroup || '' };
 
   const typeSel = el('select', {}, ...TYPE_NAMES.map(([v, n]) =>
     el('option', { value: v, selected: v === cfg.type ? 'selected' : null }, n)));

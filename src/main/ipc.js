@@ -26,6 +26,12 @@ function register(getWin) {
   h('conn:delete', async (id) => { await dbm.close(id); store.remove(id); });
   h('conn:test', (cfg) => dbm.testConnection(cfg));
 
+  // ---- 连接分组 ----
+  h('groups:list', () => store.listGroups());
+  h('groups:add', (a) => store.addGroup(a.name));
+  h('groups:rename', (a) => store.renameGroup(a.oldName, a.newName));
+  h('groups:remove', (a) => store.removeGroup(a.name));
+
   // ---- 数据库操作 ----
   h('db:open', (connId) => dbm.open(store.getById(connId)));
   h('db:close', (connId) => dbm.close(connId));

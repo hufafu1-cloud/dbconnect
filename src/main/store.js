@@ -90,4 +90,59 @@ function remove(id) {
   persist(loadRaw().filter((x) => x.id !== id));
 }
 
-module.exports = { list, getById, save, remove };
+// ---------------- 连接分组（支持空组持久化） ----------------
+function groupsPath() {
+  return path.join(app.getPath('userData'), 'groups.json');
+}
+
+function loadGroups() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(groupsPath(), 'utf8'));
+    return Array.isArray(arr) ? arr.filter((g) => typeof g === 'string' && g.trim()) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function persistGroups(arr) {
+  fs.mkdirSync(path.dirname(groupsPath()), { recursive: true });
+  fs.writeFileSync(groupsPath(), JSON.stringify([...new Set(arr)], null, 2), 'utf8');
+}
+
+/** 全部分组 = 声明的空组 ∪ 连接上使用的组 */
+function listGroups() {
+  const used = loadRaw().map((c) => c.group).filter((g) => g && g.trim());
+  return [...new Set([...loadGroups(), ...used])].sort((a, b) => a.localeCompare(b));
+}
+
+function addGroup(name) {
+  name = String(name || '').trim();
+  if (!name) throw new Error('分组名不能为空');
+  persistGroups([...loadGroups(), name]);
+  return name;
+}
+
+function renameGroup(oldName, newName) {
+  newName = String(newName || '').trim();
+  if (!newName) throw new Error('分组名不能为空');
+  persistGroups(loadGroups().map((g) => (g === oldName ? newName : g)));
+  const arr = loadRaw();
+  let touched = false;
+  for (const c of arr) {
+    if (c.group === oldName) { c.group = newName; touched = true; }
+  }
+  if (touched) persist(arr);
+}
+
+/** 删除分组：组内连接移到未分组 */
+function removeGroup(name) {
+  persistGroups(loadGroups().filter((g) => g !== name));
+  const arr = loadRaw();
+  let touched = false;
+  for (const c of arr) {
+    if (c.group === name) { delete c.group; touched = true; }
+  }
+  if (touched) persist(arr);
+}
+
+module.exports = { list, getById, save, remove, listGroups, addGroup, renameGroup, removeGroup };

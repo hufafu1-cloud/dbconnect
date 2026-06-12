@@ -292,6 +292,21 @@ async function runSelfTest() {
   store.remove(saved.id);
   check('store 删除', store.list().every((c) => c.id !== saved.id));
 
+  // ---- 连接分组 ----
+  store.addGroup('  测试组A  ');
+  check('group 新建去空格', store.listGroups().includes('测试组A'));
+  const gConn = store.save({ name: '组内连接', type: 'sqlite', file: 'g.db', group: '测试组A' });
+  store.renameGroup('测试组A', '测试组B');
+  check('group 重命名联动连接', store.getById(gConn.id).group === '测试组B'
+    && store.listGroups().includes('测试组B') && !store.listGroups().includes('测试组A'));
+  store.removeGroup('测试组B');
+  check('group 删除后连接保留', !store.getById(gConn.id).group
+    && !store.listGroups().includes('测试组B'));
+  store.remove(gConn.id);
+  let gErr = null;
+  try { store.addGroup('   '); } catch (e) { gErr = e; }
+  check('group 空名拒绝', gErr !== null);
+
   // SSH 配置加密往返
   const savedSsh = store.save({
     name: '自检ssh', type: 'mysql', host: 'h', password: 'dbpw',

@@ -14,6 +14,12 @@ contextBridge.exposeInMainWorld('api', {
     remove: (id) => inv('conn:delete', id),
     test: (cfg) => inv('conn:test', cfg),
   },
+  groups: {
+    list: () => inv('groups:list'),
+    add: (name) => inv('groups:add', { name }),
+    rename: (oldName, newName) => inv('groups:rename', { oldName, newName }),
+    remove: (name) => inv('groups:remove', { name }),
+  },
   db: {
     open: (connId) => inv('db:open', connId),
     close: (connId) => inv('db:close', connId),

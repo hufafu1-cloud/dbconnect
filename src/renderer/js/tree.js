@@ -751,6 +751,59 @@ function leafMenu(e, target, isView) {
   ].filter(Boolean));
 }
 
+// ---------------- 分组节点 ----------------
+function renderGroupNode(gname, conns) {
+  const container = el('div', { class: 'tree-node' });
+  const children = el('div', { class: 'tree-children open', style: { paddingLeft: '14px' } });
+  const { row, tw } = nodeRow({
+    depth: 0,
+    icon: 'folder',
+    label: gname,
+    meta: String(conns.length),
+    twisty: true,
+    cls: 'tree-group',
+    onToggle: () => setOpen(tw, children, !children.classList.contains('open')),
+    onDblClick: () => setOpen(tw, children, !children.classList.contains('open')),
+    onMenu: (e) => {
+      showMenu(e.clientX, e.clientY, [
+        { label: '在此分组新建连接…', icon: 'plus', onClick: () => openConnDialog(null, null, gname) },
+        { sep: true },
+        { label: '重命名分组…', icon: 'rename', onClick: async () => {
+          const { promptDialog } = await import('./toast.js');
+          const name = await promptDialog('重命名分组', '分组名:', gname);
+          if (!name || name === gname) return;
+          try {
+            await window.api.groups.rename(gname, name);
+            const { reloadConnections } = await import('./state.js');
+            await reloadConnections();
+          } catch (err) { toast.error(err.message); }
+        } },
+        { label: '删除分组', icon: 'trash', danger: true, onClick: async () => {
+          const ok = await confirmDialog('删除分组',
+            conns.length
+              ? `分组 “${gname}” 中有 ${conns.length} 个连接，删除后它们将移到未分组（连接本身不会删除）。继续吗？`
+              : `确定删除空分组 “${gname}” 吗？`,
+            { danger: true, okLabel: '删除' });
+          if (!ok) return;
+          try {
+            await window.api.groups.remove(gname);
+            const { reloadConnections } = await import('./state.js');
+            await reloadConnections();
+            toast.success(`分组 ${gname} 已删除`);
+          } catch (err) { toast.error(err.message); }
+        } },
+      ]);
+    },
+  });
+  tw.classList.add('open');
+  for (const conn of conns) children.append(renderConnNode(conn));
+  if (!conns.length) {
+    children.append(el('div', { class: 'tree-loading', style: { paddingLeft: '24px' } }, '（空分组，右键新建连接）'));
+  }
+  container.append(row, children);
+  return container;
+}
+
 // ---------------- 入口与刷新 ----------------
 export function renderTree() {
   treeRoot = $('#tree');
@@ -760,8 +813,11 @@ export function renderTree() {
     treeRoot.append(el('div', { style: { padding: '24px 16px', color: 'var(--text-muted)', fontSize: '12.5px', lineHeight: '1.8' } },
       '还没有连接。', el('br'), '点击工具栏“新建连接”开始。'));
   }
-  // 按分组渲染：有分组的进文件夹（默认展开），未分组的在根
+  // 按分组渲染：声明的分组（含空组）+ 连接上使用的分组，未分组连接在根
   const groups = new Map();
+  for (const g of state.groups || []) {
+    if (g && g.trim()) groups.set(g.trim(), []);
+  }
   const ungrouped = [];
   for (const conn of state.connections) {
     if (conn.group && conn.group.trim()) {
@@ -773,28 +829,7 @@ export function renderTree() {
     }
   }
   for (const [gname, conns] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const container = el('div', { class: 'tree-node' });
-    const children = el('div', { class: 'tree-children open', style: { paddingLeft: '14px' } });
-    const { row, tw } = nodeRow({
-      depth: 0,
-      icon: 'folder',
-      label: gname,
-      meta: String(conns.length),
-      twisty: true,
-      cls: 'tree-group',
-      onToggle: () => {
-        const open = children.classList.contains('open');
-        setOpen(tw, children, !open);
-      },
-      onDblClick: () => {
-        const open = children.classList.contains('open');
-        setOpen(tw, children, !open);
-      },
-    });
-    tw.classList.add('open');
-    for (const conn of conns) children.append(renderConnNode(conn));
-    container.append(row, children);
-    treeRoot.append(container);
+    treeRoot.append(renderGroupNode(gname, conns));
   }
   for (const conn of ungrouped) {
     treeRoot.append(renderConnNode(conn));
@@ -805,6 +840,17 @@ export function renderTree() {
     e.preventDefault();
     showMenu(e.clientX, e.clientY, [
       { label: '新建连接…', icon: 'plus', onClick: () => openConnDialog() },
+      { label: '新建组…', icon: 'folder', onClick: async () => {
+        const { promptDialog } = await import('./toast.js');
+        const name = await promptDialog('新建组', '分组名:');
+        if (!name) return;
+        try {
+          await window.api.groups.add(name);
+          const { reloadConnections } = await import('./state.js');
+          await reloadConnections();
+          toast.success(`分组 ${name} 已创建`);
+        } catch (err) { toast.error(err.message); }
+      } },
     ]);
   };
 }

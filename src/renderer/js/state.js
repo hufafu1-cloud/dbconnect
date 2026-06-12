@@ -5,6 +5,7 @@ export const on = (type, fn) => bus.addEventListener(type, (e) => fn(e.detail));
 
 export const state = {
   connections: [],            // 已保存连接配置
+  groups: [],                 // 全部分组名（含空组）
   open: new Map(),            // connId -> {version, databases:[], objectsCache:Map(db|schema -> objects)}
   // 当前树上选中的目标，用于“新建查询”等默认上下文
   activeTarget: null,         // {connId, db, schema}
@@ -27,6 +28,7 @@ export function connColor(id) {
 
 export async function reloadConnections() {
   state.connections = await window.api.conn.list();
+  try { state.groups = await window.api.groups.list(); } catch (e) { state.groups = []; }
   emit('connections-changed');
 }
 
