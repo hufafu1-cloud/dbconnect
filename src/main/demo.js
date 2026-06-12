@@ -116,6 +116,17 @@ async function runDemo(createWindow) {
   await wait(600);
   await shot('shot-1-objects.png');
 
+  // 自绘菜单栏下拉
+  await ej(`(() => {
+    const m = document.querySelector('#menubar .menu-item');
+    if (m) m.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    return !!m;
+  })()`);
+  await wait(400);
+  await shot('shot-14-menu.png');
+  await ej('window.__test.closeMenus()');
+  await wait(200);
+
   // 工具栏对象类型切换：触发器
   await ej(`(() => {
     const b = [...document.querySelectorAll('#toolbar .tbtn-big')].find((x) => x.textContent.trim() === '触发器');

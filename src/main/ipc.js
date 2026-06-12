@@ -201,6 +201,22 @@ function register(getWin) {
     node: process.versions.node,
     chrome: process.versions.chrome,
   }));
+
+  h('app:openExternal', (url) => {
+    if (/^https?:\/\//i.test(String(url))) require('electron').shell.openExternal(url);
+  });
+
+  h('app:winCmd', (cmd) => {
+    const w = getWin();
+    if (!w || w.isDestroyed()) return;
+    switch (cmd) {
+      case 'minimize': w.minimize(); break;
+      case 'maximize': w.isMaximized() ? w.unmaximize() : w.maximize(); break;
+      case 'close': w.close(); break;
+      case 'devtools': w.webContents.toggleDevTools(); break;
+      default: break;
+    }
+  });
 }
 
 module.exports = { register };

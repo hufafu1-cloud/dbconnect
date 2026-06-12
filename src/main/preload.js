@@ -99,5 +99,7 @@ contextBridge.exposeInMainWorld('api', {
     confirmClose: () => ipcRenderer.send('app:confirm-close'),
     onCloseRequest: (cb) => ipcRenderer.on('app:close-request', () => cb()),
     onMenuAction: (cb) => ipcRenderer.on('menu:action', (_e, id) => cb(id)),
+    openExternal: (url) => inv('app:openExternal', url),
+    winCmd: (cmd) => inv('app:winCmd', cmd),
   },
 });

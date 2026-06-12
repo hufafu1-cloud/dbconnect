@@ -154,10 +154,12 @@ function setupSplitter() {
 // ---------------- 快捷键 ----------------
 function setupShortcuts() {
   document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && (e.key === 'w' || e.key === 'W')) {
-      e.preventDefault();
-      closeActive();
-    }
+    if (!e.ctrlKey || e.shiftKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 'w') { e.preventDefault(); closeActive(); }
+    else if (k === 'n') { e.preventDefault(); runMenuAction('new-conn'); }
+    else if (k === 'q') { e.preventDefault(); runMenuAction('new-query'); }
+    else if (k === 'd') { e.preventDefault(); runMenuAction('toggle-theme'); }
   });
 }
 
@@ -171,12 +173,10 @@ function firstOpenTarget() {
   return { connId: first, db: (oc.databases && oc.databases[0]) || null };
 }
 
-function setupMenuActions() {
-  if (!window.api.app.onMenuAction) return;
-  window.api.app.onMenuAction(async (id) => {
-    const t = firstOpenTarget();
-    const needConn = () => { if (!t) toast.info('请先打开一个连接'); return !!t; };
-    switch (id) {
+export async function runMenuAction(id) {
+  const t = firstOpenTarget();
+  const needConn = () => { if (!t) toast.info('请先打开一个连接'); return !!t; };
+  switch (id) {
       case 'new-conn': openConnDialog(); break;
       case 'new-query': newQueryFromToolbar(); break;
       case 'run-sql-file': if (needConn()) (await import('./dbaTools.js')).openRunSqlFileDialog(t); break;
@@ -200,7 +200,6 @@ function setupMenuActions() {
       case 'about': showAbout(); break;
       default: break;
     }
-  });
 }
 
 // ---------------- 退出确认 ----------------
@@ -281,13 +280,14 @@ function setupTestHooks() {
 // ---------------- 启动 ----------------
 async function boot() {
   try { applyTheme(localStorage.getItem('dbc-theme') || 'light'); } catch (e) { /* ignore */ }
+  const { buildMenuBar } = await import('./menubar.js');
+  buildMenuBar(runMenuAction);
   buildToolbar();
   // 侧栏标题（Navicat 的“我的连接”）
   const head = $('#sidebar-head');
   if (head && !head.querySelector('.sidebar-title')) {
     head.prepend(el('div', { class: 'sidebar-title' }, iconEl('connection'), '我的连接'));
   }
-  setupMenuActions();
   initObjectsTab();
   setupSplitter();
   setupShortcuts();

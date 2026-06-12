@@ -79,6 +79,29 @@ body {
 }
 #app { display: flex; flex-direction: column; height: 100vh; }
 
+/* ---------- 自绘菜单栏 ---------- */
+#menubar {
+  display: flex; align-items: center; gap: 2px;
+  padding: 3px 10px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border-light);
+  flex: 0 0 auto; user-select: none;
+}
+.menu-item {
+  padding: 5px 14px;
+  border-radius: 5px;
+  font-size: 13px; color: var(--text);
+  cursor: default; white-space: nowrap;
+}
+.menu-item:hover, .menu-item.open { background: var(--hover); }
+.menu-item.open { background: var(--selected); }
+
+/* 菜单项右侧快捷键提示 */
+.ctx-item .ctx-hint {
+  margin-left: auto; padding-left: 22px;
+  color: var(--text-muted); font-size: 11.5px;
+}
+
 /* ---------- 顶部工具栏 ---------- */
 #toolbar {
   display: flex; align-items: center; gap: 4px;

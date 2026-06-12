@@ -37,6 +37,7 @@ export function showMenu(x, y, items) {
     const ic = el('span', { style: { display: 'inline-flex', width: '14px' } });
     if (it.icon && icons[it.icon]) ic.innerHTML = icons[it.icon];
     item.append(ic, el('span', {}, it.label));
+    if (it.hint) item.append(el('span', { class: 'ctx-hint' }, it.hint));
     menu.append(item);
   }
   document.body.append(menu);
