@@ -12,43 +12,89 @@ import { openQueryTab } from './queryTab.js';
 import { openTableTab } from './tableTab.js';
 import { statusbar } from './statusbar.js';
 
-// ---------------- 工具栏 ----------------
+// ---------------- 工具栏（Navicat 风格大图标） ----------------
+function newQueryFromToolbar() {
+  let t = state.activeTarget;
+  if (!t || !state.open.has(t.connId)) {
+    const first = [...state.open.keys()][0];
+    if (!first) { toast.info('请先打开一个连接'); return; }
+    const oc = state.open.get(first);
+    t = { connId: first, db: (oc.databases && oc.databases[0]) || null };
+  }
+  actions.newQuery(t);
+}
+
+async function openHistory() {
+  const { openHistoryTab } = await import('./historyTab.js');
+  openHistoryTab();
+}
+
+function showConnMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  showMenu(r.left, r.bottom + 4, [
+    { label: 'MySQL / MariaDB', icon: 'mysql', onClick: () => openConnDialog(null, 'mysql') },
+    { label: 'PostgreSQL', icon: 'postgres', onClick: () => openConnDialog(null, 'postgres') },
+    { label: 'SQLite', icon: 'sqlite', onClick: () => openConnDialog(null, 'sqlite') },
+    { label: 'SQL Server', icon: 'mssql', onClick: () => openConnDialog(null, 'mssql') },
+    { label: 'ClickHouse', icon: 'clickhouse', onClick: () => openConnDialog(null, 'clickhouse') },
+    { label: 'OceanBase (MySQL 模式)', icon: 'oceanbase', onClick: () => openConnDialog(null, 'oceanbase') },
+    { label: 'OceanBase (Oracle 模式)', icon: 'oboracle', onClick: () => openConnDialog(null, 'oboracle') },
+  ]);
+}
+
+const kindBtns = new Map();
+
 function buildToolbar() {
   const tb = $('#toolbar');
-  const btnConn = el('button', { class: 'tbtn primary' }, iconEl('plus'), '新建连接', el('span', { style: { fontSize: '9px' } }, '▾'));
-  btnConn.addEventListener('click', () => {
-    const r = btnConn.getBoundingClientRect();
-    showMenu(r.left, r.bottom + 4, [
-      { label: 'MySQL / MariaDB', icon: 'mysql', onClick: () => openConnDialog(null, 'mysql') },
-      { label: 'PostgreSQL', icon: 'postgres', onClick: () => openConnDialog(null, 'postgres') },
-      { label: 'SQLite', icon: 'sqlite', onClick: () => openConnDialog(null, 'sqlite') },
-      { label: 'SQL Server', icon: 'mssql', onClick: () => openConnDialog(null, 'mssql') },
-      { label: 'ClickHouse', icon: 'clickhouse', onClick: () => openConnDialog(null, 'clickhouse') },
-      { label: 'OceanBase (MySQL 模式)', icon: 'oceanbase', onClick: () => openConnDialog(null, 'oceanbase') },
-      { label: 'OceanBase (Oracle 模式)', icon: 'oboracle', onClick: () => openConnDialog(null, 'oboracle') },
-    ]);
+  tb.innerHTML = '';
+  const big = (icon, label, onClick, title) => {
+    const span = el('span', {}, label);
+    return el('button', { class: 'tbtn-big', onClick, title: title || label }, iconEl(icon), span);
+  };
+
+  const btnConn = big('connection', '连接', () => showConnMenu(btnConn), '新建连接');
+  btnConn.querySelector('span').append(el('span', { class: 'caret' }, ' ▾'));
+  const btnQuery = big('query', '新建查询', newQueryFromToolbar);
+
+  // 对象类型切换（Navicat 式：表/视图/函数/…）
+  const kindDefs = [
+    ['table', 'table', '表'],
+    ['view', 'view', '视图'],
+    ['routine', 'func', '函数'],
+    ['trigger', 'trigger', '触发器'],
+    ['event', 'eventIcon', '事件'],
+    ['sequence', 'sequence', '序列'],
+    ['user', 'user', '用户'],
+    ['query', 'query', '查询'],
+  ];
+  kindBtns.clear();
+  const kindEls = [];
+  for (const [kind, icon, label] of kindDefs) {
+    const b = big(icon, label, async () => {
+      const { setObjectKind } = await import('./objectsTab.js');
+      const { activate } = await import('./tabs.js');
+      activate('objects');
+      await setObjectKind(kind);
+    }, `查看${label}`);
+    if (kind === 'table') b.classList.add('active');
+    kindBtns.set(kind, b);
+    kindEls.push(b);
+  }
+  on('objkind-changed', (k) => {
+    for (const [kk, b] of kindBtns) b.classList.toggle('active', kk === k);
   });
 
-  const btnQuery = el('button', { class: 'tbtn', onClick: () => {
-    let t = state.activeTarget;
-    if (!t || !state.open.has(t.connId)) {
-      const first = [...state.open.keys()][0];
-      if (!first) { toast.info('请先打开一个连接'); return; }
-      const oc = state.open.get(first);
-      t = { connId: first, db: (oc.databases && oc.databases[0]) || null };
-    }
-    actions.newQuery(t);
-  } }, iconEl('query'), '新建查询');
+  const btnHistory = big('history', '历史', openHistory);
+  const btnTheme = big('theme', '主题', toggleTheme, '切换浅色/深色主题');
+  const btnAbout = big('info', '关于', showAbout);
 
-  const btnHistory = el('button', { class: 'tbtn', onClick: async () => {
-    const { openHistoryTab } = await import('./historyTab.js');
-    openHistoryTab();
-  } }, iconEl('history'), '历史');
-
-  const btnAbout = el('button', { class: 'tbtn', onClick: showAbout }, iconEl('info'), '关于');
-  const btnTheme = el('button', { class: 'tbtn', title: '切换浅色/深色主题', onClick: toggleTheme }, iconEl('theme'), '主题');
-
-  tb.append(btnConn, btnQuery, btnHistory, el('span', { class: 'toolbar-spring' }), btnTheme, btnAbout);
+  tb.append(
+    btnConn, btnQuery,
+    el('span', { class: 'toolbar-sep' }),
+    ...kindEls,
+    el('span', { class: 'toolbar-spring' }),
+    btnHistory, btnTheme, btnAbout,
+  );
 }
 
 // ---------------- 主题 ----------------
@@ -111,6 +157,48 @@ function setupShortcuts() {
     if (e.ctrlKey && (e.key === 'w' || e.key === 'W')) {
       e.preventDefault();
       closeActive();
+    }
+  });
+}
+
+// ---------------- 原生菜单动作 ----------------
+function firstOpenTarget() {
+  let t = state.activeTarget;
+  if (t && state.open.has(t.connId)) return t;
+  const first = [...state.open.keys()][0];
+  if (!first) return null;
+  const oc = state.open.get(first);
+  return { connId: first, db: (oc.databases && oc.databases[0]) || null };
+}
+
+function setupMenuActions() {
+  if (!window.api.app.onMenuAction) return;
+  window.api.app.onMenuAction(async (id) => {
+    const t = firstOpenTarget();
+    const needConn = () => { if (!t) toast.info('请先打开一个连接'); return !!t; };
+    switch (id) {
+      case 'new-conn': openConnDialog(); break;
+      case 'new-query': newQueryFromToolbar(); break;
+      case 'run-sql-file': if (needConn()) (await import('./dbaTools.js')).openRunSqlFileDialog(t); break;
+      case 'transfer': if (needConn()) (await import('./dbaTools.js')).openTransferDialog(t); break;
+      case 'sync': if (needConn()) (await import('./syncDialog.js')).openSyncDialog(t); break;
+      case 'dump': if (needConn() && t.db) (await import('./dbaTools.js')).openDumpDialog(t); else if (t && !t.db) toast.info('请先在左侧选择数据库'); break;
+      case 'import': if (needConn() && t.db) (await import('./importWizard.js')).openImportWizard(t); else if (t && !t.db) toast.info('请先在左侧选择数据库'); break;
+      case 'history': openHistory(); break;
+      case 'processes': {
+        if (!needConn()) break;
+        const conn = state.connections.find((c) => c.id === t.connId);
+        if (conn && ['mysql', 'oceanbase', 'postgres', 'mssql', 'clickhouse'].includes(conn.type)) {
+          (await import('./procTab.js')).openProcTab(t.connId);
+        } else {
+          toast.info('当前连接类型不支持进程列表');
+        }
+        break;
+      }
+      case 'refresh': if (t && t.db) emit('objects-changed', t); break;
+      case 'toggle-theme': toggleTheme(); break;
+      case 'about': showAbout(); break;
+      default: break;
     }
   });
 }
@@ -178,8 +266,9 @@ function setupTestHooks() {
       return true;
     },
     openConnMenu: () => {
-      document.querySelector('#toolbar .tbtn').click();
-      return true;
+      const b = document.querySelector('#toolbar .tbtn-big') || document.querySelector('#toolbar .tbtn');
+      if (b) b.click();
+      return !!b;
     },
     closeMenus: () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
@@ -193,6 +282,12 @@ function setupTestHooks() {
 async function boot() {
   try { applyTheme(localStorage.getItem('dbc-theme') || 'light'); } catch (e) { /* ignore */ }
   buildToolbar();
+  // 侧栏标题（Navicat 的“我的连接”）
+  const head = $('#sidebar-head');
+  if (head && !head.querySelector('.sidebar-title')) {
+    head.prepend(el('div', { class: 'sidebar-title' }, iconEl('connection'), '我的连接'));
+  }
+  setupMenuActions();
   initObjectsTab();
   setupSplitter();
   setupShortcuts();

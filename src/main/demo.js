@@ -74,6 +74,12 @@ async function runDemo(createWindow) {
 
   const win = createWindow(true);
   win.webContents.setBackgroundThrottling(false);
+  win.webContents.on('console-message', (...a) => {
+    const ev = a[0];
+    const level = typeof a[1] === 'number' ? a[1] : (ev && ev.level);
+    const message = typeof a[2] === 'string' ? a[2] : (ev && ev.message);
+    if (level === 3 || level === 'error') console.log('[DEMO][渲染错误]', message);
+  });
   const ej = (code) => win.webContents.executeJavaScript(code, true);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const shot = async (name) => {
@@ -107,6 +113,21 @@ async function runDemo(createWindow) {
   })()`);
   await wait(600);
   await shot('shot-1-objects.png');
+
+  // 工具栏对象类型切换：触发器
+  await ej(`(() => {
+    const b = [...document.querySelectorAll('#toolbar .tbtn-big')].find((x) => x.textContent.trim() === '触发器');
+    if (b) b.click();
+    return !!b;
+  })()`);
+  await wait(700);
+  await shot('shot-13-objkind.png');
+  await ej(`(() => {
+    const b = [...document.querySelectorAll('#toolbar .tbtn-big')].find((x) => x.textContent.trim() === '表');
+    if (b) b.click();
+    return !!b;
+  })()`);
+  await wait(500);
 
   await ej(`window.__test.openTable(${id}, 'main', null, 'orders')`);
   await wait(1000);

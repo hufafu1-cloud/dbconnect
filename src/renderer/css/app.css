@@ -100,6 +100,24 @@ body {
 .tbtn.primary { color: var(--accent-dark); }
 .tbtn:disabled { opacity: 0.45; cursor: default; }
 .tbtn:disabled:hover { background: transparent; border-color: transparent; }
+
+/* Navicat 风格大图标按钮：图标在上、文字在下 */
+.tbtn-big {
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; min-width: 58px; padding: 6px 10px 5px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--text);
+  font-size: 12px; cursor: pointer; white-space: nowrap; line-height: 1;
+}
+.tbtn-big svg { width: 26px; height: 26px; flex: 0 0 auto; }
+.tbtn-big:hover { background: var(--hover); border-color: var(--border-light); }
+.tbtn-big:active { background: var(--selected); }
+.tbtn-big.active {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+.tbtn-big:disabled { opacity: 0.45; cursor: default; }
+.tbtn-big .caret { font-size: 8px; color: var(--text-muted); }
 .toolbar-sep { width: 1px; height: 22px; background: var(--border); margin: 0 6px; }
 .toolbar-spring { flex: 1; }
 
@@ -112,6 +130,11 @@ body {
   display: flex; flex-direction: column;
 }
 #sidebar-head { padding: 7px 8px; border-bottom: 1px solid var(--border-light); }
+.sidebar-title {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 2px 6px; font-size: 12.5px; font-weight: 600; color: var(--text);
+}
+.sidebar-title svg { width: 14px; height: 14px; }
 #sidebar-head input {
   width: 100%; padding: 5px 9px;
   border: 1px solid var(--border); border-radius: 5px;
