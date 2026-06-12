@@ -41,12 +41,18 @@ export async function openTransferDialog(preset) {
   if (state.open.size < 1) { toast.info('请先打开连接'); return; }
   let running = false;
 
-  const srcConn = el('select', {}, ...openConnsOptions(preset && preset.connId));
-  const srcDb = el('select', { style: { minWidth: '120px' } });
-  const srcSchema = el('select', { style: { minWidth: '90px', display: 'none' } });
-  const dstConn = el('select', {}, ...openConnsOptions());
-  const dstDb = el('select', { style: { minWidth: '120px' } });
-  const dstSchema = el('select', { style: { minWidth: '90px', display: 'none' } });
+  // 源/目标各占一行：连接定宽、库自适应、模式定宽，避免长库名挤压换行
+  const selStyles = {
+    conn: { width: '170px', flex: '0 0 170px' },
+    db: { flex: '1 1 auto', minWidth: '0' },
+    schema: { width: '120px', flex: '0 0 120px', display: 'none' },
+  };
+  const srcConn = el('select', { style: selStyles.conn }, ...openConnsOptions(preset && preset.connId));
+  const srcDb = el('select', { style: selStyles.db });
+  const srcSchema = el('select', { style: { ...selStyles.schema } });
+  const dstConn = el('select', { style: selStyles.conn }, ...openConnsOptions());
+  const dstDb = el('select', { style: selStyles.db });
+  const dstSchema = el('select', { style: { ...selStyles.schema } });
 
   const tablesBox = el('div', { style: { maxHeight: '180px', overflow: 'auto', border: '1px solid var(--border-light)', borderRadius: '6px', padding: '6px 10px' } });
   const filterInput = el('input', { type: 'text', placeholder: '过滤表名…', style: { width: '140px' } });
@@ -111,11 +117,12 @@ export async function openTransferDialog(preset) {
   dstDb.addEventListener('change', () => fillSchemaSel(dstConn, dstDb, dstSchema));
 
   const lbl = (s) => el('span', { style: { color: 'var(--text-muted)', fontSize: '12.5px' } }, s);
+  const pairRow = (label, c, d, s) => el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+    el('span', { style: { color: 'var(--text-muted)', fontSize: '12.5px', flex: '0 0 36px', textAlign: 'right' } }, label),
+    c, d, s);
   const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', width: '620px', maxWidth: '80vw' } },
-    el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
-      lbl('源:'), srcConn, srcDb, srcSchema,
-      el('span', { style: { margin: '0 6px' } }, '→'),
-      lbl('目标:'), dstConn, dstDb, dstSchema),
+    pairRow('源:', srcConn, srcDb, srcSchema),
+    pairRow('目标:', dstConn, dstDb, dstSchema),
     el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
       lbl('表:'),
       el('button', { class: 'pbtn', onClick: () => tableChecks.forEach((x) => { x.cb.checked = true; }) }, '全选'),
