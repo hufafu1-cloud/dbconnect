@@ -63,7 +63,7 @@ async function createWriter(format, file, ctx) {
     sql: {
       header(cols) {
         colNames = cols.map((c) => c.name);
-        writeLn(`-- 由 DBConnect 导出于 ${new Date().toLocaleString('zh-CN')}`);
+        writeLn(`-- 由 Datavia 导出于 ${new Date().toLocaleString('zh-CN')}`);
         writeLn('');
       },
       row(r) {

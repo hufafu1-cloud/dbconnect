@@ -2,6 +2,7 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
 const isSmoke = process.argv.includes('--smoke');
 const isSelfTest = process.argv.includes('--selftest');
@@ -9,7 +10,25 @@ const isDemo = process.argv.includes('--demo');
 
 // 测试/演示模式使用临时用户数据目录，避免污染真实配置
 if (isSmoke || isSelfTest || isDemo) {
-  app.setPath('userData', path.join(os.tmpdir(), 'dbconnect-test-' + process.pid));
+  app.setPath('userData', path.join(os.tmpdir(), 'datavia-test-' + process.pid));
+} else {
+  // 旧品牌（DBConnect）的本地配置一次性迁移到 Datavia 目录，避免已存连接“丢失”
+  migrateOldData();
+}
+
+// 改名后 userData 目录从 %APPDATA%/DBConnect 变为 %APPDATA%/Datavia，迁移历史数据
+function migrateOldData() {
+  try {
+    const newDir = app.getPath('userData'); // 此时 productName=Datavia
+    const oldDir = path.join(path.dirname(newDir), 'DBConnect');
+    if (oldDir === newDir || !fs.existsSync(oldDir)) return;
+    fs.mkdirSync(newDir, { recursive: true });
+    for (const f of ['connections.json', 'groups.json', 'history.json', 'queries.json']) {
+      const src = path.join(oldDir, f);
+      const dst = path.join(newDir, f);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst);
+    }
+  } catch (e) { /* 迁移失败不影响启动 */ }
 }
 
 const ipc = require('./ipc');
@@ -25,7 +44,7 @@ function createWindow(show) {
     minWidth: 1024,
     minHeight: 640,
     show: false,
-    title: 'DBConnect',
+    title: 'Datavia',
     icon: path.join(__dirname, '../../assets/icon.ico'),
     backgroundColor: '#f3f4f6',
     webPreferences: {

@@ -55,12 +55,14 @@ export function buildMenuBar(runAction) {
     ['帮助', () => [
       { label: 'GitHub 仓库', onClick: () => window.api.app.openExternal('https://github.com/hufafu1-cloud/dbconnect') },
       { sep: true },
-      { label: '关于 DBConnect', onClick: () => runAction('about') },
+      { label: '关于 Datavia', onClick: () => runAction('about') },
     ]],
   ];
 
   const bar = $('#menubar');
   bar.innerHTML = '';
+  // 品牌标识
+  bar.append(el('div', { class: 'menu-brand', title: 'Datavia · 数据之道' }, 'Datavia'));
 
   const openFor = (item, build) => {
     if (openItem) openItem.classList.remove('open');

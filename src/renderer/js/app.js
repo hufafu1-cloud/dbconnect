@@ -118,11 +118,12 @@ function toggleTheme() {
 async function showAbout() {
   const info = await window.api.app.info();
   openModal({
-    title: '关于 DBConnect',
+    title: '关于 Datavia',
     body: el('div', { style: { lineHeight: '2', fontSize: '13px', minWidth: '320px' } },
-      el('div', { style: { fontSize: '16px', fontWeight: '600' } }, `DBConnect v${info.version}`),
+      el('div', { style: { fontSize: '17px', fontWeight: '700', letterSpacing: '0.5px' } }, `Datavia`),
+      el('div', { style: { color: 'var(--text-muted)', marginTop: '-4px' } }, `数据之道 · v${info.version}`),
       el('div', { style: { color: 'var(--text-muted)' } }, 'Navicat 风格的数据库管理工具'),
-      el('div', {}, `支持: MySQL / MariaDB · PostgreSQL · SQLite · SQL Server`),
+      el('div', {}, `支持: MySQL / MariaDB · PostgreSQL · SQLite · SQL Server · ClickHouse · OceanBase`),
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
         `Electron ${info.electron} · Node ${info.node} · Chromium ${info.chrome}`),
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
@@ -213,7 +214,7 @@ export async function runMenuAction(id) {
 function setupCloseGuard() {
   window.api.app.onCloseRequest(async () => {
     if (!anyDirty()) { window.api.app.confirmClose(); return; }
-    const ok = await confirmDialog('退出 DBConnect', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
+    const ok = await confirmDialog('退出 Datavia', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
     if (ok) window.api.app.confirmClose();
   });
 }

@@ -1,4 +1,4 @@
-/* ============ DBConnect — Navicat 风格界面（支持浅色/深色主题） ============ */
+/* ============ Datavia — Navicat 风格界面（支持浅色/深色主题） ============ */
 :root {
   --accent: #2b7de9;
   --accent-dark: #1b66c9;
@@ -93,6 +93,12 @@ body {
   background: var(--chrome);
   border-bottom: 1px solid var(--border-light);
   flex: 0 0 auto; user-select: none;
+}
+.menu-brand {
+  font-size: 14px; font-weight: 700; letter-spacing: 0.4px;
+  color: var(--accent-dark); padding: 0 14px 0 4px; margin-right: 4px;
+  border-right: 1px solid var(--border-light); cursor: default;
+  user-select: none;
 }
 .menu-item {
   padding: 5px 14px;

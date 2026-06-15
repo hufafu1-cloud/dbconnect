@@ -32,7 +32,7 @@ class ClickHouseAdapter extends BaseAdapter {
         password: c.password || '',
         database: key,
         request_timeout: 120000,
-        application: 'DBConnect',
+        application: 'Datavia',
         // 长查询经代理/负载均衡时保持连接活跃，同时消除客户端配置告警
         clickhouse_settings: { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: '50000' },
       }));

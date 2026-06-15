@@ -1,4 +1,4 @@
-// 连接配置持久化：%APPDATA%/DBConnect/connections.json
+// 连接配置持久化：%APPDATA%/Datavia/connections.json
 // 密码用 Electron safeStorage 加密（不可用时退化为 base64 并标记）
 const { app, safeStorage } = require('electron');
 const fs = require('fs');

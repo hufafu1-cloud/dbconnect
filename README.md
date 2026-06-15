@@ -1,4 +1,6 @@
-# DBConnect — Navicat 风格的数据库管理工具
+# Datavia — Navicat 风格的数据库管理工具
+
+> **Datavia**（数据之道）· data + via（拉丁语「道路」）
 
 一款可在 Windows 上安装运行的桌面数据库连接管理工具，界面与操作参考 Navicat 设计。
 基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等数据库。
@@ -15,7 +17,7 @@
 - 新建 / 编辑 / 删除连接，支持「测试连接」
 - **SSH 隧道**：所有网络型数据库均可经跳板机连接（密码 / 私钥文件认证，支持私钥口令），
   数据库主机/端口填写跳板机视角的内网地址；测试连接同样走隧道
-- 连接配置保存在本机（`%APPDATA%/DBConnect/connections.json`），数据库密码、SSH 密码与
+- 连接配置保存在本机（`%APPDATA%/Datavia/connections.json`），数据库密码、SSH 密码与
   私钥口令均使用系统级加密（Electron safeStorage / DPAPI）
 - SQL Server 支持加密连接与信任服务器证书选项；SQLite 支持选择或新建数据库文件
 - ClickHouse 走 HTTP 接口（默认 8123），支持 HTTPS（云服务 8443）
@@ -152,7 +154,7 @@ npm run dist     # 打包 Windows 安装程序（输出到 release/）
 npm run dist
 ```
 
-输出 `release/DBConnect-Setup-1.0.0.exe`（NSIS 安装包，支持选择安装目录、创建桌面/开始菜单快捷方式）。
+输出 `release/Datavia-Setup-<版本>.exe`（NSIS 安装包，支持选择安装目录、创建桌面/开始菜单快捷方式）。
 
 ## 技术架构
 
