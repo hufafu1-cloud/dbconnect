@@ -66,6 +66,27 @@ export function openStructTab(target) {
         body.append(el('div', { style: { color: 'var(--text-muted)', fontSize: '12.5px' } }, '（无索引）'));
       }
 
+      // 外键
+      try {
+        const fks = await window.api.db.foreignKeys(target.connId, { db: target.db, schema: target.schema, table: target.table });
+        if (fks && fks.length) {
+          body.append(el('h3', {}, `外键（${fks.length}）`));
+          const fkTable = el('table', { class: 'struct-table' },
+            el('thead', {}, el('tr', {},
+              el('th', {}, '名称'), el('th', {}, '本表栏位'), el('th', {}, '引用表'), el('th', {}, '引用栏位'))));
+          const fkb = el('tbody');
+          for (const fk of fks) {
+            fkb.append(el('tr', {},
+              el('td', {}, fk.name),
+              el('td', { style: { fontFamily: 'var(--mono)' } }, fk.columns.join(', ')),
+              el('td', { style: { fontFamily: 'var(--mono)' } }, (fk.refSchema ? fk.refSchema + '.' : '') + fk.refTable),
+              el('td', { style: { fontFamily: 'var(--mono)' } }, fk.refColumns.join(', '))));
+          }
+          fkTable.append(fkb);
+          body.append(fkTable);
+        }
+      } catch (e) { /* 不支持外键的库忽略 */ }
+
       // DDL
       body.append(el('h3', {}, 'DDL'));
       const ddlBox = el('div', { class: 'ddl-box' }, info.ddl || '（不可用）');

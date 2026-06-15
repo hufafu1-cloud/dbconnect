@@ -62,9 +62,27 @@ function register(getWin) {
     }
   });
 
-  // ---- 取消查询 / 列补全 ----
+  // ---- 取消查询 / 列补全 / 外键 / BLOB ----
   h('db:cancel', (a) => dbm.get(a.connId).cancel());
   h('db:allColumns', (a) => dbm.get(a.connId).listAllColumns(a.db, a.schema));
+  h('db:foreignKeys', (a) => dbm.get(a.connId).listForeignKeys(a.db, a.schema, a.table));
+  h('db:cellBlob', async (a) => {
+    const buf = await dbm.get(a.connId).cellBlob(a.db, a);
+    if (!buf) return null;
+    const max = 8 * 1024 * 1024; // 上限 8MB
+    return { base64: buf.subarray(0, max).toString('base64'), length: buf.length, truncated: buf.length > max };
+  });
+
+  // ---- 在库中查找 ----
+  const search = require('./search');
+  ipcMain.handle('db:search', async (event, a) => {
+    try {
+      const prog = (p) => { try { event.sender.send('search:progress', p); } catch (e) { /* ignore */ } };
+      return { ok: true, data: await search.searchDatabase(dbm.get(a.connId), a, prog) };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
 
   // ---- 扩展对象（函数/触发器/事件/序列/用户） ----
   h('db:objectCaps', (a) => dbm.get(a.connId).objectCaps);

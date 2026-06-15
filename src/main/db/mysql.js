@@ -80,6 +80,26 @@ class MySQLAdapter extends BaseAdapter {
     return map;
   }
 
+  async listForeignKeys(db, _schema, table) {
+    const L = (v) => this.literal(v);
+    const rows = await this._q(
+      `SELECT CONSTRAINT_NAME AS name, COLUMN_NAME AS col,
+              REFERENCED_TABLE_NAME AS reftab, REFERENCED_COLUMN_NAME AS refcol,
+              ORDINAL_POSITION AS pos
+       FROM information_schema.KEY_COLUMN_USAGE
+       WHERE TABLE_SCHEMA = ${L(db)} AND TABLE_NAME = ${L(table)}
+         AND REFERENCED_TABLE_NAME IS NOT NULL
+       ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`);
+    const map = new Map();
+    for (const r of rows) {
+      if (!map.has(r.name)) map.set(r.name, { name: r.name, columns: [], refSchema: null, refTable: r.reftab, refColumns: [] });
+      const fk = map.get(r.name);
+      fk.columns.push(r.col);
+      fk.refColumns.push(r.refcol);
+    }
+    return [...map.values()];
+  }
+
   // ---------- 对象覆盖：函数 / 触发器 / 事件 / 用户 ----------
   get objectCaps() {
     return { routines: true, triggers: true, events: true, sequences: false, users: true, processes: true };

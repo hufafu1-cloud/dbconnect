@@ -133,6 +133,23 @@ class SQLiteAdapter extends BaseAdapter {
     return map;
   }
 
+  async listForeignKeys(_db, _schema, table) {
+    let rows = [];
+    try {
+      rows = this._execRaw(`PRAGMA foreign_key_list(${this.quoteIdent(table)})`).rows;
+    } catch (e) { return []; }
+    // PRAGMA foreign_key_list: id, seq, table, from, to, on_update, on_delete, match
+    const map = new Map();
+    for (const r of rows) {
+      const id = r[0];
+      if (!map.has(id)) map.set(id, { name: `fk_${table}_${id}`, columns: [], refSchema: null, refTable: r[2], refColumns: [] });
+      const fk = map.get(id);
+      fk.columns.push(r[3]);
+      fk.refColumns.push(r[4]);
+    }
+    return [...map.values()];
+  }
+
   async tableInfo(_db, _schema, table) {
     const ti = this._execRaw(`PRAGMA table_info(${this.quoteIdent(table)})`);
     // PRAGMA table_info: cid, name, type, notnull, dflt_value, pk

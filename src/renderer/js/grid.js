@@ -177,7 +177,13 @@ export class DataGrid {
     td.innerHTML = isNew && v === undefined ? '<span class="v-null"></span>' : renderCellValue(v === undefined ? null : v);
     td.addEventListener('dblclick', () => {
       if (this.editable || isNew) this._beginEdit(td, r, i, isNew);
-      else cellViewer(this.columns[i].name, v === undefined ? null : v);
+      else {
+        const pk = this._pkOf(r, isNew);
+        const blobCtx = (v && typeof v === 'object' && v.__blob && pk && this.opts.copyContext)
+          ? { connId: this.opts.copyContext.connId, db: this.opts.copyContext.db, schema: this.opts.copyContext.schema, table: this.opts.copyContext.table, column: this.columns[i].name, pk }
+          : null;
+        cellViewer(this.columns[i].name, v === undefined ? null : v, blobCtx);
+      }
     });
     td.addEventListener('click', (e) => this._selectRow(r, isNew, e));
     return td;
@@ -281,11 +287,34 @@ export class DataGrid {
     if (this.opts.onChange) this.opts.onChange();
   }
 
+  /** 当前显示行的主键对象（无主键返回 null） */
+  _pkOf(r, isNew) {
+    if (isNew || !this.pk || !this.pk.length) return null;
+    const o = {};
+    for (const name of this.pk) {
+      const idx = this.columns.findIndex((c) => c.name === name);
+      if (idx < 0) return null;
+      o[name] = this.rows[r][idx];
+    }
+    return o;
+  }
+
   _cellMenu(e, r, i, isNew) {
     const v = this._currentVal(r, i, isNew);
     const canEdit = this.editable || isNew;
+    const colName = this.columns[i].name;
+    const pk = this._pkOf(r, isNew);
+    const blobCtx = (v && typeof v === 'object' && v.__blob && pk && this.opts.copyContext)
+      ? { connId: this.opts.copyContext.connId, db: this.opts.copyContext.db, schema: this.opts.copyContext.schema, table: this.opts.copyContext.table, column: colName, pk }
+      : null;
+    const fk = this.opts.fkMap && this.opts.fkMap[colName];
     showMenu(e.clientX, e.clientY, [
-      { label: '查看单元格', icon: 'info', onClick: () => cellViewer(this.columns[i].name, v === undefined ? null : v) },
+      { label: '查看单元格', icon: 'info', onClick: () => cellViewer(colName, v === undefined ? null : v, blobCtx) },
+      fk && this.opts.onJumpFk && v !== null && v !== undefined && !(typeof v === 'object') && {
+        label: `跳转到 ${fk.refTable}（${fk.refColumn} = ${cellText(v).slice(0, 20)}）`,
+        icon: 'link',
+        onClick: () => this.opts.onJumpFk(fk, v),
+      },
       { label: '复制单元格', icon: 'copy', onClick: () => { navigator.clipboard.writeText(cellText(v)); } },
       { sep: true },
       { label: '复制行（Tab 分隔）', icon: 'copy', onClick: () => this._copyRows('tsv', r) },

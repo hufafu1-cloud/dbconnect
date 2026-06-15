@@ -25,6 +25,25 @@ class BaseAdapter {
   /** 整库列清单 {表名: [列名...]}，供编辑器补全；默认空 */
   async listAllColumns(_db, _schema) { return {}; }
 
+  /** 外键清单 [{name, columns:[], refSchema, refTable, refColumns:[]}]；默认空 */
+  async listForeignKeys(_db, _schema, _table) { return []; }
+
+  /** 读取单个单元格的完整 BLOB（按主键定位），返回 Buffer 或 null */
+  async cellBlob(db, args) {
+    const { schema, table, column, pk } = args;
+    const where = Object.entries(pk)
+      .map(([c, v]) => (v === null ? `${this.quoteIdent(c)} IS NULL` : `${this.quoteIdent(c)} = ${this.literal(v)}`))
+      .join(' AND ');
+    const sql = `SELECT ${this.quoteIdent(column)} FROM ${this.qualify(db, schema, table)} WHERE ${where}`;
+    const r = await this.exec(db, sql); // exec 返回原始行（未 sanitize），BLOB 为 Buffer
+    const v = r && r.rows && r.rows[0] ? r.rows[0][0] : null;
+    if (v === null || v === undefined) return null;
+    if (Buffer.isBuffer(v)) return v;
+    if (v instanceof Uint8Array) return Buffer.from(v);
+    if (typeof v === 'string') return Buffer.from(v, 'utf8');
+    return Buffer.from(String(v), 'utf8');
+  }
+
   /** 各类对象的支持情况（树上据此决定显示哪些节点） */
   get objectCaps() {
     return { routines: false, triggers: false, events: false, sequences: false, users: false, processes: false };

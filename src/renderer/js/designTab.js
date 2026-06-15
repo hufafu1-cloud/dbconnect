@@ -63,6 +63,7 @@ export function openDesignTab(target) {
       p.pg.classList.toggle('active', i === idx);
     });
     if (pages[idx].title === 'SQL 预览') refreshPreview();
+    if (pages[idx].title === '外键') loadFks();
   }
 
   // 栏位页
@@ -75,6 +76,9 @@ export function openDesignTab(target) {
     el('button', { class: 'pbtn', onClick: addIndex }, iconEl('plus'), '添加索引'),
     el('button', { class: 'pbtn', onClick: removeIndex }, iconEl('minus'), '删除索引'));
   const ixPage = el('div', { style: { display: 'flex', flexDirection: 'column', flex: '1', minHeight: '0' } }, ixToolbar, ixHost);
+  // 外键页（只读查看；建/删外键请用 SQL）
+  const fkHost = el('div', { class: 'design-grid-host', style: { padding: '10px' } });
+  const fkPage = el('div', { style: { display: 'flex', flexDirection: 'column', flex: '1', minHeight: '0' } }, fkHost);
   // SQL 预览页
   const previewBox = el('div', { class: 'ddl-box', style: { margin: '10px', flex: '1', overflow: 'auto', whiteSpace: 'pre' } }, '');
   const warnBox = el('div', { style: { margin: '0 10px 10px', color: 'var(--orange)', fontSize: '12px', whiteSpace: 'pre-wrap' } }, '');
@@ -82,7 +86,35 @@ export function openDesignTab(target) {
 
   addPage('栏位', colsPage);
   addPage('索引', ixPage);
+  if (!isNew) addPage('外键', fkPage);
   addPage('SQL 预览', previewPage);
+
+  let fkLoaded = false;
+  async function loadFks() {
+    if (fkLoaded || isNew) return;
+    fkLoaded = true;
+    fkHost.innerHTML = '加载中…';
+    try {
+      const fks = await window.api.db.foreignKeys(target.connId, { db: target.db, schema: target.schema, table: target.table });
+      fkHost.innerHTML = '';
+      if (!fks.length) { fkHost.append(el('div', { class: 'obj-placeholder' }, '（无外键）')); return; }
+      const t = el('table', { class: 'design-table' },
+        el('thead', {}, el('tr', {}, el('th', {}, '名称'), el('th', {}, '本表栏位'), el('th', {}, '引用表'), el('th', {}, '引用栏位'))));
+      const tb = el('tbody');
+      for (const fk of fks) {
+        tb.append(el('tr', {},
+          el('td', {}, fk.name),
+          el('td', { style: { fontFamily: 'var(--mono)' } }, fk.columns.join(', ')),
+          el('td', { style: { fontFamily: 'var(--mono)' } }, (fk.refSchema ? fk.refSchema + '.' : '') + fk.refTable),
+          el('td', { style: { fontFamily: 'var(--mono)' } }, fk.refColumns.join(', '))));
+      }
+      t.append(tb);
+      fkHost.append(t, el('div', { style: { marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' } }, '外键为只读查看；新增/删除外键请使用 SQL。'));
+    } catch (e) {
+      fkHost.innerHTML = '';
+      fkHost.append(el('div', { style: { color: 'var(--text-muted)' } }, '该数据库不支持外键或加载失败'));
+    }
+  }
 
   pane.append(toolbar, subTabs, subBody);
   activatePage(0);

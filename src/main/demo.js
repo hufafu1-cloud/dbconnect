@@ -32,7 +32,7 @@ async function buildSampleDb() {
     );
     CREATE TABLE orders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      customer_id INTEGER NOT NULL,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
       amount REAL,
       status TEXT,
       created_at TEXT,
@@ -146,12 +146,52 @@ async function runDemo(createWindow) {
   await wait(1000);
   await shot('shot-2-table.png');
 
+  // 表单视图：点击表单视图按钮
+  await ej(`(() => {
+    const b = [...document.querySelectorAll('.tabpane.active .pbtn')].find((x) => x.textContent.includes('表单视图'));
+    if (b) b.click();
+    return !!b;
+  })()`);
+  await wait(700);
+  await shot('shot-15-form.png');
+  // 切回网格
+  await ej(`(() => {
+    const b = [...document.querySelectorAll('.tabpane.active .pbtn')].find((x) => x.textContent.includes('表单视图'));
+    if (b) b.click();
+    return !!b;
+  })()`);
+  await wait(300);
+
+  // 在库中查找：打开对话框，填关键字，选“数据内容”，点查找
+  await ej(`window.__test.openSearch(${id}, 'main')`);
+  await wait(500);
+  await ej(`(() => {
+    const kw = document.querySelector('.modal-body input[type=text]');
+    if (kw) { kw.value = '北京'; }
+    const radios = document.querySelectorAll('.modal-body input[type=radio]');
+    if (radios[1]) { radios[1].checked = true; }
+    const run = [...document.querySelectorAll('.modal-foot .btn')].find((b) => b.textContent.includes('查找'));
+    if (run) run.click();
+    return !!kw;
+  })()`);
+  await wait(1200);
+  await shot('shot-16-search.png');
+  await ej('window.__test.closeMenus()');
+  await wait(200);
+
   await ej(`window.__test.runQuery(${id}, 'main', "SELECT c.name AS 客户, c.city AS 城市, COUNT(o.id) AS 订单数, ROUND(SUM(o.amount),2) AS 总金额 FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY 总金额 DESC LIMIT 10;")`);
   await wait(1500);
   await shot('shot-3-query.png');
 
   await ej(`window.__test.openDesigner(${id}, 'main', null, 'orders')`);
   await wait(1000);
+  // 切到“外键”子标签
+  await ej(`(() => {
+    const rt = [...document.querySelectorAll('.tabpane.active .rtab')].find((x) => x.textContent.trim() === '外键');
+    if (rt) rt.click();
+    return !!rt;
+  })()`);
+  await wait(500);
   await shot('shot-5-designer.png');
 
   await ej('window.__test.openHistory()');

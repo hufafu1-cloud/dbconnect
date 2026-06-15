@@ -340,6 +340,54 @@ body {
 
 .grid-empty { padding: 28px; text-align: center; color: var(--text-muted); }
 
+/* ---------- 筛选构建器 ---------- */
+.filter-builder {
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border-light);
+  flex: 0 0 auto;
+}
+.filter-builder select, .filter-builder input {
+  padding: 4px 7px; border: 1px solid var(--border); border-radius: 4px;
+  font-size: 12.5px; outline: none; background: var(--panel); color: var(--text);
+}
+.filter-builder select:focus, .filter-builder input:focus { border-color: var(--accent); }
+
+/* ---------- 表单视图 ---------- */
+.form-view { padding: 6px 0 16px; }
+.form-nav {
+  display: flex; align-items: center; gap: 8px; justify-content: center;
+  padding: 8px; position: sticky; top: 0; z-index: 1;
+  background: var(--panel-2); border-bottom: 1px solid var(--border-light); font-size: 12.5px;
+}
+.form-fields {
+  display: grid; grid-template-columns: minmax(140px, 220px) 1fr;
+  gap: 1px; background: var(--border-light);
+  margin: 10px 16px; border: 1px solid var(--border-light); border-radius: 6px; overflow: hidden;
+}
+.form-label {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 10px; background: var(--th-bg); font-size: 12.5px;
+}
+.form-label svg { width: 13px; height: 13px; }
+.form-label.pk .form-label-name { font-weight: 600; color: var(--orange); }
+.form-label-name { font-weight: 500; }
+.form-label-type { color: var(--text-muted); font-size: 11px; margin-left: auto; font-family: var(--mono); }
+.form-input-wrap { display: flex; align-items: stretch; background: var(--panel); }
+.form-view .form-input {
+  flex: 1; border: none; outline: none; resize: none;
+  padding: 6px 10px; font-size: 12.5px; font-family: var(--mono);
+  background: var(--panel); color: var(--text); line-height: 1.5;
+}
+.form-view .form-input.edited { background: var(--cell-modified); }
+.form-view .form-input:disabled { color: var(--text-muted); background: var(--panel-2); }
+.form-null-btn {
+  border: none; background: transparent; color: var(--text-muted);
+  cursor: pointer; padding: 0 9px; font-size: 13px;
+}
+.form-null-btn:hover { background: var(--hover); color: var(--text); }
+.form-fields > .form-input { background: var(--panel); }
+
 /* ---------- 查询页 ----------
    注意：.query-pane/.objects-pane 加在 .tabpane 上，display 由 .tabpane(.active) 控制 */
 .query-pane { flex-direction: column; }

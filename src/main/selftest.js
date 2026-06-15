@@ -579,6 +579,40 @@ async function runSelfTest() {
   await adS1.close(); await adS2.close();
   for (const f of [fS1, fS2]) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
 
+  // ---- 外键 / 在库中查找 / BLOB（第二档） ----
+  try {
+  const fkFile = path.join(os.tmpdir(), `dbc-fk-${Date.now()}.db`);
+  const adFk = new SQLiteAdapter({ id: 'fk', type: 'sqlite', file: fkFile });
+  await adFk.connect();
+  await adFk.runScript('main', `
+    CREATE TABLE dept (id INTEGER PRIMARY KEY, name TEXT);
+    CREATE TABLE emp (id INTEGER PRIMARY KEY, name TEXT, dept_id INTEGER REFERENCES dept(id), avatar BLOB);
+    INSERT INTO dept VALUES (1, '研发部'), (2, '市场部');
+    INSERT INTO emp (id, name, dept_id, avatar) VALUES (1, '张三', 1, X'89504E470D0A1A0A'), (2, '李四', 2, NULL);
+    INSERT INTO emp (id, name, dept_id) VALUES (3, '王五的备注里有研发关键字', 1);
+  `);
+  const fks = await adFk.listForeignKeys('main', null, 'emp');
+  check('sqlite 外键读取', fks.length === 1 && fks[0].columns[0] === 'dept_id' && fks[0].refTable === 'dept' && fks[0].refColumns[0] === 'id', fks);
+  check('sqlite 无外键表', (await adFk.listForeignKeys('main', null, 'dept')).length === 0);
+
+  // cellBlob：取完整 BLOB（PNG magic）
+  const blob = await adFk.cellBlob('main', { schema: null, table: 'emp', column: 'avatar', pk: { id: 1 } });
+  check('cellBlob 完整内容', Buffer.isBuffer(blob) && blob.length === 8 && blob[0] === 0x89 && blob[1] === 0x50, blob && blob.length);
+  check('cellBlob NULL', (await adFk.cellBlob('main', { schema: null, table: 'emp', column: 'avatar', pk: { id: 2 } })) === null);
+
+  // 在库中查找
+  const search = require('./search');
+  const byName = await search.searchDatabase(adFk, { db: 'main', keyword: 'dept', mode: 'name' }, () => {});
+  check('查找 对象名(表)', byName.results.some((r) => r.kind === 'table' && r.table === 'dept'), byName.results);
+  check('查找 对象名(列)', byName.results.some((r) => r.kind === 'column' && r.column === 'dept_id'), byName.results.filter((r) => r.kind === 'column'));
+  const byData = await search.searchDatabase(adFk, { db: 'main', keyword: '研发', mode: 'data' }, () => {});
+  const hitEmp = byData.results.find((r) => r.table === 'emp' && r.column === 'name');
+  check('查找 数据内容', !!hitEmp && hitEmp.pk && Number(hitEmp.pk.id) === 3, byData.results);
+  check('查找 数据片段', hitEmp && hitEmp.snippet.includes('研发'), hitEmp && hitEmp.snippet);
+  await adFk.close();
+  try { fs.unlinkSync(fkFile); } catch (e) { /* ignore */ }
+  } catch (e2) { fail++; console.log('  ✗ 第二档块异常:', e2 && e2.stack || e2); }
+
   console.log(`[SELFTEST] 通过 ${pass} 项, 失败 ${fail} 项`);
   return fail === 0 ? 0 : 1;
 }

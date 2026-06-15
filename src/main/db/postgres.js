@@ -196,6 +196,31 @@ class PostgresAdapter extends BaseAdapter {
     return map;
   }
 
+  async listForeignKeys(db, schema, table) {
+    const sch = schema || 'public';
+    const rows = await this._q(db,
+      `SELECT con.conname AS name, att.attname AS col,
+              nsp2.nspname AS refschema, cl2.relname AS reftab, att2.attname AS refcol, k.ord
+       FROM pg_constraint con
+       JOIN pg_class cl ON cl.oid = con.conrelid
+       JOIN pg_namespace nsp ON nsp.oid = cl.relnamespace
+       JOIN pg_class cl2 ON cl2.oid = con.confrelid
+       JOIN pg_namespace nsp2 ON nsp2.oid = cl2.relnamespace
+       JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(att, fatt, ord) ON true
+       JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.att
+       JOIN pg_attribute att2 ON att2.attrelid = con.confrelid AND att2.attnum = k.fatt
+       WHERE con.contype = 'f' AND nsp.nspname = $1 AND cl.relname = $2
+       ORDER BY con.conname, k.ord`, [sch, table]);
+    const map = new Map();
+    for (const r of rows) {
+      if (!map.has(r.name)) map.set(r.name, { name: r.name, columns: [], refSchema: r.refschema === 'public' ? null : r.refschema, refTable: r.reftab, refColumns: [] });
+      const fk = map.get(r.name);
+      fk.columns.push(r.col);
+      fk.refColumns.push(r.refcol);
+    }
+    return [...map.values()];
+  }
+
   async _run(client, sql) {
     const res = await client.query({ text: sql, rowMode: 'array' });
     const list = Array.isArray(res) ? res : [res];

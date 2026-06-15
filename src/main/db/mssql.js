@@ -212,6 +212,32 @@ class MSSQLAdapter extends BaseAdapter {
     return map;
   }
 
+  async listForeignKeys(db, schema, table) {
+    const L = (v) => this.literal(v);
+    const sch = schema || 'dbo';
+    const rows = await this._q(db,
+      `SELECT fk.name AS name, pc.name AS col,
+              rs.name AS refschema, rt.name AS reftab, rc.name AS refcol, fkc.constraint_column_id AS ord
+       FROM sys.foreign_keys fk
+       JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+       JOIN sys.tables pt ON pt.object_id = fk.parent_object_id
+       JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+       JOIN sys.columns pc ON pc.object_id = fk.parent_object_id AND pc.column_id = fkc.parent_column_id
+       JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
+       JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+       JOIN sys.columns rc ON rc.object_id = fk.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+       WHERE ps.name = ${L(sch)} AND pt.name = ${L(table)}
+       ORDER BY fk.name, fkc.constraint_column_id`);
+    const map = new Map();
+    for (const r of rows) {
+      if (!map.has(r.name)) map.set(r.name, { name: r.name, columns: [], refSchema: r.refschema === 'dbo' ? null : r.refschema, refTable: r.reftab, refColumns: [] });
+      const fk = map.get(r.name);
+      fk.columns.push(r.col);
+      fk.refColumns.push(r.refcol);
+    }
+    return [...map.values()];
+  }
+
   _normBatch(r) {
     const sets = r.recordsets || [];
     if (!sets.length) {

@@ -160,6 +160,7 @@ function setupShortcuts() {
     else if (k === 'n') { e.preventDefault(); runMenuAction('new-conn'); }
     else if (k === 'q') { e.preventDefault(); runMenuAction('new-query'); }
     else if (k === 'd') { e.preventDefault(); runMenuAction('toggle-theme'); }
+    else if (k === 'f') { e.preventDefault(); runMenuAction('search'); }
   });
 }
 
@@ -179,6 +180,12 @@ export async function runMenuAction(id) {
   switch (id) {
       case 'new-conn': openConnDialog(); break;
       case 'new-query': newQueryFromToolbar(); break;
+      case 'search': {
+        if (!needConn()) break;
+        const { openSearchDialog } = await import('./searchDialog.js');
+        openSearchDialog(t);
+        break;
+      }
       case 'run-sql-file': if (needConn()) (await import('./dbaTools.js')).openRunSqlFileDialog(t); break;
       case 'transfer': if (needConn()) (await import('./dbaTools.js')).openTransferDialog(t); break;
       case 'sync': if (needConn()) (await import('./syncDialog.js')).openSyncDialog(t); break;
@@ -252,6 +259,11 @@ function setupTestHooks() {
     openSync: async (connId, db) => {
       const { openSyncDialog } = await import('./syncDialog.js');
       await openSyncDialog({ connId, db });
+      return true;
+    },
+    openSearch: async (connId, db) => {
+      const { openSearchDialog } = await import('./searchDialog.js');
+      await openSearchDialog({ connId, db });
       return true;
     },
     openHistory: async () => {

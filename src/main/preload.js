@@ -35,6 +35,14 @@ contextBridge.exposeInMainWorld('api', {
     exportRows: (connId, t) => inv('db:exportRows', { connId, ...t }),
     cancel: (connId) => inv('db:cancel', { connId }),
     allColumns: (connId, db, schema) => inv('db:allColumns', { connId, db, schema }),
+    foreignKeys: (connId, t) => inv('db:foreignKeys', { connId, ...t }),
+    cellBlob: (connId, t) => inv('db:cellBlob', { connId, ...t }),
+    search: (connId, t) => inv('db:search', { connId, ...t }),
+    onSearchProgress: (cb) => {
+      const listener = (_e, p) => cb(p);
+      ipcRenderer.on('search:progress', listener);
+      return () => ipcRenderer.removeListener('search:progress', listener);
+    },
     objectCaps: (connId) => inv('db:objectCaps', { connId }),
     routines: (connId, db, schema) => inv('db:routines', { connId, db, schema }),
     triggers: (connId, db, schema) => inv('db:triggers', { connId, db, schema }),

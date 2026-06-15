@@ -146,6 +146,32 @@ class OBOracleAdapter extends BaseAdapter {
     return map;
   }
 
+  async listForeignKeys(db, _schema, table) {
+    const L = (v) => this.literal(v);
+    const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);
+    let rows;
+    try {
+      rows = await this._q(
+        `SELECT ac.constraint_name AS name, cc.column_name AS col, cc.position AS pos,
+                rc.owner AS refowner, rc.table_name AS reftab, rcc.column_name AS refcol
+         FROM all_constraints ac
+         JOIN all_cons_columns cc ON cc.owner = ac.owner AND cc.constraint_name = ac.constraint_name
+         JOIN all_constraints rc ON rc.owner = ac.r_owner AND rc.constraint_name = ac.r_constraint_name
+         JOIN all_cons_columns rcc ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name AND rcc.position = cc.position
+         WHERE ac.constraint_type = 'R' AND ac.owner = ${L(db)} AND ac.table_name = ${L(table)}
+         ORDER BY ac.constraint_name, cc.position`);
+    } catch (e) { return []; }
+    const map = new Map();
+    for (const r of rows) {
+      const name = val(r, 'name');
+      if (!map.has(name)) map.set(name, { name, columns: [], refSchema: val(r, 'refowner') === db ? null : val(r, 'refowner'), refTable: val(r, 'reftab'), refColumns: [] });
+      const fk = map.get(name);
+      fk.columns.push(val(r, 'col'));
+      fk.refColumns.push(val(r, 'refcol'));
+    }
+    return [...map.values()];
+  }
+
   async _run(conn, sql) {
     const [rows, fields] = await conn.query({ sql, rowsAsArray: true });
     if (fields && Array.isArray(fields[0])) {

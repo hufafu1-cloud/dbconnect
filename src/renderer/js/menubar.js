@@ -35,6 +35,8 @@ export function buildMenuBar(runAction) {
       { label: '开发者工具', hint: 'F12', onClick: () => window.api.app.winCmd('devtools') },
     ]],
     ['工具', () => [
+      { label: '在库中查找…', hint: 'Ctrl+F', onClick: () => runAction('search') },
+      { sep: true },
       { label: '数据传输…', onClick: () => runAction('transfer') },
       { label: '结构同步 / 数据同步…', onClick: () => runAction('sync') },
       { sep: true },

@@ -88,7 +88,67 @@ export function promptDialog(title, label, initial = '') {
 }
 
 /** 单元格查看器 */
-export function cellViewer(colName, value) {
+function imageMime(buf) {
+  if (buf.length < 4) return null;
+  const b = buf;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp';
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57 && b[9] === 0x45) return 'image/webp';
+  return null;
+}
+
+function hexDump(buf, maxBytes) {
+  const n = Math.min(buf.length, maxBytes);
+  const lines = [];
+  for (let off = 0; off < n; off += 16) {
+    const slice = buf.subarray(off, Math.min(off + 16, n));
+    const hex = [...slice].map((x) => x.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ');
+    const ascii = [...slice].map((x) => (x >= 32 && x < 127) ? String.fromCharCode(x) : '.').join('');
+    lines.push(off.toString(16).padStart(8, '0') + '  ' + hex + '  ' + ascii);
+  }
+  if (buf.length > n) lines.push(`… 共 ${buf.length} 字节，仅显示前 ${n} 字节`);
+  return lines.join('\n');
+}
+
+/** value 普通值；blobCtx={connId,db,schema,table,column,pk} 时支持取完整 BLOB 做图片/十六进制查看 */
+export function cellViewer(colName, value, blobCtx) {
+  const isBlob = value && typeof value === 'object' && value.__blob;
+  if (isBlob && blobCtx) {
+    const bodyWrap = el('div', { style: { minWidth: '560px' } }, el('div', { style: { color: 'var(--text-muted)' } }, '正在加载完整内容…'));
+    let curText = '';
+    const m = openModal({
+      title: `单元格查看器 — ${colName}（BLOB ${value.length} 字节）`,
+      body: bodyWrap,
+      buttons: [
+        { label: '复制十六进制', onClick: () => { navigator.clipboard.writeText(curText); toast.success('已复制'); return false; } },
+        { label: '关闭', primary: true },
+      ],
+    });
+    window.api.db.cellBlob(blobCtx.connId, { db: blobCtx.db, schema: blobCtx.schema, table: blobCtx.table, column: blobCtx.column, pk: blobCtx.pk })
+      .then((res) => {
+        bodyWrap.innerHTML = '';
+        if (!res) { bodyWrap.append(el('div', {}, '(NULL)')); return; }
+        const buf = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0));
+        const mime = imageMime(buf);
+        curText = hexDump(buf, 64 * 1024);
+        if (mime) {
+          const blob = new Blob([buf], { type: mime });
+          const url = URL.createObjectURL(blob);
+          bodyWrap.append(
+            el('div', { style: { marginBottom: '8px', fontSize: '12px', color: 'var(--text-muted)' } }, `图片 ${mime} · ${res.length} 字节${res.truncated ? '（已截断）' : ''}`),
+            el('img', { src: url, style: { maxWidth: '70vw', maxHeight: '60vh', border: '1px solid var(--border-light)', borderRadius: '6px' } }));
+        } else {
+          bodyWrap.append(
+            el('div', { style: { marginBottom: '6px', fontSize: '12px', color: 'var(--text-muted)' } }, `二进制内容 · ${res.length} 字节${res.truncated ? '（已截断）' : ''}`),
+            el('div', { class: 'viewer-text', style: { fontSize: '11.5px', whiteSpace: 'pre' } }, curText));
+        }
+      })
+      .catch((e) => { bodyWrap.innerHTML = ''; bodyWrap.append(el('div', { style: { color: 'var(--danger)' } }, '加载失败: ' + e.message)); });
+    return m;
+  }
+
   const text = cellText(value);
   openModal({
     title: `单元格查看器 — ${colName}`,
