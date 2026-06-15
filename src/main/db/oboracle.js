@@ -146,6 +146,15 @@ class OBOracleAdapter extends BaseAdapter {
     return map;
   }
 
+  async explainPlan(db, sql) {
+    return this.withSession(db, async (run) => {
+      await run('EXPLAIN PLAN FOR ' + sql);
+      const r = await run('SELECT plan_table_output FROM TABLE(dbms_xplan.display(NULL, NULL, ' + this.literal('TYPICAL') + '))');
+      const text = (r.rows || []).map((row) => row[0]).join('\n');
+      return { format: 'text', text: text || '(空计划)' };
+    });
+  }
+
   async listForeignKeys(db, _schema, table) {
     const L = (v) => this.literal(v);
     const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);

@@ -74,6 +74,7 @@ export function openQueryTab(target, initialSql, opts) {
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '连接:'), connSel,
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel,
     el('span', { class: 'sep' }),
+    mkBtn('explain', '解释', explainSql),
     mkBtn('format', '美化', formatSql),
     mkBtn('openFile', '打开', openFile),
     mkBtn('save', '保存', () => saveQuery()),
@@ -82,6 +83,15 @@ export function openQueryTab(target, initialSql, opts) {
     maxRowsSel,
     el('span', { class: 'spring' }),
   );
+
+  async function explainSql() {
+    if (!connId || !state.open.has(connId)) { toast.info('请先打开一个连接'); return; }
+    let sql = cm.getSelection() || cm.getValue();
+    sql = sql.trim().replace(/;\s*$/, '');
+    if (!sql) { toast.info('没有可解释的 SQL'); return; }
+    const { openExplainTab } = await import('./explainTab.js');
+    openExplainTab({ connId, db }, sql);
+  }
 
   const FORMAT_LANGS = { mysql: 'mysql', oceanbase: 'mysql', clickhouse: 'mysql', postgres: 'postgresql', mssql: 'transactsql', sqlite: 'sqlite', oboracle: 'plsql' };
   async function formatSql() {

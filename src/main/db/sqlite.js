@@ -150,6 +150,22 @@ class SQLiteAdapter extends BaseAdapter {
     return [...map.values()];
   }
 
+  async explainPlan(_db, sql) {
+    // EXPLAIN QUERY PLAN: id, parent, notused, detail
+    const rows = this._execRaw('EXPLAIN QUERY PLAN ' + sql).rows;
+    const byId = new Map();
+    const roots = [];
+    for (const r of rows) {
+      byId.set(r[0], { title: String(r[3] || ''), detail: '', rows: null, cost: null, warn: /\bSCAN\b/.test(String(r[3] || '')), children: [], _p: r[1] });
+    }
+    for (const node of byId.values()) {
+      if (node._p && byId.has(node._p)) byId.get(node._p).children.push(node);
+      else roots.push(node);
+    }
+    const root = roots.length === 1 ? roots[0] : { title: 'QUERY PLAN', detail: '', children: roots };
+    return { format: 'tree', root };
+  }
+
   async tableInfo(_db, _schema, table) {
     const ti = this._execRaw(`PRAGMA table_info(${this.quoteIdent(table)})`);
     // PRAGMA table_info: cid, name, type, notnull, dflt_value, pk

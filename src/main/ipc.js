@@ -66,6 +66,8 @@ function register(getWin) {
   h('db:cancel', (a) => dbm.get(a.connId).cancel());
   h('db:allColumns', (a) => dbm.get(a.connId).listAllColumns(a.db, a.schema));
   h('db:foreignKeys', (a) => dbm.get(a.connId).listForeignKeys(a.db, a.schema, a.table));
+  h('db:erModel', (a) => dbm.get(a.connId).erModel(a.db, a.schema, a.opts || {}));
+  h('db:explain', (a) => dbm.get(a.connId).explainPlan(a.db, a.sql));
   h('db:cellBlob', async (a) => {
     const buf = await dbm.get(a.connId).cellBlob(a.db, a);
     if (!buf) return null;
@@ -212,6 +214,7 @@ function register(getWin) {
 
   h('file:read', (p) => fs.promises.readFile(p, 'utf8'));
   h('file:write', (p, content) => fs.promises.writeFile(p, content, 'utf8'));
+  h('file:writeBase64', (p, b64) => fs.promises.writeFile(p, Buffer.from(b64, 'base64')));
 
   h('app:info', () => ({
     version: app.getVersion(),

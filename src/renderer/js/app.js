@@ -266,6 +266,16 @@ function setupTestHooks() {
       await openSearchDialog({ connId, db });
       return true;
     },
+    openEr: async (connId, db) => {
+      const { openErTab } = await import('./erTab.js');
+      openErTab({ connId, db, schema: null });
+      return true;
+    },
+    openExplain: async (connId, db, sql) => {
+      const { openExplainTab } = await import('./explainTab.js');
+      openExplainTab({ connId, db }, sql);
+      return true;
+    },
     openHistory: async () => {
       const { openHistoryTab } = await import('./historyTab.js');
       openHistoryTab();

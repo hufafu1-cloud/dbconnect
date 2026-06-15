@@ -221,6 +221,33 @@ class PostgresAdapter extends BaseAdapter {
     return [...map.values()];
   }
 
+  async explainPlan(db, sql) {
+    const res = await this._getPool(db).query('EXPLAIN (FORMAT JSON, VERBOSE FALSE, COSTS TRUE) ' + sql);
+    let plan = res.rows[0] && Object.values(res.rows[0])[0];
+    if (typeof plan === 'string') plan = JSON.parse(plan);
+    const arr = Array.isArray(plan) ? plan : [plan];
+    const conv = (p) => {
+      const d = [];
+      if (p['Relation Name']) d.push('on ' + p['Relation Name'] + (p['Alias'] && p['Alias'] !== p['Relation Name'] ? ' ' + p['Alias'] : ''));
+      if (p['Index Name']) d.push('using ' + p['Index Name']);
+      if (p['Join Type']) d.push(p['Join Type'] + ' join');
+      if (p['Hash Cond']) d.push(p['Hash Cond']);
+      if (p['Index Cond']) d.push('Index Cond: ' + p['Index Cond']);
+      if (p['Recheck Cond']) d.push('Recheck: ' + p['Recheck Cond']);
+      if (p['Filter']) d.push('Filter: ' + p['Filter']);
+      if (p['Sort Key']) d.push('Sort: ' + [].concat(p['Sort Key']).join(', '));
+      return {
+        title: p['Node Type'] + (p['Parallel Aware'] ? ' (parallel)' : ''),
+        detail: d.join('  ·  '),
+        rows: p['Plan Rows'] != null ? Number(p['Plan Rows']) : null,
+        cost: p['Total Cost'] != null ? Number(p['Total Cost']) : null,
+        warn: p['Node Type'] === 'Seq Scan',
+        children: (p['Plans'] || []).map(conv),
+      };
+    };
+    return { format: 'tree', root: conv(arr[0].Plan) };
+  }
+
   async _run(client, sql) {
     const res = await client.query({ text: sql, rowMode: 'array' });
     const list = Array.isArray(res) ? res : [res];

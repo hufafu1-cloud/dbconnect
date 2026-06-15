@@ -212,6 +212,32 @@ class MSSQLAdapter extends BaseAdapter {
     return map;
   }
 
+  async explainPlan(db, sql) {
+    // 事务固定一条连接，SET SHOWPLAN_ALL ON 后查询只生成计划不执行
+    const tx = new mssql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      if (db) await new mssql.Request(tx).batch(`USE ${this.quoteIdent(db)}`);
+      await new mssql.Request(tx).batch('SET SHOWPLAN_ALL ON');
+      const req = new mssql.Request(tx);
+      req.arrayRowMode = true;
+      const r = await req.batch(sql);
+      await new mssql.Request(tx).batch('SET SHOWPLAN_ALL OFF').catch(() => {});
+      await tx.rollback().catch(() => {});
+      const rs = (r.recordsets && r.recordsets[0]) || r.recordset || [];
+      const colsMeta = rs.columns ? (Array.isArray(rs.columns) ? rs.columns : Object.values(rs.columns)) : [];
+      const allNames = colsMeta.map((c) => c.name);
+      const wanted = ['StmtText', 'PhysicalOp', 'LogicalOp', 'EstimateRows', 'EstimateIO', 'EstimateCPU', 'TotalSubtreeCost'];
+      const keep = wanted.filter((w) => allNames.includes(w));
+      const idx = keep.map((w) => allNames.indexOf(w));
+      const rows = rs.map((row) => idx.map((i) => row[i]));
+      return { format: 'table', columns: keep, rows: sanitizeRows(rows), highlightCol: 'PhysicalOp' };
+    } catch (e) {
+      try { await tx.rollback(); } catch (e2) { /* ignore */ }
+      throw e;
+    }
+  }
+
   async listForeignKeys(db, schema, table) {
     const L = (v) => this.literal(v);
     const sch = schema || 'dbo';

@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('api', {
     cancel: (connId) => inv('db:cancel', { connId }),
     allColumns: (connId, db, schema) => inv('db:allColumns', { connId, db, schema }),
     foreignKeys: (connId, t) => inv('db:foreignKeys', { connId, ...t }),
+    erModel: (connId, db, schema, opts) => inv('db:erModel', { connId, db, schema, opts }),
+    explain: (connId, db, sql) => inv('db:explain', { connId, db, sql }),
     cellBlob: (connId, t) => inv('db:cellBlob', { connId, ...t }),
     search: (connId, t) => inv('db:search', { connId, ...t }),
     onSearchProgress: (cb) => {
@@ -94,6 +96,7 @@ contextBridge.exposeInMainWorld('api', {
   file: {
     read: (p) => inv('file:read', p),
     write: (p, content) => inv('file:write', p, content),
+    writeBase64: (p, b64) => inv('file:writeBase64', p, b64),
   },
   history: {
     list: (opts) => inv('history:list', opts),

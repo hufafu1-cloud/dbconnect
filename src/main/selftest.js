@@ -609,6 +609,22 @@ async function runSelfTest() {
   const hitEmp = byData.results.find((r) => r.table === 'emp' && r.column === 'name');
   check('查找 数据内容', !!hitEmp && hitEmp.pk && Number(hitEmp.pk.id) === 3, byData.results);
   check('查找 数据片段', hitEmp && hitEmp.snippet.includes('研发'), hitEmp && hitEmp.snippet);
+  // ER 模型
+  const er = await adFk.erModel('main', null, {});
+  check('ER 表数', er.tables.length === 2, er.tables.map((t) => t.name));
+  const erEmp = er.tables.find((t) => t.name === 'emp');
+  check('ER 列标记 pk/fk', erEmp && erEmp.columns.find((c) => c.name === 'id').pk
+    && erEmp.columns.find((c) => c.name === 'dept_id').fk, erEmp && erEmp.columns);
+  check('ER 关系', er.relations.length === 1 && er.relations[0].from === 'emp'
+    && er.relations[0].to === 'dept' && er.relations[0].known === true, er.relations);
+
+  // EXPLAIN（SQLite 树）
+  const plan = await adFk.explainPlan('main', 'SELECT e.name, d.name FROM emp e JOIN dept d ON e.dept_id = d.id WHERE e.id > 1');
+  check('explain 格式 tree', plan.format === 'tree' && plan.root && Array.isArray(plan.root.children), plan.format);
+  const flat = [];
+  (function walk(n) { flat.push(n.title); (n.children || []).forEach(walk); })(plan.root);
+  check('explain 含扫描节点', flat.some((t) => /SCAN|SEARCH/i.test(t)), flat);
+
   await adFk.close();
   try { fs.unlinkSync(fkFile); } catch (e) { /* ignore */ }
   } catch (e2) { fail++; console.log('  ✗ 第二档块异常:', e2 && e2.stack || e2); }

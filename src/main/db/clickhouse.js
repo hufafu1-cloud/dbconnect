@@ -156,6 +156,12 @@ class ClickHouseAdapter extends BaseAdapter {
     return super.action(db, a);
   }
 
+  async explainPlan(db, sql) {
+    const r = await this._run(db, 'EXPLAIN ' + sql);
+    const text = r.rows.map((row) => row.join(' ')).join('\n');
+    return { format: 'text', text: text || '(空计划)' };
+  }
+
   async listAllColumns(db) {
     const r = await this._run(null,
       `SELECT table, name FROM system.columns WHERE database = ${this.literal(db)} ORDER BY table, position`);

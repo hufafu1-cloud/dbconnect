@@ -80,6 +80,20 @@ class MySQLAdapter extends BaseAdapter {
     return map;
   }
 
+  async explainPlan(db, sql) {
+    const { sanitizeRows } = require('./sqlutil');
+    const r = await this.exec(db, 'EXPLAIN ' + sql);
+    return {
+      format: 'table',
+      columns: r.columns.map((c) => c.name),
+      rows: sanitizeRows(r.rows),
+      highlightCol: 'type',
+      // type 列：ALL/index 偏差，ref/eq_ref/const 较好
+      goodValues: ['const', 'eq_ref', 'ref', 'range', 'system'],
+      badValues: ['ALL'],
+    };
+  }
+
   async listForeignKeys(db, _schema, table) {
     const L = (v) => this.literal(v);
     const rows = await this._q(

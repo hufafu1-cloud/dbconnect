@@ -129,6 +129,12 @@ export const icons = {
     <circle cx="8" cy="12.6" r="1.1" fill="#d93026"/>`),
   theme: svg(`<circle cx="8" cy="8" r="5.6" stroke="#5b6470" stroke-width="1.4" fill="none"/>
     <path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="#5b6470"/>`),
+  explain: svg(`<circle cx="6.4" cy="3.4" r="1.8" fill="#1a9e57"/><circle cx="3.4" cy="9.4" r="1.8" fill="#2b7de9"/><circle cx="10" cy="9.4" r="1.8" fill="#d97706"/><circle cx="12.4" cy="13.4" r="1.5" fill="#7c5cd6"/>
+    <path d="M6 5l-2 2.8M6.8 5l2.6 2.8M10.6 11l1.4 1.4" stroke="#9aa3af" stroke-width="1.2"/>`),
+  er: svg(`<rect x="1.6" y="2" width="5" height="4" rx="0.8" stroke="#2b7de9" stroke-width="1.2" fill="none"/>
+    <rect x="9.4" y="3.4" width="5" height="4" rx="0.8" stroke="#1a9e57" stroke-width="1.2" fill="none"/>
+    <rect x="5.4" y="10" width="5" height="4" rx="0.8" stroke="#d97706" stroke-width="1.2" fill="none"/>
+    <path d="M6.6 4.6h2.8M9 6.2L7.6 10M6.6 5.6L6 10" stroke="#9aa3af" stroke-width="1"/>`),
   format: svg(`<path d="M2.5 3h11M2.5 6.2h7M5.5 9.4h8M5.5 12.6h5" stroke="#7c5cd6" stroke-width="1.6" stroke-linecap="round"/>`),
 };
 

@@ -44,6 +44,44 @@ class BaseAdapter {
     return Buffer.from(String(v), 'utf8');
   }
 
+  /**
+   * ER 模型：库内各表的列(含 pk/fk 标记) + 表间外键关系。
+   * 返回 {tables:[{name, schema, columns:[{name,type,pk,fk}]}], relations:[{from,fromCols,to,toCols}], truncated}
+   */
+  async erModel(db, schema, opts = {}) {
+    const objs = await this.listObjects(db, schema);
+    const max = opts.maxTables || 60;
+    const all = (opts.tables && opts.tables.length)
+      ? opts.tables.map((t) => (typeof t === 'string' ? { name: t, schema } : { name: t.name, schema: t.schema || schema }))
+      : objs.tables.map((t) => ({ name: t.name, schema: t.schema || schema || null }));
+    const picked = all.slice(0, max);
+    const known = new Set(picked.map((t) => t.name));
+    const tables = [];
+    const relations = [];
+    for (const t of picked) {
+      let info;
+      try { info = await this.tableInfo(db, t.schema, t.name); } catch (e) { continue; }
+      const pkset = new Set(info.pk || []);
+      const fkcols = new Set();
+      let fks = [];
+      try { fks = await this.listForeignKeys(db, t.schema, t.name); } catch (e) { fks = []; }
+      for (const fk of fks) {
+        fk.columns.forEach((c) => fkcols.add(c));
+        relations.push({ from: t.name, fromCols: fk.columns.slice(), to: fk.refTable, toCols: fk.refColumns.slice(), known: known.has(fk.refTable) });
+      }
+      tables.push({
+        name: t.name, schema: t.schema || null,
+        columns: info.columns.map((c) => ({ name: c.name, type: c.type, pk: pkset.has(c.name), fk: fkcols.has(c.name) })),
+      });
+    }
+    return { tables, relations, truncated: all.length > picked.length, total: all.length };
+  }
+
+  /** 执行计划。返回 {format:'tree'|'table'|'text', root?, columns?, rows?, text?} */
+  async explainPlan(_db, _sql) {
+    throw new Error('该数据库类型暂不支持执行计划');
+  }
+
   /** 各类对象的支持情况（树上据此决定显示哪些节点） */
   get objectCaps() {
     return { routines: false, triggers: false, events: false, sequences: false, users: false, processes: false };

@@ -198,6 +198,16 @@ async function runDemo(createWindow) {
   await wait(800);
   await shot('shot-6-history.png');
 
+  // EXPLAIN 执行计划（SQLite 树）
+  await ej(`window.__test.openExplain(${id}, 'main', "SELECT c.name, COUNT(o.id) FROM customers c JOIN orders o ON o.customer_id = c.id WHERE o.amount > 1000 GROUP BY c.id")`);
+  await wait(1000);
+  await shot('shot-17-explain.png');
+
+  // ER 关系图
+  await ej(`window.__test.openEr(${id}, 'main')`);
+  await wait(1200);
+  await shot('shot-18-er.png');
+
   // 保存查询到连接（树上出现“查询”节点）+ 打开筛选构建器
   await ej(`window.__test.saveDemoQuery(${id}, '热门客户TOP10', "SELECT c.name, SUM(o.amount) AS total FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY total DESC LIMIT 10;")`);
   await wait(600);

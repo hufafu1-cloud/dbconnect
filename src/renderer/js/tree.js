@@ -203,6 +203,10 @@ function renderDbNode(conn, db) {
     onMenu: (e) => {
       showMenu(e.clientX, e.clientY, [
         { label: '新建查询', icon: 'query', onClick: () => actions.newQuery({ connId: conn.id, db }) },
+        { label: 'ER 关系图', icon: 'er', onClick: async () => {
+          const { openErTab } = await import('./erTab.js');
+          openErTab({ connId: conn.id, db, schema: null });
+        } },
         { label: '刷新', icon: 'refresh', onClick: reload },
         { sep: true },
         { label: '转储 SQL 文件…', icon: 'save', onClick: async () => {
@@ -292,6 +296,10 @@ function renderSchemaNode(conn, db, schema) {
     onMenu: (e) => {
       showMenu(e.clientX, e.clientY, [
         { label: '新建查询', icon: 'query', onClick: () => actions.newQuery({ connId: conn.id, db, schema }) },
+        { label: 'ER 关系图', icon: 'er', onClick: async () => {
+          const { openErTab } = await import('./erTab.js');
+          openErTab({ connId: conn.id, db, schema });
+        } },
         { label: '转储 SQL 文件…', icon: 'save', onClick: async () => {
           const { openDumpDialog } = await import('./dbaTools.js');
           openDumpDialog({ connId: conn.id, db, schema });
