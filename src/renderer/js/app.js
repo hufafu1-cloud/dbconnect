@@ -276,6 +276,21 @@ function setupTestHooks() {
       openExplainTab({ connId, db }, sql);
       return true;
     },
+    testHint: async (connId, db, text) => {
+      const { openQueryTab } = await import('./queryTab.js');
+      const tab = openQueryTab({ connId, db });
+      await tab._loadHints();
+      await new Promise((r) => setTimeout(r, 100));
+      const cm = tab._cm;
+      cm.setValue(text);
+      const lines = text.split('\n');
+      cm.setCursor({ line: lines.length - 1, ch: lines[lines.length - 1].length });
+      cm.focus();
+      tab._triggerHint();
+      await new Promise((r) => setTimeout(r, 150));
+      const items = [...document.querySelectorAll('.CodeMirror-hints li')].map((x) => x.textContent);
+      return { count: items.length, items: items.slice(0, 12) };
+    },
     openHistory: async () => {
       const { openHistoryTab } = await import('./historyTab.js');
       openHistoryTab();

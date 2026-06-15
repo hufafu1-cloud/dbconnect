@@ -9,6 +9,13 @@ import { statusbar } from './statusbar.js';
 const CM_MODES = { mysql: 'text/x-mysql', postgres: 'text/x-pgsql', mssql: 'text/x-mssql', sqlite: 'text/x-sqlite', clickhouse: 'text/x-mysql', oceanbase: 'text/x-mysql', oboracle: 'text/x-plsql' };
 let queryNo = 0;
 
+const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET',
+  'INSERT INTO', 'UPDATE', 'DELETE FROM', 'SET', 'VALUES', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN',
+  'JOIN', 'ON', 'AS', 'AND', 'OR', 'NOT', 'NULL', 'IS NULL', 'IS NOT NULL', 'IN', 'LIKE', 'BETWEEN',
+  'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'ASC', 'DESC',
+  'CREATE TABLE', 'ALTER TABLE', 'DROP TABLE', 'TRUNCATE TABLE', 'UNION', 'UNION ALL', 'EXISTS'];
+const ID_CHARS = "[\\w$\\u4e00-\\u9fa5]";
+
 export function openQueryTab(target, initialSql, opts) {
   queryNo++;
   const tabId = uid('query');
@@ -134,11 +141,11 @@ export function openQueryTab(target, initialSql, opts) {
     extraKeys: {
       'F5': () => run(false),
       'Ctrl-Enter': () => run(false),
-      'Ctrl-Space': 'autocomplete',
+      'Ctrl-Space': () => triggerHint(),
       'Ctrl-S': () => saveQuery(),
       'Shift-Ctrl-F': () => formatSql(),
     },
-    hintOptions: { tables: {}, completeSingle: false },
+    hintOptions: { completeSingle: false },
   });
   cm.on('change', () => tab.setDirty(cm.getValue() !== savedText));
   setTimeout(() => cm.refresh(), 30);
@@ -148,24 +155,10 @@ export function openQueryTab(target, initialSql, opts) {
     return c ? c.type : null;
   }
 
-  // 自动补全：表名（对象缓存）+ 列名（整库列清单，按库缓存懒加载）
+  // 自动补全：列名（整库列清单，按库缓存懒加载）+ 对象缓存里的表名
   let hintCols = null;
-  function applyHints() {
-    const oc = connId && state.open.get(connId);
-    if (!oc) return;
-    const tables = {};
-    for (const [, objs] of oc.objectsCache) {
-      for (const t of objs.tables) tables[t.name] = [];
-      for (const v of objs.views) tables[v.name] = [];
-    }
-    if (hintCols) {
-      for (const [t, cols] of Object.entries(hintCols)) tables[t] = cols;
-    }
-    cm.setOption('hintOptions', { tables, completeSingle: false });
-  }
   async function loadHintColumns() {
     hintCols = null;
-    applyHints();
     if (!connId || !db || !state.open.has(connId)) return;
     const oc = state.open.get(connId);
     if (!oc.columnsCache) oc.columnsCache = new Map();
@@ -178,9 +171,108 @@ export function openQueryTab(target, initialSql, opts) {
       }
     }
     hintCols = oc.columnsCache.get(key);
-    applyHints();
   }
-  const refreshHintTables = applyHints;
+  function refreshHintTables() { /* 数据实时读取，无需预构建 */ }
+
+  // 汇总补全数据：表→列、库→表清单、表名清单
+  function buildHintData() {
+    const oc = connId && state.open.get(connId);
+    const tableCols = new Map(); // lower(table) -> {name, cols:[]}
+    const tableSet = new Set();
+    const dbTables = new Map();   // lower(db) -> [tableNames]
+    if (hintCols) {
+      for (const [t, cols] of Object.entries(hintCols)) {
+        tableCols.set(t.toLowerCase(), { name: t, cols: cols.slice() });
+        tableSet.add(t);
+      }
+      if (db) dbTables.set(db.toLowerCase(), Object.keys(hintCols));
+    }
+    if (oc) {
+      for (const [key, objs] of oc.objectsCache) {
+        const dbName = (key.split('|')[0] || '').toLowerCase();
+        const names = [...objs.tables.map((t) => t.name), ...objs.views.map((v) => v.name)];
+        if (dbName) { if (!dbTables.has(dbName)) dbTables.set(dbName, []); dbTables.get(dbName).push(...names); }
+        for (const n of names) { tableSet.add(n); if (!tableCols.has(n.toLowerCase())) tableCols.set(n.toLowerCase(), { name: n, cols: [] }); }
+      }
+    }
+    return { tableCols, dbTables, tableList: [...tableSet].sort((a, b) => a.localeCompare(b)) };
+  }
+
+  // 解析 FROM/JOIN 中的别名：alias(lower) -> 表名
+  function resolveAliases() {
+    const map = new Map();
+    const re = new RegExp(`\\b(?:from|join)\\s+[\`"\\[]?(${ID_CHARS}+(?:\\.${ID_CHARS}+)?)[\`"\\]]?(?:\\s+as)?\\s+[\`"\\[]?([a-z_]\\w*)[\`"\\]]?`, 'gi');
+    let m;
+    const text = cm.getValue();
+    while ((m = re.exec(text))) {
+      const alias = m[2];
+      if (/^(on|where|inner|left|right|join|group|order|using|cross|natural|set|values|having|limit)$/i.test(alias)) continue;
+      let tbl = m[1];
+      if (tbl.includes('.')) tbl = tbl.split('.').pop();
+      map.set(alias.toLowerCase(), tbl);
+    }
+    return map;
+  }
+
+  // 自定义补全函数
+  function sqlHint(cmInstance) {
+    const cur = cmInstance.getCursor();
+    const lineText = cmInstance.getLine(cur.line).slice(0, cur.ch);
+    const data = buildHintData();
+    const startsWith = (arr, p) => {
+      if (!p) return arr.slice();
+      const lp = p.toLowerCase();
+      const pre = arr.filter((x) => x.toLowerCase().startsWith(lp));
+      return pre.length ? pre : arr.filter((x) => x.toLowerCase().includes(lp));
+    };
+    // 限定符.部分  （表.字段 / 库.表 / 别名.字段）
+    const dotRe = new RegExp(`[\`"\\[]?(${ID_CHARS}+)[\`"\\]]?\\.(${ID_CHARS}*)$`);
+    let m = dotRe.exec(lineText);
+    if (m) {
+      const qual = m[1].toLowerCase();
+      const partial = m[2];
+      const from = CodeMirror.Pos(cur.line, cur.ch - partial.length);
+      const aliases = resolveAliases();
+      let cands = null;
+      if (data.tableCols.has(qual) && data.tableCols.get(qual).cols.length) cands = data.tableCols.get(qual).cols;
+      else if (aliases.has(qual) && data.tableCols.has(aliases.get(qual).toLowerCase())) cands = data.tableCols.get(aliases.get(qual).toLowerCase()).cols;
+      else if (data.dbTables.has(qual)) cands = data.dbTables.get(qual);
+      else if (data.tableCols.has(qual)) cands = data.tableCols.get(qual).cols; // 表已知但列未加载
+      if (cands) {
+        const list = startsWith([...new Set(cands)], partial);
+        return list.length ? { list, from, to: cur } : null;
+      }
+      return null;
+    }
+    // 裸词：表名 + 关键字
+    const wm = new RegExp(`(${ID_CHARS}*)$`).exec(lineText);
+    const partial = wm ? wm[1] : '';
+    const from = CodeMirror.Pos(cur.line, cur.ch - partial.length);
+    const tables = startsWith(data.tableList, partial);
+    const kws = partial ? SQL_KEYWORDS.filter((k) => k.toLowerCase().startsWith(partial.toLowerCase())) : [];
+    const list = [...tables, ...kws];
+    return list.length ? { list, from, to: cur } : null;
+  }
+
+  function triggerHint() {
+    if (cm.state.completionActive) return;
+    cm.showHint({ hint: sqlHint, completeSingle: false });
+  }
+
+  // 输入时自动弹出补全：'.' 总是触发；标识符字符在已输入 ≥1 个字符时触发
+  cm.on('inputRead', (cmi, change) => {
+    if (cmi.state.completionActive) return;
+    const ch = change.text && change.text[0];
+    if (!ch) return;
+    const tok = cmi.getTokenAt(cmi.getCursor());
+    if (tok.type === 'string' || tok.type === 'comment') return; // 字符串/注释里不打扰
+    if (ch === '.') { triggerHint(); return; }
+    if (new RegExp(`^${ID_CHARS}$`).test(ch)) {
+      const before = cmi.getLine(cmi.getCursor().line).slice(0, cmi.getCursor().ch);
+      const wm = new RegExp(`(${ID_CHARS}+)$`).exec(before);
+      if (wm && wm[1].length >= 1) triggerHint();
+    }
+  });
 
   // ---- 结果渲染 ----
   let pages = [];
@@ -385,5 +477,7 @@ export function openQueryTab(target, initialSql, opts) {
   // 暴露给自动化测试
   tab._run = run;
   tab._cm = cm;
+  tab._triggerHint = triggerHint;
+  tab._loadHints = loadHintColumns;
   return tab;
 }

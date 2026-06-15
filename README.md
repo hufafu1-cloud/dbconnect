@@ -48,7 +48,9 @@
 
 ### SQL 查询编辑器
 - CodeMirror 语法高亮（按方言）、行号、括号匹配
-- **表名 + 列名自动补全**（Ctrl+Space）：整库列清单按库懒加载缓存，输入 `表名.` 提示列
+- **智能自动补全**：**输入 `.` 即自动弹出** —— `表名.`/`别名.` 列出字段、`库名.` 列出表；
+  裸词联想表名与 SQL 关键字；别名自动解析（`FROM customers c … c.` 识别 `c`→customers）。
+  整库表→列映射按库懒加载缓存，Ctrl+Space 亦可手动触发
 - F5 / Ctrl+Enter 运行；支持「运行选中」；多语句脚本逐条执行并分别显示结果
 - **停止查询**：MySQL 系 `KILL QUERY`、PostgreSQL `pg_cancel_backend`、SQL Server 请求取消、
   ClickHouse HTTP 中止（SQLite 为同步引擎，不支持取消）
