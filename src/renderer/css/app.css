@@ -71,11 +71,18 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
 body {
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  /* Latin 用 Segoe UI（Windows 上最锐利），中文优先 微软雅黑 UI / 苹方，避免回退到模糊字形 */
+  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   font-size: 13px;
   color: var(--text);
   background: var(--bg);
   user-select: none;
+  text-rendering: optimizeLegibility;
+}
+/* 按钮 / 菜单 / 标签等交互文字用中等字重，比 400 更锐利清晰 */
+.tbtn, .tbtn-big, .menu-item, .pbtn, .ctx-item, .btn, .tab, .rtab,
+.obj-table th, .grid thead th, .design-table th, .struct-table th {
+  font-weight: 500;
 }
 #app { display: flex; flex-direction: column; height: 100vh; }
 
