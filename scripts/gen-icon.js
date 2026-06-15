@@ -7,60 +7,78 @@ const zlib = require('zlib');
 const W = 256, H = 256;
 const rgba = Buffer.alloc(W * H * 4); // 默认全透明
 
-// ---------- 像素工具 ----------
-function setPx(x, y, r, g, b, a) {
-  if (x < 0 || y < 0 || x >= W || y >= H) return;
-  const i = (y * W + x) * 4;
-  rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = a;
-}
-function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
+// ---------- 配色与几何（Datavia：靛蓝底 + 白色「数据之道」节点路径） ----------
+const TOP = [112, 126, 248];   // 顶部靛蓝
+const BOT = [60, 50, 182];     // 底部深靛
+const RECT = { x0: 8, y0: 8, x1: 247, y1: 247, r: 54 }; // 圆角矩形
+const NODES = [                // 自左下向右上的三个节点（上行=向前/成长）
+  { x: 72, y: 186, r: 21 },
+  { x: 128, y: 122, r: 25 },
+  { x: 186, y: 74, r: 19 },
+];
+const PATH_HW = 12;            // 连接路径半宽
+const DOT = [60, 50, 182, 255]; // 节点内的靛蓝小圆点（端口感）
 
-// 圆角矩形判定
-function inRoundRect(x, y, x0, y0, x1, y1, rad) {
+function inRoundRect(x, y) {
+  const { x0, y0, x1, y1, r } = RECT;
   if (x < x0 || x > x1 || y < y0 || y > y1) return false;
-  const cx = x < x0 + rad ? x0 + rad : (x > x1 - rad ? x1 - rad : x);
-  const cy = y < y0 + rad ? y0 + rad : (y > y1 - rad ? y1 - rad : y);
-  const dx = x - cx, dy = y - cy;
-  return dx * dx + dy * dy <= rad * rad || (x >= x0 + rad && x <= x1 - rad) || (y >= y0 + rad && y <= y1 - rad);
+  if (x >= x0 + r && x <= x1 - r) return true;
+  if (y >= y0 + r && y <= y1 - r) return true;
+  const cx = x < x0 + r ? x0 + r : x1 - r;
+  const cy = y < y0 + r ? y0 + r : y1 - r;
+  return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
 }
-function inEllipse(x, y, cx, cy, rx, ry) {
-  const dx = (x - cx) / rx, dy = (y - cy) / ry;
-  return dx * dx + dy * dy <= 1;
+function distSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy || 1;
+  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
-// 一节圆柱（上椭圆 + 矩形 + 下椭圆）
-function inDisk(x, y, cx, topY, botY, rx, ry) {
-  if (inEllipse(x, y, cx, topY, rx, ry)) return true;
-  if (inEllipse(x, y, cx, botY, rx, ry)) return true;
-  return Math.abs(x - cx) <= rx && y >= topY && y <= botY;
-}
-
-// ---------- 绘制 ----------
-const top = [47, 129, 247], bottom = [21, 81, 196]; // 渐变蓝
-for (let y = 0; y < H; y++) {
-  const t = y / (H - 1);
-  const r = lerp(top[0], bottom[0], t), g = lerp(top[1], bottom[1], t), b = lerp(top[2], bottom[2], t);
-  for (let x = 0; x < W; x++) {
-    if (inRoundRect(x, y, 8, 8, 247, 247, 52)) setPx(x, y, r, g, b, 255);
+function onPath(x, y) {
+  for (let i = 0; i < NODES.length - 1; i++) {
+    if (distSeg(x, y, NODES[i].x, NODES[i].y, NODES[i + 1].x, NODES[i + 1].y) <= PATH_HW) return true;
   }
+  return false;
 }
-// 三节白色圆柱
-const disks = [[76, 102], [118, 144], [160, 186]];
-for (let y = 0; y < H; y++) {
-  for (let x = 0; x < W; x++) {
-    for (const [t0, b0] of disks) {
-      if (inDisk(x, y, 128, t0, b0, 66, 20)) {
-        setPx(x, y, 255, 255, 255, 255);
-        break;
+function nodeHit(x, y) {
+  for (const n of NODES) {
+    const d2 = (x - n.x) ** 2 + (y - n.y) ** 2;
+    if (d2 <= (n.r * 0.42) ** 2) return 'dot';   // 内部靛蓝小圆点
+    if (d2 <= n.r * n.r) return 'ring';          // 白色节点
+  }
+  return null;
+}
+// 取某采样点颜色（含 alpha），painter 顺序：节点点 > 节点白 > 路径白 > 渐变底 > 透明
+function sample(x, y) {
+  if (!inRoundRect(x, y)) return [0, 0, 0, 0];
+  const nh = nodeHit(x, y);
+  if (nh === 'dot') return DOT;
+  if (nh === 'ring') return [255, 255, 255, 255];
+  if (onPath(x, y)) return [255, 255, 255, 255];
+  const t = (y - RECT.y0) / (RECT.y1 - RECT.y0);
+  return [
+    Math.round(TOP[0] + (BOT[0] - TOP[0]) * t),
+    Math.round(TOP[1] + (BOT[1] - TOP[1]) * t),
+    Math.round(TOP[2] + (BOT[2] - TOP[2]) * t),
+    255,
+  ];
+}
+// 3x3 超采样抗锯齿（预乘 alpha，边缘平滑）
+for (let py = 0; py < H; py++) {
+  for (let px = 0; px < W; px++) {
+    let pr = 0, pg = 0, pb = 0, pa = 0;
+    for (let sy = 0; sy < 3; sy++) {
+      for (let sx = 0; sx < 3; sx++) {
+        const c = sample(px + (sx + 0.5) / 3, py + (sy + 0.5) / 3);
+        pr += c[0] * c[3]; pg += c[1] * c[3]; pb += c[2] * c[3]; pa += c[3];
       }
     }
-  }
-}
-// 每节顶部画浅蓝椭圆高光，营造立体感
-for (let y = 0; y < H; y++) {
-  for (let x = 0; x < W; x++) {
-    for (const [t0] of disks) {
-      if (inEllipse(x, y, 128, t0, 58, 14)) { setPx(x, y, 199, 221, 252, 255); break; }
-    }
+    const i = (py * W + px) * 4;
+    rgba[i] = pa ? Math.round(pr / pa) : 0;
+    rgba[i + 1] = pa ? Math.round(pg / pa) : 0;
+    rgba[i + 2] = pa ? Math.round(pb / pa) : 0;
+    rgba[i + 3] = Math.round(pa / 9);
   }
 }
 

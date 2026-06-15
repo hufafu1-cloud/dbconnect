@@ -1,8 +1,9 @@
 /* ============ Datavia — Navicat 风格界面（支持浅色/深色主题） ============ */
 :root {
-  --accent: #2b7de9;
-  --accent-dark: #1b66c9;
-  --accent-light: #e8f1fd;
+  /* Datavia 品牌靛蓝 */
+  --accent: #4b57d6;
+  --accent-dark: #3a46bb;
+  --accent-light: #ebedfc;
   --bg: #f3f4f6;
   --panel: #ffffff;
   --panel-2: #fafbfc;
@@ -12,10 +13,10 @@
   --border-light: #e7eaee;
   --text: #1f2329;
   --text-muted: #6b7280;
-  --hover: #eef2f7;
-  --hover-row: #f5f8fc;
-  --selected: #d8e7fb;
-  --selected-strong: #c3d9f5;
+  --hover: #eef0f7;
+  --hover-row: #f6f6fd;
+  --selected: #dde1fb;
+  --selected-strong: #c6ccf6;
   --danger: #d93026;
   --green: #1a9e57;
   --orange: #d97706;
@@ -35,9 +36,9 @@
   --mono: Consolas, "Courier New", "Microsoft YaHei Mono", monospace;
 }
 [data-theme="dark"] {
-  --accent: #4d9bff;
-  --accent-dark: #74b2ff;
-  --accent-light: #1f3a5f;
+  --accent: #8b91f5;
+  --accent-dark: #a7abf8;
+  --accent-light: #2c2f63;
   --bg: #1a1e24;
   --panel: #23272e;
   --panel-2: #1f242b;
@@ -49,8 +50,8 @@
   --text-muted: #8a93a0;
   --hover: #2c323b;
   --hover-row: #272d36;
-  --selected: #2d4a75;
-  --selected-strong: #38598c;
+  --selected: #353a78;
+  --selected-strong: #434a93;
   --danger: #e5534b;
   --green: #3fb950;
   --orange: #e3a341;

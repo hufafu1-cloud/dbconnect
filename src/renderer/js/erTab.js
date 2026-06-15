@@ -73,7 +73,7 @@ export function openErTab(target) {
   function defsMarkers() {
     const defs = document.createElementNS(SVGNS, 'defs');
     const mk = sx('marker', { id: 'er-arrow', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' },
-      sx('path', { d: 'M0,0 L10,5 L0,10 z', fill: '#2b7de9' }));
+      sx('path', { d: 'M0,0 L10,5 L0,10 z', fill: '#4b57d6' }));
     defs.append(mk);
     return defs;
   }
@@ -121,7 +121,7 @@ export function openErTab(target) {
       const p2 = edgePoint(b, ac.x, ac.y);
       const midX = (p1.x + p2.x) / 2;
       const d = `M${p1.x},${p1.y} C${midX},${p1.y} ${midX},${p2.y} ${p2.x},${p2.y}`;
-      rootG.append(sx('path', { d, fill: 'none', stroke: '#2b7de9', 'stroke-width': 1.5, opacity: 0.75, 'marker-end': 'url(#er-arrow)' }));
+      rootG.append(sx('path', { d, fill: 'none', stroke: '#4b57d6', 'stroke-width': 1.5, opacity: 0.75, 'marker-end': 'url(#er-arrow)' }));
       rootG.append(sx('circle', { cx: p1.x, cy: p1.y, r: 3, fill: '#1a9e57' }));
     }
 
@@ -266,7 +266,7 @@ export function openErTab(target) {
       'var(--panel)': cs.getPropertyValue('--panel').trim() || (dark ? '#23272e' : '#fff'),
       'var(--border)': cs.getPropertyValue('--border').trim() || '#d9dde3',
       'var(--border-light)': cs.getPropertyValue('--border-light').trim() || '#e7eaee',
-      'var(--accent)': cs.getPropertyValue('--accent').trim() || '#2b7de9',
+      'var(--accent)': cs.getPropertyValue('--accent').trim() || '#4b57d6',
       'var(--text)': cs.getPropertyValue('--text').trim() || '#1f2329',
       'var(--text-muted)': cs.getPropertyValue('--text-muted').trim() || '#6b7280',
     };

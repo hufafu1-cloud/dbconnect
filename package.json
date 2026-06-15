@@ -1,7 +1,7 @@
 {
   "name": "datavia",
   "productName": "Datavia",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "Datavia — Navicat 风格的数据库管理工具 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
   "main": "src/main/main.js",
   "author": "Datavia",
