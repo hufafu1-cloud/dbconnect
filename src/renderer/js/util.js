@@ -50,14 +50,14 @@ const cylinder = (color) => svg(
 );
 
 export const icons = {
-  // 连接类型
-  mysql: cylinder('#00758f'),
-  postgres: cylinder('#336791'),
-  sqlite: cylinder('#0f80cc'),
-  mssql: cylinder('#a91d22'),
-  clickhouse: cylinder('#d8a306'),
-  oceanbase: cylinder('#00b3a4'),
-  oboracle: cylinder('#e8590c'),
+  // 连接类型（每种数据库一种鲜明品牌色，便于区分）
+  mysql: cylinder('#1f77b4'),       // 蓝 — MySQL/MariaDB
+  postgres: cylinder('#34495e'),    // 深蓝灰 — PostgreSQL
+  sqlite: cylinder('#17a2b8'),      // 青 — SQLite
+  mssql: cylinder('#c0392b'),       // 红 — SQL Server
+  clickhouse: cylinder('#e0a800'),  // 金黄 — ClickHouse
+  oceanbase: cylinder('#16a34a'),   // 绿 — OceanBase (MySQL)
+  oboracle: cylinder('#ea580c'),    // 橙 — OceanBase (Oracle)
   connection: cylinder('#5b6470'),
   database: svg(`<ellipse cx="8" cy="3.8" rx="5.4" ry="2.2" fill="#3fa34d"/>
     <path d="M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8" stroke="#3fa34d" stroke-width="1.6"/>

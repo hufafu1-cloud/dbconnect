@@ -215,9 +215,10 @@ body {
 /* 打开/未打开状态区分（Navicat 式：状态灯 + 灰化 + 字重） */
 .tree-row .tree-icon { position: relative; }
 .tree-row .tree-icon svg { transition: filter 0.15s, opacity 0.15s; }
-/* 未打开：仅图标 SVG 灰化压暗（不影响状态灯）、文字变淡 */
-.conn-closed > .tree-row .tree-icon svg,
-.tree-row.dim .tree-icon svg { filter: grayscale(1); opacity: 0.4; }
+/* 未打开连接：保留数据库类型颜色（仅轻微压暗），靠状态灯+文字区分开/关 */
+.conn-closed > .tree-row .tree-icon svg { opacity: 0.78; }
+/* 库/模式未展开：灰化压暗（这些无需类型色） */
+.tree-row.dim .tree-icon svg { filter: grayscale(1); opacity: 0.5; }
 .conn-closed > .tree-row .tree-label,
 .tree-row.dim .tree-label { color: var(--text-muted); }
 /* 已打开：文字加粗 + 行底色微高亮 */

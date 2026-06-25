@@ -71,8 +71,12 @@ async function runDemo(createWindow) {
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const dbFile = await buildSampleDb();
   const saved = store.save({ name: '演示连接 SQLite', type: 'sqlite', file: dbFile, color: '#e5484d', group: '演示分组' });
-  // 一个保持未打开状态的连接（验证置灰显示）
-  store.save({ name: '未打开的 MySQL', type: 'mysql', host: '10.0.0.99', port: 3306, user: 'root' });
+  // 各类型未打开连接（验证类型图标颜色区分 + 关闭状态）
+  store.save({ name: '河南下行库', type: 'mysql', host: '172.18.15.33', port: 9130, user: 'root' });
+  store.save({ name: '漯河财产精细化', type: 'postgres', host: '172.19.30.12', port: 5432, user: 'postgres' });
+  store.save({ name: 'report', type: 'clickhouse', host: '172.16.78.19', port: 8123, user: 'default' });
+  store.save({ name: 'BI 仓库', type: 'mssql', host: '172.20.4.5', port: 1433, user: 'sa' });
+  store.save({ name: 'OB 集群', type: 'oboracle', host: '172.25.16.23', port: 2881, user: 'SYS@oracle' });
 
   const win = createWindow(true);
   win.webContents.setBackgroundThrottling(false);
