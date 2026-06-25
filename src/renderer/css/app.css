@@ -221,9 +221,8 @@ body {
 .tree-row.dim .tree-icon svg { filter: grayscale(1); opacity: 0.5; }
 .conn-closed > .tree-row .tree-label,
 .tree-row.dim .tree-label { color: var(--text-muted); }
-/* 已打开：文字加粗 + 行底色微高亮 */
+/* 已打开：文字加粗（开关状态靠状态灯 + 彩色图标区分，不加行底色） */
 .conn-open > .tree-row .tree-label { font-weight: 700; }
-.conn-open > .tree-row:not(:hover):not(.selected) { background: var(--accent-light); }
 /* 连接状态指示灯（连接图标右下角）：关闭=灰点，打开=绿点(辉光)，始终清晰 */
 .tree-node[data-conn] > .tree-row .tree-icon::after {
   content: ""; position: absolute; right: -3px; bottom: -3px;
