@@ -129,7 +129,7 @@ body {
   padding: 6px 12px;
   border: 1px solid transparent; border-radius: 5px;
   background: transparent; color: var(--text);
-  font-size: 13px; cursor: pointer; white-space: nowrap;
+  font-size: 13px; cursor: default; white-space: nowrap;
 }
 .tbtn:hover { background: var(--hover); border-color: var(--border-light); }
 .tbtn:active { background: var(--selected); }
@@ -144,7 +144,7 @@ body {
   gap: 4px; min-width: 58px; padding: 6px 10px 5px;
   border: 1px solid transparent; border-radius: 6px;
   background: transparent; color: var(--text);
-  font-size: 12px; cursor: pointer; white-space: nowrap; line-height: 1;
+  font-size: 12px; cursor: default; white-space: nowrap; line-height: 1;
 }
 .tbtn-big svg { width: 26px; height: 26px; flex: 0 0 auto; }
 .tbtn-big:hover { background: var(--hover); border-color: var(--border-light); }
@@ -192,7 +192,7 @@ body {
 .tree-row {
   display: flex; align-items: center; gap: 5px;
   height: 26px; padding-right: 8px;
-  cursor: pointer; white-space: nowrap; overflow: hidden;
+  cursor: default; white-space: nowrap; overflow: hidden;
 }
 .tree-row:hover { background: var(--hover); }
 .tree-row.selected { background: var(--selected); }
@@ -250,7 +250,7 @@ body {
   border: 1px solid transparent; border-bottom: none;
   border-radius: 6px 6px 0 0;
   background: transparent; color: var(--text-muted);
-  cursor: pointer; white-space: nowrap; font-size: 12.5px;
+  cursor: default; white-space: nowrap; font-size: 12.5px;
   position: relative; flex: 0 0 auto;
 }
 .tab:hover { background: var(--hover); }
@@ -285,7 +285,7 @@ body {
   padding: 4px 9px;
   border: 1px solid transparent; border-radius: 4px;
   background: transparent; font-size: 12.5px; color: var(--text);
-  cursor: pointer; white-space: nowrap;
+  cursor: default; white-space: nowrap;
 }
 .pbtn:hover { background: var(--hover); border-color: var(--border-light); }
 .pbtn:disabled { opacity: 0.4; cursor: default; }
@@ -326,7 +326,7 @@ body {
   position: sticky; top: 0; z-index: 3;
   background: var(--th-bg); font-weight: 600;
   border-bottom: 1px solid var(--border);
-  cursor: pointer;
+  cursor: default;
 }
 .grid thead th .th-inner { display: flex; align-items: center; gap: 4px; }
 .grid thead th .sort-mark { color: var(--accent); font-size: 10px; }
@@ -412,7 +412,7 @@ body {
 .form-view .form-input:disabled { color: var(--text-muted); background: var(--panel-2); }
 .form-null-btn {
   border: none; background: transparent; color: var(--text-muted);
-  cursor: pointer; padding: 0 9px; font-size: 13px;
+  cursor: default; padding: 0 9px; font-size: 13px;
 }
 .form-null-btn:hover { background: var(--hover); color: var(--text); }
 .form-fields > .form-input { background: var(--panel); }
@@ -457,7 +457,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   overflow-x: auto;
 }
 .rtab {
-  padding: 4px 12px; font-size: 12px; cursor: pointer;
+  padding: 4px 12px; font-size: 12px; cursor: default;
   border: 1px solid transparent; border-bottom: none;
   border-radius: 5px 5px 0 0; color: var(--text-muted); white-space: nowrap;
 }
@@ -485,7 +485,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   border-bottom: 1px solid var(--border); z-index: 1; color: var(--text);
 }
 .obj-table td { padding: 5px 10px; border-bottom: 1px solid var(--border-light); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.obj-table tr { cursor: pointer; }
+.obj-table tr { cursor: default; }
 .obj-table tbody tr:hover { background: var(--hover-row); }
 .obj-table tbody tr.selected { background: var(--selected); }
 .obj-table .obj-name { display: flex; align-items: center; gap: 7px; }
@@ -573,7 +573,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .ctx-item {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 12px; border-radius: 5px;
-  font-size: 12.5px; cursor: pointer; white-space: nowrap; color: var(--text);
+  font-size: 12.5px; cursor: default; white-space: nowrap; color: var(--text);
 }
 .ctx-item:hover { background: var(--accent-light); }
 .ctx-item.disabled { opacity: 0.4; cursor: default; }
@@ -602,7 +602,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 }
 .modal-close {
   width: 24px; height: 24px; border-radius: 5px; border: none; background: transparent;
-  font-size: 15px; cursor: pointer; color: var(--text-muted);
+  font-size: 15px; cursor: default; color: var(--text-muted);
 }
 .modal-close:hover { background: var(--hover); color: var(--text); }
 .modal-body { padding: 16px; overflow: auto; color: var(--text); }
@@ -612,7 +612,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 }
 .modal-foot .spring { flex: 1; }
 .btn {
-  padding: 7px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;
+  padding: 7px 16px; border-radius: 6px; font-size: 13px; cursor: default;
   border: 1px solid var(--border); background: var(--panel); color: var(--text);
 }
 .btn:hover { background: var(--hover); }
@@ -639,7 +639,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 /* 颜色选择 */
 .color-swatches { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
 .color-swatch {
-  width: 22px; height: 22px; border-radius: 6px; cursor: pointer;
+  width: 22px; height: 22px; border-radius: 6px; cursor: default;
   border: 2px solid transparent; display: inline-flex; align-items: center; justify-content: center;
   font-size: 11px; color: var(--text-muted);
 }
@@ -678,7 +678,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   padding: 10px 14px; font-size: 12.5px; color: var(--text);
   display: flex; gap: 9px; align-items: flex-start;
   animation: toast-in 0.18s ease-out;
-  user-select: text; cursor: pointer;
+  user-select: text; cursor: default;
   white-space: pre-wrap; word-break: break-word;
 }
 .toast .t-icon { font-size: 14px; line-height: 1.2; }
