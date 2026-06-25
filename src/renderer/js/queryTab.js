@@ -198,12 +198,21 @@ export function openQueryTab(target, initialSql, opts) {
     return { tableCols, dbTables, tableList: [...tableSet].sort((a, b) => a.localeCompare(b)) };
   }
 
+  // 当前光标所在的单条语句文本（按 ; 切分），用于把补全范围限定在本语句
+  function currentStmt() {
+    const full = cm.getValue();
+    const pos = cm.indexFromPos(cm.getCursor());
+    const start = full.lastIndexOf(';', pos - 1) + 1;
+    let end = full.indexOf(';', pos);
+    if (end < 0) end = full.length;
+    return full.slice(start, end);
+  }
+
   // 解析 FROM/JOIN 中的别名：alias(lower) -> 表名
-  function resolveAliases() {
+  function resolveAliases(text) {
     const map = new Map();
-    const re = new RegExp(`\\b(?:from|join)\\s+[\`"\\[]?(${ID_CHARS}+(?:\\.${ID_CHARS}+)?)[\`"\\]]?(?:\\s+as)?\\s+[\`"\\[]?([a-z_]\\w*)[\`"\\]]?`, 'gi');
+    const re = new RegExp(`\\b(?:from|join|update)\\s+[\`"\\[]?(${ID_CHARS}+(?:\\.${ID_CHARS}+)?)[\`"\\]]?(?:\\s+as)?\\s+[\`"\\[]?([a-z_]\\w*)[\`"\\]]?`, 'gi');
     let m;
-    const text = cm.getValue();
     while ((m = re.exec(text))) {
       const alias = m[2];
       if (/^(on|where|inner|left|right|join|group|order|using|cross|natural|set|values|having|limit)$/i.test(alias)) continue;
@@ -212,6 +221,21 @@ export function openQueryTab(target, initialSql, opts) {
       map.set(alias.toLowerCase(), tbl);
     }
     return map;
+  }
+
+  // 当前语句 FROM/JOIN/UPDATE/INTO 引用的所有表（无论有无别名，含逗号分隔）→ [表名小写]
+  function tablesInScope(text) {
+    const names = new Set();
+    const re = new RegExp(`\\b(?:from|join|update|into)\\s+([\`"\\[]?${ID_CHARS}+(?:\\.${ID_CHARS}+)?[\`"\\]]?(?:\\s*,\\s*[\`"\\[]?${ID_CHARS}+(?:\\.${ID_CHARS}+)?[\`"\\]]?)*)`, 'gi');
+    let m;
+    while ((m = re.exec(text))) {
+      for (let seg of m[1].split(',')) {
+        seg = seg.trim().replace(/^[`"\[]|[`"\]]$/g, '');
+        if (seg.includes('.')) seg = seg.split('.').pop();
+        if (seg) names.add(seg.toLowerCase());
+      }
+    }
+    return names;
   }
 
   // 自定义补全函数
@@ -225,6 +249,7 @@ export function openQueryTab(target, initialSql, opts) {
       const pre = arr.filter((x) => x.toLowerCase().startsWith(lp));
       return pre.length ? pre : arr.filter((x) => x.toLowerCase().includes(lp));
     };
+    const stmt = currentStmt();
     // 限定符.部分  （表.字段 / 库.表 / 别名.字段）
     const dotRe = new RegExp(`[\`"\\[]?(${ID_CHARS}+)[\`"\\]]?\\.(${ID_CHARS}*)$`);
     let m = dotRe.exec(lineText);
@@ -232,7 +257,7 @@ export function openQueryTab(target, initialSql, opts) {
       const qual = m[1].toLowerCase();
       const partial = m[2];
       const from = CodeMirror.Pos(cur.line, cur.ch - partial.length);
-      const aliases = resolveAliases();
+      const aliases = resolveAliases(stmt);
       let cands = null;
       if (data.tableCols.has(qual) && data.tableCols.get(qual).cols.length) cands = data.tableCols.get(qual).cols;
       else if (aliases.has(qual) && data.tableCols.has(aliases.get(qual).toLowerCase())) cands = data.tableCols.get(aliases.get(qual).toLowerCase()).cols;
@@ -244,13 +269,29 @@ export function openQueryTab(target, initialSql, opts) {
       }
       return null;
     }
-    // 裸词：表名 + 关键字
+    // 裸词：根据位置决定优先「表名」还是「字段」
     const wm = new RegExp(`(${ID_CHARS}*)$`).exec(lineText);
     const partial = wm ? wm[1] : '';
     const from = CodeMirror.Pos(cur.line, cur.ch - partial.length);
+    const before = lineText.slice(0, lineText.length - partial.length);
+    const lastKw = (before.match(/([\w$]+)\s*$/) || [])[1] || '';
+    const inTablePos = /^(from|join|into|update|table)$/i.test(lastKw);
     const tables = startsWith(data.tableList, partial);
     const kws = partial ? SQL_KEYWORDS.filter((k) => k.toLowerCase().startsWith(partial.toLowerCase())) : [];
-    const list = [...tables, ...kws];
+
+    if (inTablePos) {
+      const list = [...tables, ...kws];
+      return list.length ? { list, from, to: cur } : null;
+    }
+    // 列位置：把当前语句 FROM 中各表(无别名也算)的字段补进来，字段优先
+    const scopeCols = [];
+    for (const t of tablesInScope(stmt)) {
+      const tc = data.tableCols.get(t);
+      if (tc && tc.cols.length) scopeCols.push(...tc.cols);
+    }
+    const cols = startsWith([...new Set(scopeCols)], partial);
+    const seen = new Set(cols.map((c) => c.toLowerCase()));
+    const list = [...cols, ...tables.filter((t) => !seen.has(t.toLowerCase())), ...kws];
     return list.length ? { list, from, to: cur } : null;
   }
 

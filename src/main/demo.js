@@ -218,6 +218,8 @@ async function runDemo(createWindow) {
   await shot('shot-19-hint.png');
   const hintRes2 = await ej(`window.__test.testHint(${id}, 'main', 'SELECT * FROM orders.')`);
   console.log('[DEMO] 补全(orders.):', JSON.stringify(hintRes2));
+  const hintRes3 = await ej(`window.__test.testHint(${id}, 'main', 'SELECT * FROM customers WHERE c')`);
+  console.log('[DEMO] 补全(无别名 WHERE c):', JSON.stringify(hintRes3));
 
   // 保存查询到连接（树上出现“查询”节点）+ 打开筛选构建器
   await ej(`window.__test.saveDemoQuery(${id}, '热门客户TOP10', "SELECT c.name, SUM(o.amount) AS total FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY total DESC LIMIT 10;")`);
