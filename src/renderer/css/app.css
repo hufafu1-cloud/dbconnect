@@ -229,7 +229,8 @@ body {
   width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
   border: 2px solid var(--panel); background: #9aa1ab;
 }
-.conn-open > .tree-row .tree-icon::after {
+/* 注意：基础灰点规则带 [data-conn] 属性，优先级高，绿点覆盖须同等或更高优先级 */
+.tree-node[data-conn].conn-open > .tree-row .tree-icon::after {
   background: #21c463; border-color: var(--panel);
   box-shadow: 0 0 5px 1px rgba(33, 196, 99, 0.75);
 }
