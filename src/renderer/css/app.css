@@ -212,13 +212,25 @@ body {
 .tree-children { display: none; }
 .tree-children.open { display: block; }
 .tree-loading { color: var(--text-muted); font-size: 12px; padding: 3px 0; }
-/* 打开/未打开状态区分（Navicat 式）：未打开的图标置灰、文字变淡 */
-.tree-row .tree-icon { transition: filter 0.15s, opacity 0.15s; }
+/* 打开/未打开状态区分（Navicat 式：状态灯 + 灰化 + 字重） */
+.tree-row .tree-icon { transition: filter 0.15s, opacity 0.15s; position: relative; }
+/* 未打开：图标灰化压暗、文字变淡 */
 .conn-closed > .tree-row .tree-icon,
-.tree-row.dim .tree-icon { filter: grayscale(1); opacity: 0.5; }
-.conn-closed > .tree-row .tree-label { color: var(--text-muted); }
+.tree-row.dim .tree-icon { filter: grayscale(1); opacity: 0.45; }
+.conn-closed > .tree-row .tree-label,
 .tree-row.dim .tree-label { color: var(--text-muted); }
-.conn-open > .tree-row .tree-label { font-weight: 600; }
+/* 已打开：彩色图标 + 文字加粗 + 行底色微高亮 */
+.conn-open > .tree-row .tree-label { font-weight: 700; }
+.conn-open > .tree-row:not(:hover):not(.selected) { background: var(--accent-light); }
+/* 连接状态指示灯（叠在连接图标右下角）：关闭=灰，打开=绿 */
+.tree-node[data-conn] > .tree-row .tree-icon::after {
+  content: ""; position: absolute; right: -3px; bottom: -2px;
+  width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box;
+  border: 2px solid var(--panel); background: #aeb4bd;
+}
+.conn-open > .tree-row .tree-icon::after {
+  background: var(--green); box-shadow: 0 0 4px rgba(26, 158, 87, 0.6);
+}
 
 /* ---------- 标签页 ---------- */
 #tabbar {
