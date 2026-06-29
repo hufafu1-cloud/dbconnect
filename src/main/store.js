@@ -145,4 +145,36 @@ function removeGroup(name) {
   if (touched) persist(arr);
 }
 
-module.exports = { list, getById, save, remove, listGroups, addGroup, renameGroup, removeGroup };
+// ---------------- AI 助手配置（API Key 加密存储） ----------------
+function aiPath() {
+  return path.join(app.getPath('userData'), 'ai-config.json');
+}
+
+const AI_DEFAULT = { provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: '', temperature: 0.2 };
+
+function getAiConfig() {
+  try {
+    const c = JSON.parse(fs.readFileSync(aiPath(), 'utf8'));
+    return { ...AI_DEFAULT, ...c, apiKey: decryptPassword(c.apiKey) };
+  } catch (e) {
+    return { ...AI_DEFAULT };
+  }
+}
+
+function saveAiConfig(cfg) {
+  fs.mkdirSync(path.dirname(aiPath()), { recursive: true });
+  const rec = {
+    provider: cfg.provider || 'custom',
+    baseUrl: (cfg.baseUrl || '').trim(),
+    model: (cfg.model || '').trim(),
+    temperature: typeof cfg.temperature === 'number' ? cfg.temperature : 0.2,
+    apiKey: encryptPassword(cfg.apiKey || ''),
+  };
+  fs.writeFileSync(aiPath(), JSON.stringify(rec, null, 2), 'utf8');
+  return { ...rec, apiKey: cfg.apiKey || '' };
+}
+
+module.exports = {
+  list, getById, save, remove, listGroups, addGroup, renameGroup, removeGroup,
+  getAiConfig, saveAiConfig,
+};

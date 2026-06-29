@@ -98,6 +98,18 @@ contextBridge.exposeInMainWorld('api', {
     write: (p, content) => inv('file:write', p, content),
     writeBase64: (p, b64) => inv('file:writeBase64', p, b64),
   },
+  ai: {
+    getConfig: () => inv('ai:getConfig'),
+    saveConfig: (c) => inv('ai:saveConfig', c),
+    test: (c) => inv('ai:test', c),
+    chat: (reqId, messages) => inv('ai:chat', { reqId, messages }),
+    cancel: (reqId) => inv('ai:cancel', { reqId }),
+    onDelta: (cb) => {
+      const listener = (_e, p) => cb(p);
+      ipcRenderer.on('ai:delta', listener);
+      return () => ipcRenderer.removeListener('ai:delta', listener);
+    },
+  },
   history: {
     list: (opts) => inv('history:list', opts),
     clear: () => inv('history:clear'),

@@ -136,6 +136,11 @@ export const icons = {
     <rect x="5.4" y="10" width="5" height="4" rx="0.8" stroke="#d97706" stroke-width="1.2" fill="none"/>
     <path d="M6.6 4.6h2.8M9 6.2L7.6 10M6.6 5.6L6 10" stroke="#9aa3af" stroke-width="1"/>`),
   format: svg(`<path d="M2.5 3h11M2.5 6.2h7M5.5 9.4h8M5.5 12.6h5" stroke="#7c5cd6" stroke-width="1.6" stroke-linecap="round"/>`),
+  ai: svg(`<rect x="3" y="5.2" width="10" height="7.2" rx="2" stroke="#4b57d6" stroke-width="1.4" fill="none"/>
+    <path d="M8 2.4v2.8M8 2.4a1 1 0 1 0 0-.01" stroke="#4b57d6" stroke-width="1.4" stroke-linecap="round"/>
+    <circle cx="8" cy="2.1" r="1.05" fill="#4b57d6"/>
+    <circle cx="6.1" cy="8.6" r="1.05" fill="#4b57d6"/><circle cx="9.9" cy="8.6" r="1.05" fill="#4b57d6"/>
+    <path d="M1.6 8v2M14.4 8v2" stroke="#4b57d6" stroke-width="1.4" stroke-linecap="round"/>`),
 };
 
 export function iconEl(name, cls) {

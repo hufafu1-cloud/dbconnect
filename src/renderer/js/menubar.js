@@ -35,6 +35,9 @@ export function buildMenuBar(runAction) {
       { label: '开发者工具', hint: 'F12', onClick: () => window.api.app.winCmd('devtools') },
     ]],
     ['工具', () => [
+      { label: 'AI 助手', onClick: () => runAction('ai-panel') },
+      { label: 'AI 助手设置…', onClick: () => runAction('ai-config') },
+      { sep: true },
       { label: '在库中查找…', hint: 'Ctrl+F', onClick: () => runAction('search') },
       { sep: true },
       { label: '数据传输…', onClick: () => runAction('transfer') },

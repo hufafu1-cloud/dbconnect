@@ -212,6 +212,22 @@ async function runDemo(createWindow) {
   await wait(1200);
   await shot('shot-18-er.png');
 
+  // AI 助手面板（无 Key 时展示欢迎页 + 快捷动作；含输入预填）
+  await ej(`window.__test.openAi(${id}, 'main', 'SELECT * FROM orders WHERE amount > 1000')`);
+  await wait(700);
+  await shot('shot-20-ai.png');
+  const aiOk = await ej(`(() => {
+    const p = document.querySelector('.ai-pane');
+    return { pane: !!p, chips: document.querySelectorAll('.ai-chip').length, input: !!document.querySelector('.ai-input') };
+  })()`);
+  console.log('[DEMO] AI 助手面板:', JSON.stringify(aiOk));
+  // AI 设置对话框
+  await ej('window.__test.openAiConfig()');
+  await wait(500);
+  await shot('shot-21-ai-config.png');
+  await ej('window.__test.closeMenus()');
+  await wait(200);
+
   // SQL 自动补全：输入 customers. 后弹出字段
   const hintRes = await ej(`window.__test.testHint(${id}, 'main', 'SELECT * FROM customers c WHERE c.')`);
   console.log('[DEMO] 补全(别名 c.):', JSON.stringify(hintRes));

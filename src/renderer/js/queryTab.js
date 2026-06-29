@@ -5,6 +5,7 @@ import { addTab, uid } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, promptDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
+import { showMenu } from './contextmenu.js';
 
 const CM_MODES = { mysql: 'text/x-mysql', postgres: 'text/x-pgsql', mssql: 'text/x-mssql', sqlite: 'text/x-sqlite', clickhouse: 'text/x-mysql', oceanbase: 'text/x-mysql', oboracle: 'text/x-plsql' };
 let queryNo = 0;
@@ -75,6 +76,31 @@ export function openQueryTab(target, initialSql, opts) {
   });
   btnStop.disabled = true;
 
+  const btnAi = mkBtn('ai', 'AI ▾', () => showAiMenu(btnAi));
+
+  function showAiMenu(anchor) {
+    const r = anchor.getBoundingClientRect();
+    showMenu(r.left, r.bottom + 4, [
+      { label: '优化 SQL', icon: 'format', onClick: () => aiAssist('optimize') },
+      { label: '解释 SQL', icon: 'info', onClick: () => aiAssist('explain') },
+      { label: '排查问题', icon: 'monitor', onClick: () => aiAssist('diagnose') },
+      { sep: true },
+      { label: '生成 SQL（自然语言）', icon: 'ai', onClick: () => aiAssist('generate') },
+      { label: '打开 AI 助手', icon: 'ai', onClick: () => aiAssist(null) },
+    ]);
+  }
+
+  async function aiAssist(action) {
+    const { openAiPanel } = await import('./aiPanel.js');
+    let sql = (cm.getSelection() || cm.getValue()).trim().replace(/;\s*$/, '');
+    openAiPanel({
+      connId, db,
+      sql: action === 'generate' ? '' : sql,
+      action: action || undefined,
+      insertTarget: (text) => { cm.replaceSelection(text); cm.focus(); },
+    });
+  }
+
   const toolbar = el('div', { class: 'pane-toolbar' },
     btnRun, btnRunSel, btnStop,
     el('span', { class: 'sep' }),
@@ -83,6 +109,7 @@ export function openQueryTab(target, initialSql, opts) {
     el('span', { class: 'sep' }),
     mkBtn('explain', '解释', explainSql),
     mkBtn('format', '美化', formatSql),
+    btnAi,
     mkBtn('openFile', '打开', openFile),
     mkBtn('save', '保存', () => saveQuery()),
     mkBtn('exportIcon', '另存文件', () => saveAsFile()),

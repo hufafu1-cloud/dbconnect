@@ -29,6 +29,12 @@ async function openHistory() {
   openHistoryTab();
 }
 
+async function openAiPanelFromToolbar() {
+  const { openAiPanel } = await import('./aiPanel.js');
+  const t = firstOpenTarget();
+  openAiPanel(t ? { connId: t.connId, db: t.db } : {});
+}
+
 function showConnMenu(anchor) {
   const r = anchor.getBoundingClientRect();
   showMenu(r.left, r.bottom + 4, [
@@ -84,6 +90,7 @@ function buildToolbar() {
     for (const [kk, b] of kindBtns) b.classList.toggle('active', kk === k);
   });
 
+  const btnAi = big('ai', 'AI 助手', openAiPanelFromToolbar, 'AI 助手：优化 / 解释 / 生成 SQL');
   const btnHistory = big('history', '历史', openHistory);
   const btnTheme = big('theme', '主题', toggleTheme, '切换浅色/深色主题');
   const btnAbout = big('info', '关于', showAbout);
@@ -93,7 +100,7 @@ function buildToolbar() {
     el('span', { class: 'toolbar-sep' }),
     ...kindEls,
     el('span', { class: 'toolbar-spring' }),
-    btnHistory, btnTheme, btnAbout,
+    btnAi, btnHistory, btnTheme, btnAbout,
   );
 }
 
@@ -124,6 +131,7 @@ async function showAbout() {
       el('div', { style: { color: 'var(--text-muted)', marginTop: '-4px' } }, `数据之道 · v${info.version}`),
       el('div', { style: { color: 'var(--text-muted)' } }, 'Navicat 风格的数据库管理工具'),
       el('div', {}, `支持: MySQL / MariaDB · PostgreSQL · SQLite · SQL Server · ClickHouse · OceanBase`),
+      el('div', { style: { color: 'var(--accent-dark)' } }, '内置 AI 助手：SQL 优化 / 解释 / 排查 / 自然语言生成'),
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
         `Electron ${info.electron} · Node ${info.node} · Chromium ${info.chrome}`),
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
@@ -193,6 +201,8 @@ export async function runMenuAction(id) {
       case 'dump': if (needConn() && t.db) (await import('./dbaTools.js')).openDumpDialog(t); else if (t && !t.db) toast.info('请先在左侧选择数据库'); break;
       case 'import': if (needConn() && t.db) (await import('./importWizard.js')).openImportWizard(t); else if (t && !t.db) toast.info('请先在左侧选择数据库'); break;
       case 'history': openHistory(); break;
+      case 'ai-panel': openAiPanelFromToolbar(); break;
+      case 'ai-config': { const { openAiConfigDialog } = await import('./aiConfigDialog.js'); openAiConfigDialog(); break; }
       case 'processes': {
         if (!needConn()) break;
         const conn = state.connections.find((c) => c.id === t.connId);
@@ -295,6 +305,16 @@ function setupTestHooks() {
     openHistory: async () => {
       const { openHistoryTab } = await import('./historyTab.js');
       openHistoryTab();
+      return true;
+    },
+    openAi: async (connId, db, sql, action) => {
+      const { openAiPanel } = await import('./aiPanel.js');
+      openAiPanel({ connId, db, sql, action });
+      return true;
+    },
+    openAiConfig: async () => {
+      const { openAiConfigDialog } = await import('./aiConfigDialog.js');
+      openAiConfigDialog();
       return true;
     },
     saveDemoQuery: async (connId, name, sql) => {

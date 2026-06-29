@@ -629,6 +629,22 @@ async function runSelfTest() {
   try { fs.unlinkSync(fkFile); } catch (e) { /* ignore */ }
   } catch (e2) { fail++; console.log('  ✗ 第二档块异常:', e2 && e2.stack || e2); }
 
+  // ---- AI 助手（纯函数：URL 推导 + SSE 解析） ----
+  try {
+    const ai = require('./ai');
+    check('ai buildUrl 追加路径', ai.buildUrl('https://api.deepseek.com/v1') === 'https://api.deepseek.com/v1/chat/completions');
+    check('ai buildUrl 去尾斜杠', ai.buildUrl('https://api.deepseek.com/v1/') === 'https://api.deepseek.com/v1/chat/completions');
+    check('ai buildUrl 已完整', ai.buildUrl('http://x/y/chat/completions') === 'http://x/y/chat/completions');
+    check('ai buildUrl 空报错', (() => { try { ai.buildUrl(''); return false; } catch (e) { return true; } })());
+    check('ai SSE 增量', ai.parseSSELine('data: {"choices":[{"delta":{"content":"你好"}}]}') === '你好');
+    check('ai SSE message 兜底', ai.parseSSELine('data: {"choices":[{"message":{"content":"hi"}}]}') === 'hi');
+    check('ai SSE DONE', ai.parseSSELine('data: [DONE]') === null);
+    check('ai SSE 非data行', ai.parseSSELine(': keep-alive') === '');
+    check('ai SSE 空delta', ai.parseSSELine('data: {"choices":[{"delta":{}}]}') === '');
+    const store2 = require('./store');
+    check('ai 默认配置', (() => { const c = store2.getAiConfig(); return c && c.baseUrl && c.model && c.provider; })());
+  } catch (eAi) { fail++; console.log('  ✗ AI 块异常:', eAi && eAi.stack || eAi); }
+
   console.log(`[SELFTEST] 通过 ${pass} 项, 失败 ${fail} 项`);
   return fail === 0 ? 0 : 1;
 }

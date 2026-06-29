@@ -75,6 +75,35 @@ function register(getWin) {
     return { base64: buf.subarray(0, max).toString('base64'), length: buf.length, truncated: buf.length > max };
   });
 
+  // ---- AI 助手 ----
+  const ai = require('./ai');
+  const aiAborts = new Map();
+  h('ai:getConfig', () => store.getAiConfig());
+  h('ai:saveConfig', (a) => store.saveAiConfig(a));
+  h('ai:test', (a) => ai.test(a));
+  ipcMain.handle('ai:chat', async (event, a) => {
+    const ctrl = new AbortController();
+    aiAborts.set(a.reqId, ctrl);
+    try {
+      const cfg = store.getAiConfig();
+      const content = await ai.chat(cfg, a.messages, {
+        signal: ctrl.signal,
+        onDelta: (d) => { try { event.sender.send('ai:delta', { reqId: a.reqId, delta: d }); } catch (e) { /* ignore */ } },
+      });
+      return { ok: true, data: { content } };
+    } catch (err) {
+      if (ctrl.signal.aborted) return { ok: false, error: '已取消' };
+      return { ok: false, error: (err && err.message) || String(err) };
+    } finally {
+      aiAborts.delete(a.reqId);
+    }
+  });
+  ipcMain.handle('ai:cancel', (e, a) => {
+    const c = aiAborts.get(a.reqId);
+    if (c) c.abort();
+    return { ok: true, data: true };
+  });
+
   // ---- 在库中查找 ----
   const search = require('./search');
   ipcMain.handle('db:search', async (event, a) => {
