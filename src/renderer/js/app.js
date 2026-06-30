@@ -317,6 +317,16 @@ function setupTestHooks() {
       openAiConfigDialog();
       return true;
     },
+    analyzeDanger: async (sql) => {
+      const { analyzeDanger } = await import('./danger.js');
+      return analyzeDanger(sql);
+    },
+    openDangerConfirm: async (connName, sql) => {
+      const { analyzeDanger, confirmDangerExecution } = await import('./danger.js');
+      const items = analyzeDanger(sql);
+      confirmDangerExecution(connName, items.length ? items : [{ level: 'high', reason: '示例危险语句', sql }]);
+      return items.length;
+    },
     saveDemoQuery: async (connId, name, sql) => {
       await window.api.queries.save({ connId, name, sql });
       emit('queries-changed', { connId });

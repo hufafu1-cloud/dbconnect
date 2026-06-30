@@ -35,6 +35,15 @@ export function openQueryTab(target, initialSql, opts) {
   // ---- 连接 / 数据库选择 ----
   const connSel = el('select', { title: '连接' });
   const dbSel = el('select', { title: '数据库' });
+  const prodBadge = el('span', { class: 'tb-env-badge', style: { display: 'none' } }, '生产');
+  function updateEnvBadge() {
+    const c = state.connections.find((x) => x.id === connId);
+    const env = c && c.env;
+    prodBadge.style.display = (env === 'prod' || env === 'test') ? '' : 'none';
+    prodBadge.textContent = env === 'prod' ? '生产' : '测试';
+    prodBadge.className = 'tb-env-badge env-' + (env || '');
+    prodBadge.title = env === 'prod' ? '生产库：危险 SQL 执行前需二次确认' : '测试库';
+  }
   function fillConnSel() {
     connSel.innerHTML = '';
     const opens = [...state.open.keys()];
@@ -44,6 +53,7 @@ export function openQueryTab(target, initialSql, opts) {
     }
     if (!opens.includes(connId)) connId = opens[0] || null;
     if (connId) connSel.value = connId;
+    updateEnvBadge();
   }
   function fillDbSel() {
     dbSel.innerHTML = '';
@@ -53,7 +63,7 @@ export function openQueryTab(target, initialSql, opts) {
     if (!dbs.includes(db)) db = dbs[0] || null;
     if (db) dbSel.value = db;
   }
-  connSel.addEventListener('change', () => { connId = connSel.value || null; fillDbSel(); loadHintColumns(); });
+  connSel.addEventListener('change', () => { connId = connSel.value || null; fillDbSel(); loadHintColumns(); updateEnvBadge(); });
   dbSel.addEventListener('change', () => { db = dbSel.value || null; loadHintColumns(); });
 
   const maxRowsSel = el('select', { title: '结果行数上限' },
@@ -104,7 +114,7 @@ export function openQueryTab(target, initialSql, opts) {
   const toolbar = el('div', { class: 'pane-toolbar' },
     btnRun, btnRunSel, btnStop,
     el('span', { class: 'sep' }),
-    el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '连接:'), connSel,
+    el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '连接:'), connSel, prodBadge,
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel,
     el('span', { class: 'sep' }),
     mkBtn('explain', '解释', explainSql),
@@ -394,6 +404,9 @@ export function openQueryTab(target, initialSql, opts) {
     let sql = selectionOnly ? cm.getSelection() : cm.getValue();
     if (selectionOnly && !sql.trim()) sql = cm.getValue();
     if (!sql.trim()) { toast.info('没有可执行的 SQL'); return; }
+    // 生产库危险 SQL 二次确认
+    const { guardSql } = await import('./danger.js');
+    if (!(await guardSql(connId, sql))) { statusbar.setLeft('已取消（生产库危险操作未确认）'); return; }
     running = true;
     btnRun.disabled = true;
     btnRunSel.disabled = true;

@@ -65,6 +65,12 @@ function renderConnNode(conn) {
   });
 
   if (conn.color) row.style.setProperty('--conn-color', conn.color);
+  if (conn.env === 'prod' || conn.env === 'test') {
+    container.classList.add('env-' + conn.env);
+    const label = row.querySelector('.tree-label');
+    const tag = el('span', { class: 'tree-env env-' + conn.env, title: conn.env === 'prod' ? '生产库：危险 SQL 需二次确认' : '测试库' }, conn.env === 'prod' ? '生产' : '测试');
+    label.after(tag);
+  }
 
   const isOpenNow = () => state.open.has(conn.id);
 

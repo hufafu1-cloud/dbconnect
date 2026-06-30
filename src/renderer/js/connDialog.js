@@ -46,21 +46,35 @@ export function openConnDialog(existing, presetType, presetGroup) {
     ['', '无'], ['#e5484d', '红'], ['#f76b15', '橙'], ['#ffb224', '黄'],
     ['#30a46c', '绿'], ['#0091ff', '蓝'], ['#8e4ec6', '紫'], ['#d6409f', '粉'],
   ];
+  // 环境 / 链接类型：标记为「生产」后，危险 SQL 执行前需二次确认
+  const ENVS = [['', '未标记'], ['dev', '开发'], ['test', '测试'], ['prod', '生产']];
+  const envSel = el('select', { title: '链接类型 / 环境' },
+    ...ENVS.map(([v, n]) => el('option', { value: v, selected: v === (cfg.env || '') ? 'selected' : null }, n)));
+  envSel.value = cfg.env || '';
+  const envHint = el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } });
+  const refreshEnvHint = () => {
+    envHint.textContent = envSel.value === 'prod'
+      ? '已标记为生产库：执行 DROP / TRUNCATE / 无 WHERE 的 DELETE·UPDATE 等危险语句前，将要求输入连接名二次确认。'
+      : '生产环境建议标记为「生产」，可在执行危险 SQL 前强制二次确认，防止误操作。';
+  };
+  envSel.addEventListener('change', () => { refreshEnvHint(); if (envSel.value === 'prod' && !pickedColor) setColor('#e5484d'); });
+  refreshEnvHint();
+
   let pickedColor = cfg.color || '';
-  const swatchEls = [];
+  const swatchEls = new Map();
+  function setColor(c) {
+    pickedColor = c;
+    for (const [cc, x] of swatchEls) x.classList.toggle('active', cc === c);
+  }
   const swatches = el('div', { class: 'color-swatches' },
     ...COLORS.map(([c, label]) => {
       const sw = el('span', {
         class: 'color-swatch' + (c ? '' : ' none') + (pickedColor === c ? ' active' : ''),
         title: label,
         style: c ? { background: c } : {},
-        onClick: () => {
-          pickedColor = c;
-          for (const x of swatchEls) x.classList.remove('active');
-          sw.classList.add('active');
-        },
+        onClick: () => setColor(c),
       }, c ? '' : '∅');
-      swatchEls.push(sw);
+      swatchEls.set(c, sw);
       return sw;
     }));
   const fieldsBox = el('div', { style: { display: 'contents' } });
@@ -204,6 +218,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       type: t,
       group: groupInput.value.trim(),
       color: pickedColor,
+      env: envSel.value,
     };
     if (t === 'sqlite') {
       out.file = f.file.value.trim();
@@ -245,6 +260,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
     el('label', {}, '连接类型'), typeSel,
     el('label', {}, '连接名'), nameInput,
     el('label', {}, '分组'), groupInput,
+    el('label', {}, '链接类型'), el('div', {}, envSel, envHint),
     el('label', {}, '颜色标记'), swatches,
     fieldsBox);
 

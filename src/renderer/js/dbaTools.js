@@ -281,6 +281,17 @@ export async function openRunSqlFileDialog(target) {
 
   async function run() {
     if (running) return;
+    // 生产库：执行 SQL 文件前二次确认（扫描文件中的危险语句）
+    const { isProd, analyzeDanger, confirmDangerExecution } = await import('./danger.js');
+    if (isProd(target.connId)) {
+      let content = '';
+      try { content = await window.api.file.read(file); } catch (e) { /* ignore */ }
+      const items = analyzeDanger(content);
+      const c = state.connections.find((x) => x.id === target.connId);
+      const listed = items.length ? items : [{ level: 'high', reason: '在生产库上执行整个 SQL 文件', sql: file }];
+      const ok = await confirmDangerExecution(c ? c.name : target.connId, listed, { title: `即将在生产连接「${c ? c.name : ''}」上执行 SQL 文件` });
+      if (!ok) return;
+    }
     running = true;
     bar.style.display = '';
     const off = window.api.dba.onProgress((p) => {

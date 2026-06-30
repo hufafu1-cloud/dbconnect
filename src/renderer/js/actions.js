@@ -1,5 +1,5 @@
 // 共享动作：树右键菜单与对象列表工具栏共用
-import { state, emit, connLabel } from './state.js';
+import { state, emit, connLabel, connById } from './state.js';
 import { toast, confirmDialog, promptDialog } from './toast.js';
 import { openTableTab } from './tableTab.js';
 import { openStructTab } from './structTab.js';
@@ -39,10 +39,25 @@ function fullName(t) {
   return (t.schema ? t.schema + '.' : '') + t.table;
 }
 
+/** 破坏性操作确认：生产连接走「输入连接名」强确认，否则普通危险确认 */
+async function confirmDestructive(connId, { title, message, okLabel, reason, sql }) {
+  const c = connById(connId);
+  if (c && c.env === 'prod') {
+    const { confirmDangerExecution } = await import('./danger.js');
+    return confirmDangerExecution(c.name, [{ level: 'high', reason, sql }], { title });
+  }
+  return confirmDialog(title, message, { danger: true, okLabel });
+}
+
 export async function dropTable(target, isView) {
   const kind = isView ? '视图' : '表';
-  const ok = await confirmDialog(`删除${kind}`,
-    `确定要删除${kind} “${fullName(target)}” 吗？\n该操作不可撤销！`, { danger: true, okLabel: '删除' });
+  const ok = await confirmDestructive(target.connId, {
+    title: `删除${kind}`,
+    message: `确定要删除${kind} “${fullName(target)}” 吗？\n该操作不可撤销！`,
+    okLabel: '删除',
+    reason: `删除${kind}（DROP ${isView ? 'VIEW' : 'TABLE'}）`,
+    sql: `DROP ${isView ? 'VIEW' : 'TABLE'} ${fullName(target)}`,
+  });
   if (!ok) return;
   try {
     await window.api.db.action(target.connId, {
@@ -55,8 +70,13 @@ export async function dropTable(target, isView) {
 }
 
 export async function truncateTable(target) {
-  const ok = await confirmDialog('清空表',
-    `确定要清空表 “${fullName(target)}” 的全部数据吗？\n该操作不可撤销！`, { danger: true, okLabel: '清空' });
+  const ok = await confirmDestructive(target.connId, {
+    title: '清空表',
+    message: `确定要清空表 “${fullName(target)}” 的全部数据吗？\n该操作不可撤销！`,
+    okLabel: '清空',
+    reason: '清空表数据（TRUNCATE）',
+    sql: `TRUNCATE TABLE ${fullName(target)}`,
+  });
   if (!ok) return;
   try {
     await window.api.db.action(target.connId, { action: 'truncate', db: target.db, schema: target.schema, table: target.table });
@@ -77,8 +97,13 @@ export async function renameTable(target) {
 
 
 export async function dropDatabase(target) {
-  const ok = await confirmDialog('删除数据库',
-    `确定要删除数据库 “${target.db}” 吗？\n库中所有对象都会被删除，该操作不可撤销！`, { danger: true, okLabel: '删除' });
+  const ok = await confirmDestructive(target.connId, {
+    title: '删除数据库',
+    message: `确定要删除数据库 “${target.db}” 吗？\n库中所有对象都会被删除，该操作不可撤销！`,
+    okLabel: '删除',
+    reason: '删除数据库（DROP DATABASE）',
+    sql: `DROP DATABASE ${target.db}`,
+  });
   if (!ok) return;
   try {
     await window.api.db.action(target.connId, { action: 'dropDatabase', db: target.db });

@@ -71,10 +71,10 @@ async function runDemo(createWindow) {
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const dbFile = await buildSampleDb();
   const saved = store.save({ name: '演示连接 SQLite', type: 'sqlite', file: dbFile, color: '#e5484d', group: '演示分组' });
-  // 各类型未打开连接（验证类型图标颜色区分 + 关闭状态）
-  store.save({ name: '河南下行库', type: 'mysql', host: '172.18.15.33', port: 9130, user: 'root' });
+  // 各类型未打开连接（验证类型图标颜色区分 + 关闭状态 + 生产/测试链接类型标记）
+  store.save({ name: '河南下行库', type: 'mysql', host: '172.18.15.33', port: 9130, user: 'root', env: 'prod', color: '#e5484d' });
   store.save({ name: '漯河财产精细化', type: 'postgres', host: '172.19.30.12', port: 5432, user: 'postgres' });
-  store.save({ name: 'report', type: 'clickhouse', host: '172.16.78.19', port: 8123, user: 'default' });
+  store.save({ name: 'report', type: 'clickhouse', host: '172.16.78.19', port: 8123, user: 'default', env: 'test' });
   store.save({ name: 'BI 仓库', type: 'mssql', host: '172.20.4.5', port: 1433, user: 'sa' });
   store.save({ name: 'OB 集群', type: 'oboracle', host: '172.25.16.23', port: 2881, user: 'SYS@oracle' });
 
@@ -225,6 +225,16 @@ async function runDemo(createWindow) {
   await ej('window.__test.openAiConfig()');
   await wait(500);
   await shot('shot-21-ai-config.png');
+  await ej('window.__test.closeMenus()');
+  await wait(200);
+
+  // 危险 SQL 检测 + 生产库二次确认审批
+  const dz = await ej(`window.__test.analyzeDanger("DELETE FROM orders;\\nUPDATE users SET a=1 WHERE id=2;\\nDROP TABLE customers;\\nTRUNCATE TABLE logs;\\nSELECT 1;")`);
+  console.log('[DEMO] 危险检测命中:', JSON.stringify(dz.map((x) => x.reason)));
+  console.log('[DEMO] 危险检测:', dz.length === 3 ? 'PASS' : 'FAIL(应=3)');
+  await ej(`window.__test.openDangerConfirm('河南下行库', "DELETE FROM orders;\\nDROP TABLE customers;\\nTRUNCATE TABLE logs;")`);
+  await wait(500);
+  await shot('shot-22-danger.png');
   await ej('window.__test.closeMenus()');
   await wait(200);
 
