@@ -123,7 +123,7 @@ export function confirmDangerExecution(connName, items, ctx = {}) {
         { label: '取消', onClick: () => { done = true; resolve(false); } },
         { label: '确认执行', danger: true, onClick: () => {
           if (input.value.trim().toLowerCase() !== String(connName).toLowerCase()) { toast.error('连接名不匹配，无法执行'); return false; }
-          done = true; resolve(true);
+          done = true; resolve(ctx.returnConfirmation ? input.value.trim() : true);
         } },
       ],
       onClose: () => { if (!done) resolve(false); },
@@ -134,7 +134,12 @@ export function confirmDangerExecution(connName, items, ctx = {}) {
     const sync = () => { if (okBtn) okBtn.disabled = input.value.trim().toLowerCase() !== String(connName).toLowerCase(); };
     input.addEventListener('input', sync);
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && okBtn && !okBtn.disabled) { done = true; m.close(); resolve(true); }
+      if (e.key === 'Enter' && okBtn && !okBtn.disabled) {
+        done = true;
+        const confirmation = input.value.trim();
+        m.close();
+        resolve(ctx.returnConfirmation ? confirmation : true);
+      }
     });
     setTimeout(() => input.focus(), 30);
   });
@@ -147,13 +152,31 @@ export function isProd(connId) {
 }
 
 /**
+ * 统一生产库审批入口。主进程负责判断连接环境和操作危险性；需要审批时，
+ * Renderer 只负责展示强确认 UI，随后向主进程领取绑定 payload 的单次令牌。
+ * 返回带 approvalToken 的 payload；用户取消时返回 null。
+ * ctx.confirmSafe 仅用于保留非生产环境原有的普通确认框。
+ */
+export async function authorizeOperation(operation, payload, ctx = {}) {
+  const info = await window.api.safety.inspect(operation, payload);
+  if (!info.required) {
+    if (ctx.confirmSafe && !(await ctx.confirmSafe())) return null;
+    return { ...payload };
+  }
+  const confirmation = await confirmDangerExecution(info.connName, info.items, {
+    title: ctx.title || info.title,
+    returnConfirmation: true,
+  });
+  if (!confirmation) return null;
+  const approvalToken = await window.api.safety.approve(operation, payload, confirmation);
+  if (!approvalToken) return null;
+  return { ...payload, approvalToken };
+}
+
+/**
  * 生产库执行守卫：若连接标记为生产且 SQL 含危险语句，弹出二次确认。
  * 返回 true 表示放行执行。
  */
 export async function guardSql(connId, sql, ctx) {
-  const c = connById(connId);
-  if (!c || c.env !== 'prod') return true;
-  const items = analyzeDanger(sql);
-  if (!items.length) return true;
-  return confirmDangerExecution(c.name, items, ctx);
+  return authorizeOperation('db.query', { connId, sql, ...((ctx && ctx.payload) || {}) }, ctx);
 }

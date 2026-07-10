@@ -2,6 +2,7 @@
 import { el } from './util.js';
 import { openModal, toast, confirmDialog } from './toast.js';
 import { state, emit, connLabel, objectsCacheKey } from './state.js';
+import { authorizeOperation } from './danger.js';
 
 function openConnsOptions(selected) {
   return [...state.open.keys()].map((id) =>
@@ -260,16 +261,26 @@ export async function openSyncDialog(preset) {
   async function execStruct() {
     const sqls = collectSqls();
     if (!sqls.length || running) return;
-    const ok = await confirmDialog('执行结构同步',
-      `将对目标 ${connLabel(dstConn.value)} › ${dstDb.value} 执行 ${sqls.length} 条 DDL。\nDDL 不可回滚，确定继续吗？`,
-      { danger: true, okLabel: '执行' });
-    if (!ok) return;
+    const structPayload = { connId: dstConn.value, db: dstDb.value, sqls };
+    let approvedStruct;
+    try {
+      approvedStruct = await authorizeOperation('dba.execSqls', structPayload, {
+        title: '执行结构同步',
+        confirmSafe: () => confirmDialog('执行结构同步',
+          `将对目标 ${connLabel(dstConn.value)} › ${dstDb.value} 执行 ${sqls.length} 条 DDL。\nDDL 不可回滚，确定继续吗？`,
+          { danger: true, okLabel: '执行' }),
+      });
+    } catch (e) {
+      toast.error('生产库安全检查失败：' + e.message);
+      return;
+    }
+    if (!approvedStruct) return;
     running = true;
     const off = window.api.dba.onProgress((p) => {
       if (p.total) progressText.textContent = `执行 ${p.done}/${p.total}`;
     });
     try {
-      const r = await window.api.dba.execSqls(dstConn.value, dstDb.value, sqls);
+      const r = await window.api.dba.execSqls(dstConn.value, dstDb.value, sqls, approvedStruct.approvalToken);
       toast.success(`结构同步完成：已执行 ${r.executed} 条语句`);
       progressText.textContent = `已执行 ${r.executed} 条语句`;
       btnExec.style.display = 'none';
@@ -308,12 +319,26 @@ export async function openSyncDialog(preset) {
       });
       if (!file) return;
     }
-    if (dataMode === 'apply') {
-      const ok = await confirmDialog('直接应用',
-        `将直接修改目标 ${connLabel(dstConn.value)} › ${dstDb.value} 的数据${chkDel.checked ? '（含删除多余行）' : ''}。\n建议先用「仅统计差异」预览。确定继续吗？`,
-        { danger: true, okLabel: '应用' });
-      if (!ok) return;
+    const dataSyncPayload = {
+      ...commonArgs(),
+      mode: dataMode, file,
+      doInsert: chkIns.checked, doUpdate: chkUpd.checked, doDelete: chkDel.checked,
+    };
+    let approvedDataSync;
+    try {
+      approvedDataSync = await authorizeOperation('dba.dataSync', dataSyncPayload, {
+        title: '直接应用数据同步',
+        confirmSafe: dataMode === 'apply'
+          ? () => confirmDialog('直接应用',
+            `将直接修改目标 ${connLabel(dstConn.value)} › ${dstDb.value} 的数据${chkDel.checked ? '（含删除多余行）' : ''}。\n建议先用「仅统计差异」预览。确定继续吗？`,
+            { danger: true, okLabel: '应用' })
+          : null,
+      });
+    } catch (e) {
+      toast.error('生产库安全检查失败：' + e.message);
+      return;
     }
+    if (!approvedDataSync) return;
     running = true;
     const off = window.api.dba.onProgress((p) => {
       if (p.tablesTotal !== undefined) {
@@ -322,11 +347,7 @@ export async function openSyncDialog(preset) {
       }
     });
     try {
-      const r = await window.api.dba.dataSync({
-        ...commonArgs(),
-        mode: dataMode, file,
-        doInsert: chkIns.checked, doUpdate: chkUpd.checked, doDelete: chkDel.checked,
-      });
+      const r = await window.api.dba.dataSync(approvedDataSync);
       resultList.innerHTML = '';
       let ti = 0, tu = 0, td = 0;
       for (const t of r.tables) {

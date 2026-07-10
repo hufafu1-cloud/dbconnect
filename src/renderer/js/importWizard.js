@@ -2,6 +2,7 @@
 import { el } from './util.js';
 import { openModal, toast } from './toast.js';
 import { state, emit, objectsCacheKey } from './state.js';
+import { authorizeOperation } from './danger.js';
 
 export async function openImportWizard(target) {
   // target: {connId, db, schema, table?}
@@ -223,7 +224,8 @@ export async function openImportWizard(target) {
       const textType = { sqlite: 'TEXT', clickhouse: 'String', oracle: 'VARCHAR2', mssql: 'nvarchar' }[dialectMeta.dialect] || 'varchar';
       const len = ['varchar', 'nvarchar', 'VARCHAR2'].includes(textType) ? '255' : '';
       try {
-        await window.api.design.apply(target.connId, {
+        const createPayload = {
+          connId: target.connId,
           db: target.db, schema: target.schema, original: null,
           model: {
             table: tableName, comment: '', options: '',
@@ -233,7 +235,10 @@ export async function openImportWizard(target) {
             })),
             indexes: [],
           },
-        });
+        };
+        const approvedCreate = await authorizeOperation('design.apply', createPayload, { title: `在生产库创建导入目标表「${tableName}」` });
+        if (!approvedCreate) return;
+        await window.api.design.apply(target.connId, approvedCreate);
         emit('objects-changed', { connId: target.connId, db: target.db, schema: target.schema });
       } catch (e) { toast.error('创建新表失败: ' + e.message); return; }
       mapping = parsed.columns.map((c, i) => ({ target: String(c).slice(0, 60), sourceIndex: i }));
@@ -243,11 +248,33 @@ export async function openImportWizard(target) {
         .filter((x) => x.sourceIndex >= 0);
       if (!mapping.length) { toast.error('请至少映射一个栏位'); return; }
     }
-    if (truncateChk.checked) {
-      const { confirmDialog } = await import('./toast.js');
-      const ok = await confirmDialog('清空目标表', `确定导入前清空表 “${tableName}” 吗？`, { danger: true, okLabel: '清空并导入' });
-      if (!ok) return;
+    const importPayload = {
+      connId: target.connId,
+      db: target.db, schema: target.schema, table: tableName,
+      mapping,
+      emptyAsNull: emptyNullChk.checked,
+      truncate: truncateChk.checked,
+      errorMode: errorSel.value,
+      batchSize: 500,
+      file,
+      parseOpts: parseOpts(),
+    };
+    let approvedImport;
+    try {
+      approvedImport = await authorizeOperation('import.run', importPayload, {
+        title: `向生产表「${tableName}」导入数据`,
+        confirmSafe: truncateChk.checked
+          ? async () => {
+            const { confirmDialog } = await import('./toast.js');
+            return confirmDialog('清空目标表', `确定导入前清空表 “${tableName}” 吗？`, { danger: true, okLabel: '清空并导入' });
+          }
+          : null,
+      });
+    } catch (e) {
+      toast.error('生产库安全检查失败：' + e.message);
+      return;
     }
+    if (!approvedImport) return;
 
     running = true;
     progressBar.style.display = '';
@@ -257,16 +284,7 @@ export async function openImportWizard(target) {
       progressText.textContent = `已处理 ${p.done.toLocaleString()} / ${p.total.toLocaleString()} 行`;
     });
     try {
-      const r = await window.api.imp.run(target.connId, {
-        db: target.db, schema: target.schema, table: tableName,
-        mapping,
-        emptyAsNull: emptyNullChk.checked,
-        truncate: truncateChk.checked,
-        errorMode: errorSel.value,
-        batchSize: 500,
-        file,
-        parseOpts: parseOpts(),
-      });
+      const r = await window.api.imp.run(target.connId, approvedImport);
       let msg = `导入完成：成功 ${r.ok.toLocaleString()} 行`;
       if (r.failed) msg += `，失败 ${r.failed.toLocaleString()} 行\n${(r.errors || []).join('\n')}`;
       (r.failed ? toast.error : toast.success)(msg, r.failed ? 12000 : 5000);

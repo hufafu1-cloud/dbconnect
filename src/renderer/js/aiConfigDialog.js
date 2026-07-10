@@ -19,7 +19,9 @@ export async function openAiConfigDialog(onSaved) {
   const providerSel = el('select', {}, ...PRESETS.map((p) => el('option', { value: p.id, selected: p.id === cfg.provider ? 'selected' : null }, p.name)));
   providerSel.value = PRESETS.some((p) => p.id === cfg.provider) ? cfg.provider : 'custom';
   const baseInput = el('input', { type: 'text', value: cfg.baseUrl || '', placeholder: 'https://api.deepseek.com/v1', spellcheck: false });
-  const keyInput = el('input', { type: 'password', value: cfg.apiKey || '', placeholder: 'sk-...', spellcheck: false });
+  const keyInput = el('input', { type: 'password', value: '', placeholder: cfg.hasApiKey ? '已安全保存；留空保持不变' : 'sk-...', spellcheck: false });
+  let keyDirty = false;
+  keyInput.addEventListener('input', () => { keyDirty = true; });
   const modelInput = el('input', { type: 'text', value: cfg.model || '', placeholder: 'deepseek-chat', spellcheck: false });
   const showKey = el('button', { class: 'btn', tabIndex: -1, onClick: () => { keyInput.type = keyInput.type === 'password' ? 'text' : 'password'; } }, '👁');
   const testResult = el('span', { class: 'test-result' }, '');
@@ -30,13 +32,14 @@ export async function openAiConfigDialog(onSaved) {
   });
 
   function collect() {
-    return {
+    const out = {
       provider: providerSel.value,
       baseUrl: baseInput.value.trim(),
-      apiKey: keyInput.value,
       model: modelInput.value.trim(),
       temperature: typeof cfg.temperature === 'number' ? cfg.temperature : 0.2,
     };
+    if (keyDirty || !cfg.hasApiKey) out.apiKey = keyInput.value;
+    return out;
   }
 
   const body = el('div', { class: 'form-grid' },
@@ -45,7 +48,7 @@ export async function openAiConfigDialog(onSaved) {
     el('label', {}, 'API Key'), el('div', { class: 'row-flex' }, keyInput, showKey),
     el('label', {}, '模型'), modelInput,
     el('label', {}, ''), el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } },
-      'API Key 仅加密保存在本机，只发送到上方接口地址。支持任何 OpenAI 兼容的 /chat/completions 接口。'));
+      'API Key 仅加密保存在本机。使用 AI 时，你输入的 SQL/问题及按需读取的表名、列名会发送到上方接口地址。'));
 
   const m = openModal({
     title: 'AI 助手设置',
@@ -56,7 +59,7 @@ export async function openAiConfigDialog(onSaved) {
         label: '测试连接',
         onClick: () => {
           const c = collect();
-          if (!c.apiKey) { toast.error('请填写 API Key'); return false; }
+          if (!c.apiKey && !cfg.hasApiKey) { toast.error('请填写 API Key'); return false; }
           testResult.className = 'test-result';
           testResult.textContent = '正在测试…';
           window.api.ai.test(c).then((r) => {

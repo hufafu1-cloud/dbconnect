@@ -3,6 +3,7 @@ import { el, iconEl, debounce } from './util.js';
 import { connLabel, connColor, emit } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { toast, confirmDialog } from './toast.js';
+import { authorizeOperation } from './danger.js';
 
 /**
  * target: {connId, db, schema, table?}  table 为空 = 新建表
@@ -305,13 +306,23 @@ export function openDesignTab(target) {
       preview = await window.api.design.ddl(target.connId, { db: target.db, schema: target.schema, original, model });
     } catch (e) { toast.error(e.message); return; }
     if (!preview.sqls.length) { toast.info('没有需要保存的变更'); return; }
-    const ok = await confirmDialog(isNew ? '创建表' : '保存表结构',
-      `将执行 ${preview.sqls.length} 条语句：\n\n${preview.sqls.map((s) => s + ';').join('\n')}` +
-      (preview.warnings.length ? `\n\n⚠ ${preview.warnings.join('\n⚠ ')}` : ''),
-      { okLabel: '执行' });
-    if (!ok) return;
+    const applyPayload = { connId: target.connId, db: target.db, schema: target.schema, original, model };
+    let approved;
     try {
-      const r = await window.api.design.apply(target.connId, { db: target.db, schema: target.schema, original, model });
+      approved = await authorizeOperation('design.apply', applyPayload, {
+        title: isNew ? '创建表' : '保存表结构',
+        confirmSafe: () => confirmDialog(isNew ? '创建表' : '保存表结构',
+          `将执行 ${preview.sqls.length} 条语句：\n\n${preview.sqls.map((s) => s + ';').join('\n')}` +
+          (preview.warnings.length ? `\n\n⚠ ${preview.warnings.join('\n⚠ ')}` : ''),
+          { okLabel: '执行' }),
+      });
+    } catch (e) {
+      toast.error('生产库安全检查失败：' + e.message);
+      return;
+    }
+    if (!approved) return;
+    try {
+      const r = await window.api.design.apply(target.connId, approved);
       toast.success(`已执行 ${r.executed} 条语句`);
       emit('objects-changed', { connId: target.connId, db: target.db, schema: target.schema });
       // 重新加载为编辑模式

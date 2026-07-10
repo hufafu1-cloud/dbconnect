@@ -2,7 +2,10 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { splitSql, sanitizeValue } = require('./db/sqlutil');
+const {
+  splitSql, sanitizeValue, limitQueryRows, statementKind, hasClickHouseFormatClause,
+  hasSQLiteExternalFileClause,
+} = require('./db/sqlutil');
 const { SQLiteAdapter } = require('./db/sqlite');
 const { MySQLAdapter } = require('./db/mysql');
 const { ClickHouseAdapter } = require('./db/clickhouse');
@@ -23,7 +26,88 @@ async function runSelfTest() {
   check('split 块注释', splitSql('/* ; */ SELECT 1; SELECT 2', 'sqlite').length === 2);
   check('split mysql 反斜杠', splitSql("SELECT 'a\\';b'; SELECT 2", 'mysql').length === 2);
   check('split pg 美元引用', splitSql('CREATE FUNCTION f() RETURNS void AS $x$ a; b $x$ LANGUAGE sql; SELECT 1', 'postgres').length === 2);
+  check('split pg E 字符串', splitSql("SELECT E'it\\'s; ok' AS x; SELECT 2", 'postgres').length === 2);
+  check('split pg 嵌套块注释', splitSql('/* outer /* inner */ ; still outer */ SELECT 1; SELECT 2', 'postgres').length === 2);
+  check('split oracle q 引用', splitSql("SELECT q'[It's; fine]' FROM dual; SELECT 2 FROM dual", 'oracle').length === 2);
   check('split 尾部无分号', splitSql('SELECT 1', 'sqlite').length === 1);
+
+  // ---- 查询结果上限下推 ----
+  const limSqlite = limitQueryRows('SELECT * FROM t ORDER BY id; -- tail', 'sqlite', 2);
+  check('limit sqlite 下推探针', limSqlite.applied && /LIMIT 3\s*;\s*-- tail$/.test(limSqlite.sql), limSqlite);
+  const limCte = limitQueryRows('WITH x AS (SELECT 1 AS id) SELECT * FROM x', 'postgres', 5);
+  check('limit CTE 下推探针', limCte.applied && /LIMIT 6$/.test(limCte.sql), limCte);
+  const limMssql = limitQueryRows('SELECT DISTINCT id FROM t ORDER BY id', 'mssql', 10);
+  check('limit mssql TOP 位置', limMssql.applied && /^SELECT DISTINCT TOP \(11\)/.test(limMssql.sql), limMssql);
+  const cappedExisting = limitQueryRows('SELECT * FROM t LIMIT 4000000', 'mysql', 2);
+  check('limit 收紧巨大已有上限', cappedExisting.applied && /LIMIT 3$/.test(cappedExisting.sql), cappedExisting);
+  const fetchIdentifier = limitQueryRows('SELECT fetch, 4000000 AS marker FROM t', 'sqlite', 2);
+  check('limit 不把 SQLite fetch 列误判为子句', fetchIdentifier.applied
+    && /fetch, 4000000 AS marker/.test(fetchIdentifier.sql) && /LIMIT 3$/.test(fetchIdentifier.sql), fetchIdentifier);
+  const cappedFetch = limitQueryRows('SELECT * FROM t OFFSET 0 ROWS FETCH NEXT 4000000 ROWS ONLY', 'mssql', 2);
+  check('limit 收紧合法 FETCH 子句', cappedFetch.applied && /FETCH NEXT 3 ROWS ONLY$/.test(cappedFetch.sql), cappedFetch);
+  const pgOffset = limitQueryRows('SELECT * FROM t ORDER BY id OFFSET 10', 'postgres', 2);
+  check('limit PostgreSQL OFFSET 前注入', pgOffset.applied && /LIMIT 3 OFFSET 10$/.test(pgOffset.sql), pgOffset);
+  const msOffset = limitQueryRows('SELECT * FROM t ORDER BY id OFFSET 10 ROWS', 'mssql', 2);
+  check('limit MSSQL OFFSET 后追加 FETCH', msOffset.applied && /OFFSET 10 ROWS FETCH NEXT 3 ROWS ONLY$/.test(msOffset.sql), msOffset);
+  const msOffsetOption = limitQueryRows('SELECT * FROM t ORDER BY id OFFSET 10 ROWS OPTION (RECOMPILE)', 'mssql', 2);
+  check('limit MSSQL FETCH 插在 OPTION 前且保留空格', msOffsetOption.applied
+    && /OFFSET 10 ROWS\s+FETCH NEXT 3 ROWS ONLY OPTION \(RECOMPILE\)$/.test(msOffsetOption.sql), msOffsetOption);
+  check('limit Oracle 未探测能力时保守不改写', !limitQueryRows('SELECT * FROM t ORDER BY id', 'oracle', 2).applied);
+  const oracle12Limit = limitQueryRows('SELECT * FROM t ORDER BY id', 'oracle12', 2);
+  check('limit Oracle 探测支持后使用 FETCH FIRST', oracle12Limit.applied
+    && /FETCH FIRST 3 ROWS ONLY$/.test(oracle12Limit.sql), oracle12Limit);
+  const sqliteBacktick = limitQueryRows('SELECT `foo LIMIT 4000000` FROM t', 'sqlite', 2);
+  check('limit 不改写 SQLite 反引号标识符内容', sqliteBacktick.applied
+    && /`foo LIMIT 4000000`/.test(sqliteBacktick.sql), sqliteBacktick);
+  const sqliteBracket = limitQueryRows('SELECT [foo LIMIT 4000000] FROM t', 'sqlite', 2);
+  check('limit 不改写 SQLite 方括号标识符内容', sqliteBracket.applied
+    && /\[foo LIMIT 4000000\]/.test(sqliteBracket.sql), sqliteBracket);
+  const clickhouseHeredoc = limitQueryRows('SELECT $$hello LIMIT 4000000$$ AS s', 'clickhouse', 2);
+  check('limit 不改写 ClickHouse heredoc 内容', clickhouseHeredoc.applied
+    && /\$\$hello LIMIT 4000000\$\$/.test(clickhouseHeredoc.sql), clickhouseHeredoc);
+  const mysqlDoubleMinus = limitQueryRows('SELECT * FROM t WHERE x = 5--2', 'mysql', 2);
+  check('limit 正确区分 MySQL 双减号与注释', mysqlDoubleMinus.applied
+    && /x = 5--2 LIMIT 3$/.test(mysqlDoubleMinus.sql), mysqlDoubleMinus);
+  const clickhouseSettings = limitQueryRows('SELECT number FROM numbers(10) SETTINGS max_threads = 1', 'clickhouse', 2);
+  check('limit ClickHouse 插在 SETTINGS 前', clickhouseSettings.applied
+    && /LIMIT 3 SETTINGS max_threads = 1$/.test(clickhouseSettings.sql), clickhouseSettings);
+  const clickhouseFormat = limitQueryRows('SELECT number FROM numbers(10) FORMAT JSONEachRow', 'clickhouse', 2);
+  check('limit ClickHouse 插在 FORMAT 前', clickhouseFormat.applied
+    && /LIMIT 3 FORMAT JSONEachRow$/.test(clickhouseFormat.sql), clickhouseFormat);
+  const clickhouseLimitBy = limitQueryRows('SELECT number % 2 AS k, number FROM numbers(10) LIMIT 5 BY k', 'clickhouse', 2);
+  check('limit ClickHouse LIMIT BY 后补全局上限', clickhouseLimitBy.applied
+    && /LIMIT 5 BY k LIMIT 3$/.test(clickhouseLimitBy.sql), clickhouseLimitBy);
+  check('limit 不改写 MySQL 可执行注释', !limitQueryRows('SELECT * FROM t /*!50000 LIMIT 4000000 */', 'mysql', 2).applied);
+  check('limit 不改写 MariaDB 可执行注释', !limitQueryRows('SELECT * FROM t /*M! LIMIT 4000000 */', 'mysql', 2).applied);
+  check('limit 不误标 MSSQL 无分号多语句批次', !limitQueryRows('SELECT * FROM t\nSELECT * FROM u', 'mssql', 2).applied);
+  check('limit 保留较小已有上限', !limitQueryRows('SELECT * FROM t LIMIT 2', 'mysql', 2).applied);
+  const sqliteUnlimited = limitQueryRows('SELECT * FROM t LIMIT -1 OFFSET 5', 'sqlite', 2);
+  check('limit 收紧 SQLite LIMIT -1', sqliteUnlimited.applied && /LIMIT 3 OFFSET 5$/.test(sqliteUnlimited.sql), sqliteUnlimited);
+  const sqliteNegativeOffset = limitQueryRows('SELECT * FROM t LIMIT -1, 2', 'sqlite', 2);
+  check('limit 不把 SQLite 逗号语法负 offset 当 count', !sqliteNegativeOffset.applied
+    && /LIMIT -1, 2$/.test(sqliteNegativeOffset.sql), sqliteNegativeOffset);
+  const sqliteCommaUnlimited = limitQueryRows('SELECT * FROM t LIMIT 2, -1', 'sqlite', 2);
+  check('limit 收紧 SQLite 逗号语法无限 count', sqliteCommaUnlimited.applied
+    && /LIMIT 2, 3$/.test(sqliteCommaUnlimited.sql), sqliteCommaUnlimited);
+  const pgNullLimit = limitQueryRows('SELECT * FROM t LIMIT NULL', 'postgres', 2);
+  check('limit 收紧 PostgreSQL LIMIT NULL', pgNullLimit.applied && /LIMIT 3$/.test(pgNullLimit.sql), pgNullLimit);
+  check('limit 不改写写语句', !limitQueryRows('UPDATE t SET a = 1', 'postgres', 2).applied);
+  check('statementKind 跳过注释', statementKind('/* head */\nSELECT 1', 'clickhouse') === 'SELECT');
+  check('statementKind 识别 CTE 主查询', statementKind('WITH x AS (SELECT 1) SELECT * FROM x', 'clickhouse') === 'SELECT');
+  check('statementKind 识别 WITH INSERT', statementKind('WITH 1 AS x INSERT INTO t SELECT x', 'clickhouse') === 'INSERT');
+  check('clickhouse 识别末尾 FORMAT 子句', hasClickHouseFormatClause('SELECT 1 FORMAT JSONEachRow'));
+  check('clickhouse 不把 format 列误判为子句', !hasClickHouseFormatClause('SELECT format FROM t'));
+  check('sqlite 识别外部文件 SQL', hasSQLiteExternalFileClause("ATTACH DATABASE 'other.db' AS other")
+    && hasSQLiteExternalFileClause("VACUUM main INTO 'copy.db'")
+    && !hasSQLiteExternalFileClause("SELECT 'ATTACH DATABASE x'"));
+  const wasmMemory = new SQLiteAdapter({ file: ':memory:' });
+  let wasmMemoryExported = false;
+  wasmMemory.file = ':memory:';
+  wasmMemory.mode = 'wasm';
+  wasmMemory._dirty = true;
+  wasmMemory.db = { export() { wasmMemoryExported = true; return new Uint8Array(); } };
+  wasmMemory._flush();
+  check('sqlite WASM :memory: 不尝试写入本地文件', !wasmMemoryExported);
 
   // ---- sanitizeValue ----
   check('sanitize null', sanitizeValue(null) === null);
@@ -50,6 +134,19 @@ async function runSelfTest() {
       !q.test('INSERT INTO t VALUES (1)') && !q.test('ALTER TABLE t DELETE WHERE 1');
   })());
   check('ch 只读原因', typeof ch.readonlyReason === 'string' && ch.readonlyReason.length > 0);
+  let chQueryOptions = null;
+  ch.defaultDb = 'default';
+  ch.clients = new Map([['default', {
+    query: async (options) => {
+      chQueryOptions = options;
+      return { json: async () => ({ meta: [], data: [] }) };
+    },
+  }]]);
+  await ch._run(null, 'SELECT 1');
+  check('ch JSON 精确数值/非有限浮点使用引号', chQueryOptions
+    && chQueryOptions.clickhouse_settings.output_format_json_quote_64bit_integers === 1
+    && chQueryOptions.clickhouse_settings.output_format_json_quote_decimals === 1
+    && chQueryOptions.clickhouse_settings.output_format_json_quote_denormals === 1, chQueryOptions);
 
   // ---- OceanBase（MySQL 兼容模式，继承 MySQL 适配器） ----
   const { OceanBaseAdapter } = require('./db/oceanbase');
@@ -81,6 +178,15 @@ async function runSelfTest() {
   const ddl = require('./db/ddl');
   const { PostgresAdapter } = require('./db/postgres');
   const pgA = new PostgresAdapter({});
+  const pgTypes = require('pg').types;
+  const exactJson = '{"id":9007199254740993,"amount":1234567890.123456789}';
+  check('PG JSON parser 保留高精度原文', pgTypes.getTypeParser(114, 'text')(exactJson) === exactJson
+    && pgTypes.getTypeParser(3802, 'text')(exactJson) === exactJson);
+  const exactNumericArray = pgTypes.getTypeParser(1231, 'text')('{12345678901234567890.123456789,-0.000000000000000001}');
+  check('PG numeric[] parser 保留元素精度', exactNumericArray[0] === '12345678901234567890.123456789'
+    && exactNumericArray[1] === '-0.000000000000000001', exactNumericArray);
+  const exactTimestampArray = pgTypes.getTypeParser(1115, 'text')('{"2024-01-02 03:04:05.123456"}');
+  check('PG timestamp[] parser 不转换 Date', exactTimestampArray[0] === '2024-01-02 03:04:05.123456', exactTimestampArray);
   const model1 = {
     table: 't1', comment: '测试表', options: '',
     columns: [
@@ -181,7 +287,158 @@ async function runSelfTest() {
   });
   const mdTxt = fs.readFileSync(expBase + '.md', 'utf8');
   check('导出 md', mdTxt.includes('| a | b |') && mdTxt.includes('x\\|y'), mdTxt);
+
+  // CSV 防公式注入只处理原始文本，不应改变负数或负 bigint 的类型语义。
+  const formulaCsv = expBase + '-formula.csv';
+  const formulaMeta = await exporter.exportRows(ad2, {
+    file: formulaCsv, format: 'csv',
+    columns: [
+      { name: 'text_formula' }, { name: 'number' }, { name: 'bigint' },
+      { name: 'decimal_string', type: 'decimal(38,10)' }, { name: 'text_number', type: 'text' },
+      { name: 'minus_formula', type: 'text' },
+    ],
+    rows: [['=1+1', -12.5, -9007199254740993n, '-12345678901234567890.1234567890', '-12.5', '-1+2']],
+  });
+  const formulaText = fs.readFileSync(formulaCsv, 'utf8');
+  check('CSV 公式文本加前缀且负数/精确数值字符串保持原值', formulaMeta.formulaEscaped === 2
+    && formulaText.includes("'=1+1,-12.5,-9007199254740993,-12345678901234567890.1234567890,-12.5,'-1+2"),
+  { formulaMeta, formulaText });
+  try { fs.unlinkSync(formulaCsv); } catch (e) { /* ignore */ }
+  const mysqlModeSql = expBase + '-mysql-mode.sql';
+  await exporter.exportRows(my, {
+    file: mysqlModeSql, format: 'sql', sqlTableName: '`t`',
+    columns: [{ name: 'v', type: 'varchar(50)' }], rows: [["a'b\\c"]],
+  });
+  const mysqlModeText = fs.readFileSync(mysqlModeSql, 'utf8');
+  check('MySQL SQL 导出字符串不依赖 NO_BACKSLASH_ESCAPES',
+    mysqlModeText.includes("_utf8mb4 X'6127625c63'"), mysqlModeText);
+  try { fs.unlinkSync(mysqlModeSql); } catch (e) { /* ignore */ }
+  const nonFiniteJson = expBase + '-nonfinite.json';
+  await exporter.exportRows(pgA, {
+    file: nonFiniteJson, format: 'json', columns: [{ name: 'nan', type: 'double precision' }, { name: 'inf', type: 'double precision' }],
+    rows: [[NaN, Infinity]],
+  });
+  const nonFiniteValues = JSON.parse(fs.readFileSync(nonFiniteJson, 'utf8'))[0];
+  check('JSON 导出非有限浮点不静默变成 null', nonFiniteValues.nan === 'NaN' && nonFiniteValues.inf === 'Infinity', nonFiniteValues);
+  try { fs.unlinkSync(nonFiniteJson); } catch (e) { /* ignore */ }
+  let nonFiniteSqlDenied = false;
+  const nonFiniteSql = expBase + '-nonfinite.sql';
+  try {
+    await exporter.exportRows(pgA, {
+      file: nonFiniteSql, format: 'sql', columns: [{ name: 'v', type: 'double precision' }], rows: [[NaN]],
+    });
+  } catch (e) { nonFiniteSqlDenied = /非有限浮点值/.test(e.message); }
+  check('SQL 导出明确拒绝非有限浮点', nonFiniteSqlDenied && !fs.existsSync(nonFiniteSql));
+
+  // PostgreSQL 驱动把数组和 interval 返回为对象；静默 JSON.stringify 后
+  // 生成的 INSERT 不可可靠回放，因此 SQL 格式应明确拒绝并推荐无损格式。
+  for (const sample of [
+    { type: 'integer[]', value: [1, 2] },
+    { type: 'interval', value: { days: 1, hours: 2 } },
+  ]) {
+    const target = `${expBase}-pg-${sample.type.replace(/\W/g, '')}.sql`;
+    let pgExportErr = null;
+    try {
+      await exporter.exportRows(pgA, {
+        file: target, format: 'sql', columns: [{ name: 'v', type: sample.type }], rows: [[sample.value]],
+      });
+    } catch (e) { pgExportErr = e; }
+    check(`PG ${sample.type} SQL 导出明确拒绝`, pgExportErr && /CSV.*JSON/.test(pgExportErr.message)
+      && !fs.existsSync(target), pgExportErr && pgExportErr.message);
+  }
+
+  // MSSQL 全表导出须在 tedious 解析前转换精确数值和高精度时间；
+  // 高精度时间主键仍必须用于 keyset 游标，而不是退回不可靠的分页。
+  const msColumns = [
+    { name: 'seq', type: 'int' },
+    { name: 'id', type: 'datetime2' },
+    { name: 'amount', type: 'decimal(38,10)' },
+    { name: 'alias_amount', type: 'exact_amount', baseType: 'decimal(38,10)' },
+    { name: 'ratio', type: 'numeric(38,20)' },
+    { name: 'cash', type: 'money' },
+    { name: 'offset_at', type: 'datetimeoffset' },
+    { name: 'clock_at', type: 'time' },
+    { name: 'label', type: 'nvarchar(50)' },
+  ];
+  const msSqls = [];
+  let msPage = 0;
+  const msRows = Array.from({ length: 5000 }, () => [
+    5000, '2024-01-02T03:04:05.1234567', '12345678901234567890.1234567890',
+    '98765432109876543210.1234567890', '0.12345678901234567890', '12.3400', '2024-01-02T03:04:05.1234567+08:00',
+    '03:04:05.1234567', '精确值',
+  ]);
+  const msMock = {
+    dialect: 'mssql',
+    quoteIdent: (name) => '[' + String(name).replace(/]/g, ']]') + ']',
+    literal: (value) => value === null ? 'NULL'
+      : typeof value === 'number' ? String(value)
+      : typeof value === 'boolean' ? (value ? '1' : '0')
+      : "N'" + String(value).replace(/'/g, "''") + "'",
+    blobLiteral: (value) => '0x' + value.toString('hex'),
+    qualify: (_db, schema, table) => `${schema ? `[${schema}].` : ''}[${table}]`,
+    tableInfo: async () => ({ columns: msColumns, pk: ['seq', 'id'], ddl: 'CREATE TABLE [dbo].[precise] ([seq] int)' }),
+    pageSql: (select, order, limit, offset) => `${select}${order} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`,
+    exec: async (_db, sql) => {
+      msSqls.push(sql);
+      msPage++;
+      return { columns: msColumns, rows: msPage === 1 ? msRows : [] };
+    },
+  };
+  const msFile = expBase + '-mssql.json';
+  const msMeta = await exporter.exportTable(msMock, {
+    db: 'db', schema: 'dbo', table: 'precise', file: msFile, format: 'json',
+  });
+  check('MSSQL 全表导出服务端精确投影',
+    /CONVERT\(varchar\(100\), \[amount\]\) AS \[amount\]/.test(msSqls[0])
+    && /CONVERT\(varchar\(100\), \[alias_amount\]\) AS \[alias_amount\]/.test(msSqls[0])
+    && /CONVERT\(varchar\(100\), \[ratio\]\) AS \[ratio\]/.test(msSqls[0])
+    && /CONVERT\(varchar\(100\), \[cash\], 2\) AS \[cash\]/.test(msSqls[0])
+    && /CONVERT\(varchar\(50\), \[id\], 126\) AS \[id\]/.test(msSqls[0])
+    && /CONVERT\(varchar\(50\), \[offset_at\], 127\) AS \[offset_at\]/.test(msSqls[0])
+    && /CONVERT\(varchar\(30\), \[clock_at\]\) AS \[clock_at\]/.test(msSqls[0]), msSqls[0]);
+  check('MSSQL 数值/高精度时间复合主键保持精确 keyset 分页', msMeta.pagination === 'keyset'
+    && msMeta.orderedBy.join(',') === 'seq,id' && msSqls.length === 2
+    && /\(\[seq\] > 5000\)/.test(msSqls[1])
+    && /\[seq\] = 5000 AND \[id\] > N'2024-01-02T03:04:05\.1234567'/.test(msSqls[1]), msSqls[1]);
+  try { fs.unlinkSync(msFile); } catch (e) { /* ignore */ }
+  msPage = 0;
+  msSqls.length = 0;
+  const msDumpFile = expBase + '-mssql-dump.sql';
+  const transferForPrecision = require('./transfer');
+  await transferForPrecision.dumpSql(msMock, {
+    db: 'db', schema: 'dbo', tables: [{ name: 'precise' }], file: msDumpFile,
+    includeDrop: false, includeData: true, batchSize: 5000,
+  }, () => {});
+  const msDumpText = fs.readFileSync(msDumpFile, 'utf8');
+  check('MSSQL 转储同样使用服务端精确投影',
+    /CONVERT\(varchar\(100\), \[amount\]\) AS \[amount\]/.test(msSqls[0])
+    && msDumpText.includes("N'12345678901234567890.1234567890'")
+    && msDumpText.includes("N'2024-01-02T03:04:05.1234567+08:00'"));
+  try { fs.unlinkSync(msDumpFile); } catch (e) { /* ignore */ }
+
+  // 整表导出必须绕过展示层的 200KB 文本 / 256B BLOB 预览截断。
+  const longText = '长文本'.repeat(70050);
+  const longBlob = Buffer.alloc(1024, 0xab);
+  await ad2.exec('main', 'ALTER TABLE imp_test ADD COLUMN big_text TEXT');
+  await ad2.exec('main', 'ALTER TABLE imp_test ADD COLUMN payload BLOB');
+  await ad2.exec('main', `UPDATE imp_test SET big_text = ${ad2.literal(longText)}, payload = X'${longBlob.toString('hex')}' WHERE id = 1`);
+  await ad2.exec('main', "INSERT INTO imp_test (id, name) VALUES (9007199254740993, '大整数')");
+  const exactInteger = await ad2.exec('main', "SELECT id FROM imp_test WHERE name = '大整数'");
+  check('SQLite 64 位整数原始读取不失真', String(exactInteger.rows[0][0]) === '9007199254740993', exactInteger.rows[0][0]);
+  const rawExp = await exporter.exportTable(ad2, { db: 'main', table: 'imp_test', file: expBase + '-raw.json', format: 'json' });
+  const rawJson = JSON.parse(fs.readFileSync(expBase + '-raw.json', 'utf8'));
+  check('整表导出长文本不截断', rawJson[0].big_text === longText, rawJson[0].big_text && rawJson[0].big_text.length);
+  check('整表导出 BLOB 不截断', rawJson[0].payload === '0x' + longBlob.toString('hex'), rawJson[0].payload && rawJson[0].payload.length);
+  check('整表导出 64 位整数不失真', rawJson.some((row) => row.id === '9007199254740993'));
+  check('整表导出主键稳定排序', rawExp.truncated === false && rawExp.orderedBy.join(',') === 'id', rawExp);
+  await exporter.exportTable(ad2, { db: 'main', table: 'imp_test', file: expBase + '-raw.sql', format: 'sql' });
+  const rawSql = fs.readFileSync(expBase + '-raw.sql', 'utf8');
+  check('SQL 导出使用完整 BLOB 字面量', rawSql.includes("X'" + longBlob.toString('hex') + "'"));
+  check('SQL 导出 64 位整数保持数值字面量', rawSql.includes('VALUES (9007199254740993,'));
   for (const ext of ['.csv', '.json', '.sql', '.xlsx', '.md']) {
+    try { fs.unlinkSync(expBase + ext); } catch (e) { /* ignore */ }
+  }
+  for (const ext of ['-raw.json', '-raw.sql']) {
     try { fs.unlinkSync(expBase + ext); } catch (e) { /* ignore */ }
   }
 
@@ -198,6 +455,13 @@ async function runSelfTest() {
     const px = await parseFile(xlsxIn, { format: 'xlsx', headerRow: true, preview: 0 });
     check('xlsx 解析', px.columns[1] === '名称' && px.totalRows === 2 && px.rows[1][1] === '测试乙', px);
     try { fs.unlinkSync(xlsxIn); } catch (e) { /* ignore */ }
+  }
+
+  for (const externalSql of ["ATTACH DATABASE 'other.db' AS other", "VACUUM main INTO 'copy.db'"]) {
+    let externalFileDenied = false;
+    try { await ad2.exec('main', externalSql); }
+    catch (e) { externalFileDenied = /不允许 ATTACH 或 VACUUM INTO/.test(e.message); }
+    check(`SQLite 拒绝 SQL 访问外部文件: ${externalSql.split(' ')[0]}`, externalFileDenied);
   }
 
   await ad2.close();
@@ -218,12 +482,18 @@ async function runSelfTest() {
   check('runScript 语句数', r1.length === 4, r1.map((x) => x.error || 'ok'));
   check('runScript 无错误', r1.every((x) => !x.error), r1.find((x) => x.error));
   const sel = r1[3];
+  const capped = await ad.runScript('main', 'SELECT * FROM users ORDER BY id', { maxRows: 1 });
+  check('runScript 数据库侧限额', capped[0].rows.length === 1 && capped[0].truncated === true
+    && capped[0].rowCount === 1 && capped[0].rowCountExact === false, capped[0]);
+  const explicitLimit = await ad.runScript('main', 'SELECT * FROM users ORDER BY id LIMIT 2', { maxRows: 1 });
+  check('runScript 已有 LIMIT 结果精确', explicitLimit[0].rows.length === 1 && explicitLimit[0].truncated === true
+    && explicitLimit[0].rowCount === 2 && explicitLimit[0].rowCountExact === true, explicitLimit[0]);
   check('查询返回行', sel && sel.rowCount === 2);
   check('查询返回中文', sel && sel.rows[0][1] === '张三');
   check('NULL 透传', sel && sel.rows[0][3] === null);
 
   const objs = await ad.listObjects('main');
-  check('listObjects', objs.tables.length === 1 && objs.tables[0].name === 'users' && objs.tables[0].rows === 2);
+  check('listObjects', objs.tables.length === 1 && objs.tables[0].name === 'users' && Number(objs.tables[0].rows) === 2);
 
   const info = await ad.tableInfo('main', null, 'users');
   check('tableInfo 列', info.columns.length === 4);
@@ -236,6 +506,12 @@ async function runSelfTest() {
 
   const dataW = await ad.tableData('main', { table: 'users', page: 1, pageSize: 10, where: 'age > 26', orderBy: 'id', orderDir: 'desc' });
   check('tableData where', dataW.total === 1 && dataW.rows[0][1] === '张三');
+  let badPageSizeDenied = false;
+  try {
+    await ad.tableData('main', { table: 'users', page: 1, pageSize: '1; DROP TABLE users; --', skipCount: true });
+  } catch (e) { badPageSizeDenied = /每页行数/.test(e.message); }
+  check('tableData 拒绝分页参数 SQL 注入', badPageSizeDenied
+    && (await ad.listObjects('main')).tables.some((table) => table.name === 'users'));
 
   // applyEdits：改 + 增 + 删
   const ae = await ad.applyEdits('main', {
@@ -249,7 +525,7 @@ async function runSelfTest() {
   check('applyEdits 条数', ae.count === 3, ae.sqls);
   const after = await ad.runScript('main', 'SELECT id, name, age, note FROM users ORDER BY id');
   const rows = after[0].rows;
-  check('update 生效', rows[0][2] === 31 && rows[0][3] === "中文'引号", rows);
+  check('update 生效', Number(rows[0][2]) === 31 && rows[0][3] === "中文'引号", rows);
   check('insert/delete 生效', rows.length === 2 && rows[1][1] === '王五', rows);
 
   // 事务回滚：第二条失败应回滚第一条
@@ -264,7 +540,7 @@ async function runSelfTest() {
     });
   } catch (e) { txnErr = e; }
   const afterTxn = await ad.runScript('main', 'SELECT age FROM users WHERE id = 1');
-  check('事务回滚', txnErr !== null && afterTxn[0].rows[0][0] === 31, txnErr && txnErr.message);
+  check('事务回滚', txnErr !== null && Number(afterTxn[0].rows[0][0]) === 31, txnErr && txnErr.message);
 
   // 错误语句报告
   const bad = await ad.runScript('main', 'SELECT * FROM not_exists');
@@ -276,7 +552,7 @@ async function runSelfTest() {
   check('重命名表', objs2.tables[0].name === 'users2');
   await ad.action('main', { action: 'truncate', table: 'users2' });
   const cnt = await ad.runScript('main', 'SELECT COUNT(*) FROM users2');
-  check('清空表', cnt[0].rows[0][0] === 0);
+  check('清空表', Number(cnt[0].rows[0][0]) === 0);
   await ad.action('main', { action: 'dropTable', table: 'users2' });
   const objs3 = await ad.listObjects('main');
   check('删除表', objs3.tables.length === 0);
@@ -286,11 +562,48 @@ async function runSelfTest() {
 
   // ---- store 加解密 ----
   const store = require('./store');
-  const saved = store.save({ name: '自检', type: 'sqlite', file: 'x.db', password: 'p@ss中文' });
+  const saved = store.save({ name: '自检', type: 'mysql', host: '127.0.0.1', user: 'CaseUser', password: 'p@ss中文' });
   const got = store.getById(saved.id);
   check('store 密码往返', got.password === 'p@ss中文');
+  const publicConn = store.listPublic().find((c) => c.id === saved.id);
+  check('store 公共列表不暴露密码', publicConn && publicConn.hasPassword === true && !Object.prototype.hasOwnProperty.call(publicConn, 'password'));
+  store.save({ ...publicConn, name: '自检-保留密钥' });
+  check('store 脱敏编辑保留密码', store.getById(saved.id).password === 'p@ss中文');
+  check('store 测试配置恢复密码', store.hydrateConfig(publicConn).password === 'p@ss中文');
+  let dbScopeHydrateDenied = false;
+  try { store.hydrateConfig({ ...publicConn, host: '203.0.113.10' }); } catch (e) { dbScopeHydrateDenied = /重新输入数据库密码/.test(e.message); }
+  check('store 禁止将旧密码代填到新端点', dbScopeHydrateDenied);
+  let dbScopeSaveDenied = false;
+  try { store.save({ ...publicConn, host: '203.0.113.10' }); } catch (e) { dbScopeSaveDenied = /重新输入数据库密码/.test(e.message); }
+  check('store 禁止将旧密码保存到新端点', dbScopeSaveDenied);
+  let dbUserCaseDenied = false;
+  try { store.hydrateConfig({ ...publicConn, user: 'caseuser' }); }
+  catch (e) { dbUserCaseDenied = /重新输入数据库密码/.test(e.message); }
+  check('store 数据库用户名大小写变化必须重输密码', dbUserCaseDenied);
+  let dbSshRouteDenied = false;
+  try {
+    store.hydrateConfig({
+      ...publicConn,
+      ssh: { enabled: true, host: 'attacker-jump.example', port: 22, user: 'relay', authType: 'password', password: '' },
+    });
+  } catch (e) { dbSshRouteDenied = /重新输入数据库密码/.test(e.message); }
+  check('store 禁止经新 SSH 路由复用旧数据库密码', dbSshRouteDenied);
+  store.save({ ...publicConn, approvalToken: 'must-not-persist' });
+  const persistedConnections = fs.readFileSync(path.join(require('electron').app.getPath('userData'), 'connections.json'), 'utf8');
+  check('store 不持久化审批令牌', !persistedConnections.includes('must-not-persist'));
   store.remove(saved.id);
   check('store 删除', store.list().every((c) => c.id !== saved.id));
+
+  const savedMssql = store.save({
+    name: '自检mssql', type: 'mssql', host: 'sql.example', port: 1433, user: 'sa',
+    password: 'secret', options: { encrypt: true, trustCert: false },
+  });
+  const publicMssql = store.listPublic().find((c) => c.id === savedMssql.id);
+  let mssqlTlsScopeDenied = false;
+  try { store.hydrateConfig({ ...publicMssql, options: { encrypt: false, trustCert: true } }); }
+  catch (e) { mssqlTlsScopeDenied = /重新输入数据库密码/.test(e.message); }
+  check('store SQL Server TLS 策略变化必须重输密码', mssqlTlsScopeDenied);
+  store.remove(savedMssql.id);
 
   // ---- 连接分组 ----
   store.addGroup('  测试组A  ');
@@ -314,9 +627,165 @@ async function runSelfTest() {
   });
   const gotSsh = store.getById(savedSsh.id);
   check('store ssh 密码往返', gotSsh.ssh.password === 'sshpw密' && gotSsh.ssh.passphrase === 'pp' && gotSsh.ssh.host === 'jump');
+  const publicSsh = store.listPublic().find((c) => c.id === savedSsh.id);
+  check('store 公共列表不暴露 SSH 密钥', publicSsh.ssh.hasPassword && publicSsh.ssh.hasPassphrase
+    && !Object.prototype.hasOwnProperty.call(publicSsh.ssh, 'password')
+    && !Object.prototype.hasOwnProperty.call(publicSsh.ssh, 'passphrase'));
+  let sshScopeDenied = false;
+  try {
+    store.hydrateConfig({ ...publicSsh, ssh: { ...publicSsh.ssh, host: 'other-jump.example' } });
+  } catch (e) { sshScopeDenied = /重新输入数据库密码|重新输入 SSH 密码|重新输入私钥口令/.test(e.message); }
+  check('store 禁止将旧 SSH 凭据代填到新跳板机', sshScopeDenied);
   const rawTxt = fs.readFileSync(path.join(require('electron').app.getPath('userData'), 'connections.json'), 'utf8');
   check('store ssh 密码不以明文落盘', !rawTxt.includes('sshpw密'));
   store.remove(savedSsh.id);
+
+  // Renderer 文件能力：未经过原生对话框授权的路径不得由 IPC 层读写。
+  const fileAccess = require('./fileAccess');
+  const capabilityFile = path.join(os.tmpdir(), `datavia-file-cap-${Date.now()}.txt`);
+  fs.writeFileSync(capabilityFile, 'ok', 'utf8');
+  fileAccess.clear();
+  let denied = false;
+  try { fileAccess.assertAllowed(capabilityFile, 'read'); } catch (e) { denied = /尚未.*授权/.test(e.message); }
+  check('file capability 拒绝未授权路径', denied);
+  fileAccess.grant(capabilityFile, 'rw');
+  check('file capability 放行已授权路径', fileAccess.assertAllowed(capabilityFile, 'read') === capabilityFile
+    && fileAccess.assertAllowed(capabilityFile, 'write') === capabilityFile);
+  fileAccess.clear();
+  fileAccess.grant(capabilityFile, 'r');
+  let readOnlyWriteDenied = false;
+  try { fileAccess.assertAllowed(capabilityFile, 'write'); } catch (e) { readOnlyWriteDenied = /写入/.test(e.message); }
+  check('file capability 只读授权不能写入', readOnlyWriteDenied);
+  fileAccess.clear();
+  fileAccess.grant(capabilityFile, 'w');
+  let writeOnlyReadDenied = false;
+  try { fileAccess.assertAllowed(capabilityFile, 'read'); } catch (e) { writeOnlyReadDenied = /读取/.test(e.message); }
+  check('file capability 只写授权不能读取', writeOnlyReadDenied);
+  fileAccess.clear();
+  fileAccess.grant(capabilityFile, 'rw');
+  let purposeDenied = false;
+  try { fileAccess.assertPurposeAllowed(capabilityFile, 'sqlite'); } catch (e) { purposeDenied = /SQLite 数据库/.test(e.message); }
+  check('file capability 通用授权不能升级为 SQLite 路径授权', purposeDenied);
+  fileAccess.grantPurpose(capabilityFile, 'sqlite');
+  check('file capability SQLite 专用授权生效', fileAccess.assertPurposeAllowed(capabilityFile, 'sqlite') === capabilityFile);
+  let crossPurposeDenied = false;
+  try { fileAccess.assertPurposeAllowed(capabilityFile, 'ssh-key'); } catch (e) { crossPurposeDenied = /SSH 私钥/.test(e.message); }
+  check('file capability 用途之间不能互相升级', crossPurposeDenied);
+  let appConfigDenied = false;
+  try {
+    fileAccess.grant(path.join(require('electron').app.getPath('userData'), 'connections.json'), 'rw');
+  } catch (e) { appConfigDenied = /内部配置文件/.test(e.message); }
+  check('file capability 拒绝 Renderer 授权应用内部配置', appConfigDenied);
+  const stableDigest = require('crypto').createHash('sha256').update('ok').digest('hex');
+  const fileSnapshot = await fileAccess.snapshot(capabilityFile, stableDigest);
+  fs.writeFileSync(capabilityFile, 'changed-after-snapshot', 'utf8');
+  check('file capability 私有快照不受原文件后续改写影响', fs.readFileSync(fileSnapshot.path, 'utf8') === 'ok');
+  await fileSnapshot.cleanup();
+  let changedSnapshotDenied = false;
+  try { await fileAccess.snapshot(capabilityFile, stableDigest); }
+  catch (e) { changedSnapshotDenied = /审批后发生变化/.test(e.message); }
+  check('file capability 快照内容必须匹配审批摘要', changedSnapshotDenied);
+  fileAccess.clear();
+  try { fs.unlinkSync(capabilityFile); } catch (e) { /* ignore */ }
+
+  // ---- 主进程生产库审批令牌 ----
+  const safety = require('./safety');
+  const prodConn = store.save({ name: '生产自检', type: 'sqlite', file: 'prod.db', env: 'prod' });
+  const devConn = store.save({ name: '开发自检', type: 'sqlite', file: 'dev.db', env: 'dev' });
+  const prodPayload = { connId: prodConn.id, db: 'main', sql: 'DELETE FROM users', maxRows: 200 };
+  const sender = { sender: { id: 101 } };
+  check('safety 主进程识别生产危险 SQL', safety.describe('db.query', prodPayload).required === true);
+  check('safety 非生产不要求审批', safety.describe('db.query', { ...prodPayload, connId: devConn.id }).required === false);
+  check('safety 生产自由 SQL 即使只读也要求可信审批', safety.describe('db.query', {
+    ...prodPayload, sql: 'SELECT * FROM users',
+  }).required === true);
+  check('safety 拒绝 MySQL 可执行注释绕过', safety.describe('db.query', { ...prodPayload, sql: '/*!50000 DROP TABLE users */' }).required === true);
+  check('safety 拒绝 MariaDB 可执行注释绕过', safety.describe('db.query', { ...prodPayload, sql: '/*M! DROP TABLE users */' }).required === true);
+  check('safety 拒绝 SQL Server 控制流绕过', safety.describe('db.query', { ...prodPayload, sql: 'IF 1=1 DROP TABLE users' }).required === true);
+  check('safety 不把 MySQL 双减号误作注释', safety.describe('db.query', {
+    ...prodPayload, sql: "SELECT 1--1 INTO OUTFILE '/tmp/datavia-test'",
+  }).required === true);
+  check('safety 生产查询中的副作用函数必须审批', safety.describe('db.query', {
+    ...prodPayload, sql: "SELECT setval('important_seq', 1)",
+  }).required === true);
+  check('safety 未知自定义函数必须审批', safety.describe('db.query', {
+    ...prodPayload, sql: 'SELECT dangerous_security_definer_fn()',
+  }).required === true);
+  check('safety 生产聚合查询同样要求可信审批', safety.describe('db.query', {
+    ...prodPayload, sql: 'SELECT COUNT(*) FROM users',
+  }).required === true);
+  let whereInjectionDenied = false;
+  try { safety.assertWhereFragment('1=1; DROP TABLE users; --'); } catch (e) { whereInjectionDenied = /筛选条件/.test(e.message); }
+  check('safety 拒绝筛选条件附加 SQL', whereInjectionDenied);
+  let safeWhereAccepted = true;
+  try { safety.assertWhereFragment("name = 'a;b'"); } catch (e) { safeWhereAccepted = false; }
+  check('safety 允许字符串中的分号', safeWhereAccepted);
+  let whereFunctionDenied = false;
+  try { safety.assertWhereFragment('pg_terminate_backend(123)'); } catch (e) { whereFunctionDenied = /筛选条件/.test(e.message); }
+  check('safety 筛选条件拒绝副作用函数', whereFunctionDenied);
+  let qualifiedFunctionDenied = false;
+  try { safety.assertWhereFragment('public.count() > 0'); } catch (e) { qualifiedFunctionDenied = /筛选条件/.test(e.message); }
+  check('safety 筛选条件拒绝可伪装内建函数的限定名', qualifiedFunctionDenied);
+  let unicodeFunctionDenied = false;
+  try { safety.assertWhereFragment('危险()'); } catch (e) { unicodeFunctionDenied = /筛选条件/.test(e.message); }
+  check('safety 筛选条件拒绝非 ASCII 自定义函数', unicodeFunctionDenied);
+  let customOperatorDenied = false;
+  try { safety.assertWhereFragment('1 OPERATOR(public.danger) 2'); } catch (e) { customOperatorDenied = /筛选条件/.test(e.message); }
+  check('safety 筛选条件拒绝显式自定义运算符', customOperatorDenied);
+  let explainInjectionDenied = false;
+  try { safety.assertReadOnlyQuery('SELECT 1; DROP TABLE users'); } catch (e) { explainInjectionDenied = /单条只读/.test(e.message); }
+  check('safety 执行计划拒绝附加 SQL', explainInjectionDenied);
+  check('safety 生产标记降级必须审批', safety.describe('conn.save', { ...prodConn, env: 'dev' }).required === true);
+  check('safety 生产会话终止必须审批', safety.describe('db.killProcesses', { connId: prodConn.id, pids: [1, 2] }).required === true);
+  check('safety 从生产源生成同步脚本必须审批', safety.describe('dba.dataSync', {
+    srcConnId: prodConn.id, dstConnId: devConn.id, mode: 'script', file: 'sync.sql',
+  }).required === true);
+  let wrongConfirm = false;
+  try { safety.issue(sender, 'db.query', prodPayload, '错误连接名'); } catch (e) { wrongConfirm = /不匹配/.test(e.message); }
+  check('safety 拒绝错误连接名', wrongConfirm);
+  const approval = safety.issue(sender, 'db.query', prodPayload, '生产自检');
+  safety.consume(sender, 'db.query', { ...prodPayload, approvalToken: approval });
+  let replayDenied = false;
+  try { safety.consume(sender, 'db.query', { ...prodPayload, approvalToken: approval }); } catch (e) { replayDenied = /过期|已使用/.test(e.message); }
+  check('safety 令牌单次消费', replayDenied);
+  const tamperToken = safety.issue(sender, 'db.query', prodPayload, '生产自检');
+  let tamperDenied = false;
+  try {
+    safety.consume(sender, 'db.query', { ...prodPayload, sql: 'DROP TABLE users', approvalToken: tamperToken });
+  } catch (e) { tamperDenied = /内容.*不匹配/.test(e.message); }
+  check('safety 拒绝审批后篡改参数', tamperDenied);
+  const senderToken = safety.issue(sender, 'db.query', prodPayload, '生产自检');
+  let senderDenied = false;
+  try { safety.consume({ sender: { id: 202 } }, 'db.query', { ...prodPayload, approvalToken: senderToken }); } catch (e) { senderDenied = /来源不匹配/.test(e.message); }
+  check('safety 令牌绑定 Renderer', senderDenied);
+  const configBoundToken = safety.issue(sender, 'db.query', prodPayload, '生产自检');
+  store.save({ ...prodConn, file: 'prod-moved.db' });
+  let configSwapDenied = false;
+  try { safety.consume(sender, 'db.query', { ...prodPayload, approvalToken: configBoundToken }); }
+  catch (e) { configSwapDenied = /内容.*不匹配/.test(e.message); }
+  check('safety 令牌绑定连接配置快照', configSwapDenied);
+  const dialogFingerprint = safety.fingerprint('db.query', prodPayload);
+  store.save({ ...prodConn, file: 'prod-moved-again.db' });
+  let approvalWindowSwapDenied = false;
+  try { safety.issue(sender, 'db.query', prodPayload, '生产自检', dialogFingerprint); }
+  catch (e) { approvalWindowSwapDenied = /审批期间.*已改变/.test(e.message); }
+  check('safety 原生确认窗口期间配置变化不会签发新目标令牌', approvalWindowSwapDenied);
+  const approvedInput = path.join(os.tmpdir(), `datavia-approved-input-${Date.now()}.csv`);
+  fs.writeFileSync(approvedInput, 'id,name\n1,AAAA\n', 'utf8');
+  const approvedStat = fs.statSync(approvedInput);
+  const importPayload = {
+    connId: prodConn.id, file: approvedInput, table: 'users', schema: '', truncate: false,
+  };
+  const fileBoundToken = safety.issue(sender, 'import.run', importPayload, '生产自检');
+  fs.writeFileSync(approvedInput, 'id,name\n1,BBBB\n', 'utf8'); // same byte length
+  try { fs.utimesSync(approvedInput, approvedStat.atime, approvedStat.mtime); } catch (e) { /* hash remains authoritative */ }
+  let fileContentSwapDenied = false;
+  try { safety.consume(sender, 'import.run', { ...importPayload, approvalToken: fileBoundToken }); }
+  catch (e) { fileContentSwapDenied = /内容与审批不匹配/.test(e.message); }
+  check('safety 文件审批绑定 SHA-256 内容而非仅路径和时间戳', fileContentSwapDenied);
+  try { fs.unlinkSync(approvedInput); } catch (e) { /* ignore */ }
+  store.remove(prodConn.id);
+  store.remove(devConn.id);
 
   // ---- 查询历史 ----
   const history = require('./history');
@@ -338,7 +807,46 @@ async function runSelfTest() {
   const fmtPl = format('select * from dual', { language: 'plsql', keywordCase: 'upper' });
   check('sql-formatter plsql', fmtPl.includes('SELECT'), fmtPl);
 
-  // ---- SSH 隧道（错误路径，不需要真实 SSH 服务器） ----
+  // ---- SSH 主机密钥与隧道（错误路径，不需要真实 SSH 服务器） ----
+  const sshHostKeys = require('./sshHostKeys');
+  const fakeHostKey = (algorithm, marker) => {
+    const name = Buffer.from(algorithm, 'utf8');
+    const prefix = Buffer.alloc(4);
+    prefix.writeUInt32BE(name.length, 0);
+    return Buffer.concat([prefix, name, Buffer.from(marker, 'utf8')]);
+  };
+  const hostKey1 = fakeHostKey('ssh-ed25519', 'selftest-key-one');
+  const hostKey2 = fakeHostKey('ssh-ed25519', 'selftest-key-two');
+  const hostFp = sshHostKeys.fingerprintKey(hostKey1);
+  check('ssh 主机密钥生成 OpenSSH 风格 SHA256 指纹', hostFp.algorithm === 'ssh-ed25519'
+    && /^SHA256:[A-Za-z0-9+/]+$/.test(hostFp.fingerprint), hostFp);
+  check('ssh known-host 规范化主机名', sshHostKeys.endpointId('EXAMPLE.INVALID.', 22022)
+    === sshHostKeys.endpointId('example.invalid', 22022));
+  let firstPrompt = null;
+  const firstTrust = await sshHostKeys.verifyHostKey('selftest.invalid', 22022, hostKey1, {
+    confirm: async (details) => { firstPrompt = details; return true; },
+  });
+  check('ssh 首次连接须确认后才持久信任', firstTrust.accepted && firstTrust.status === 'new'
+    && firstPrompt && firstPrompt.status === 'new'
+    && sshHostKeys.getKnownHost('selftest.invalid', 22022).fingerprint === hostFp.fingerprint);
+  let repeatedPrompt = false;
+  const repeatedTrust = await sshHostKeys.verifyHostKey('SELFTEST.INVALID.', 22022, hostKey1, {
+    confirm: async () => { repeatedPrompt = true; return false; },
+  });
+  check('ssh 已知相同指纹自动校验', repeatedTrust.accepted && repeatedTrust.status === 'trusted' && !repeatedPrompt);
+  const changedRejected = await sshHostKeys.verifyHostKey('selftest.invalid', 22022, hostKey2, {
+    confirm: async (details) => details.status !== 'changed',
+  });
+  check('ssh 已变更指纹默认拒绝且不覆盖旧记录', !changedRejected.accepted
+    && changedRejected.status === 'changed'
+    && sshHostKeys.getKnownHost('selftest.invalid', 22022).fingerprint === hostFp.fingerprint);
+  const changedAccepted = await sshHostKeys.verifyHostKey('selftest.invalid', 22022, hostKey2, {
+    confirm: async (details) => details.status === 'changed',
+  });
+  check('ssh 已核验的变更指纹可显式更新', changedAccepted.accepted && changedAccepted.status === 'changed'
+    && sshHostKeys.getKnownHost('selftest.invalid', 22022).fingerprint
+      === sshHostKeys.fingerprintKey(hostKey2).fingerprint);
+
   const { openTunnel } = require('./tunnel');
   let tunErr = null;
   try {
@@ -389,6 +897,48 @@ async function runSelfTest() {
   let myCancelOk = true;
   try { await my.cancel(); } catch (e) { myCancelOk = false; }
   check('mysql cancel 空闲安全', myCancelOk);
+
+  // 逐请求取消注册表：取消 A 不得污染同一连接上并行的 B。
+  const requestRegistry = new SQLiteAdapter({});
+  const requestA = requestRegistry._beginRequest({ requestId: 'request-a' });
+  const requestB = requestRegistry._beginRequest({ requestId: 'request-b' });
+  const handleA = { id: 'a' }, handleB = { id: 'b' };
+  requestRegistry._trackRequestHandle(handleA, requestA);
+  requestRegistry._trackRequestHandle(handleB, requestB);
+  requestRegistry._markRequestCancelled(requestA);
+  check('cancel 精确标记单个请求', requestRegistry._requestStates.get(requestA).cancelled === true
+    && requestRegistry._requestStates.get(requestB).cancelled === false);
+  check('cancel 精确索引活动句柄', requestRegistry._requestHandlesFor(requestA)[0] === handleA
+    && requestRegistry._requestHandlesFor(requestB)[0] === handleB);
+  let onlyACancelled = false;
+  try { requestRegistry._assertRequestActive(requestA); } catch (e) { onlyACancelled = e.code === 'QUERY_CANCELED'; }
+  let bStillActive = true;
+  try { requestRegistry._assertRequestActive(requestB); } catch (e) { bStillActive = false; }
+  check('cancel A 不影响 B', onlyACancelled && bStillActive);
+  requestRegistry._untrackRequestHandle(handleA, requestA);
+  requestRegistry._untrackRequestHandle(handleB, requestB);
+  requestRegistry._endRequest(requestA);
+  requestRegistry._endRequest(requestB);
+  check('cancel 请求结束后清理注册表', requestRegistry._requestStates.size === 0
+    && requestRegistry._requestHandles.size === 0 && requestRegistry._activeRequestHandles.size === 0);
+  const queuedRegistry = new SQLiteAdapter({});
+  const queuedId = queuedRegistry._beginRequest({ requestId: 'queued-request' });
+  let resolveAcquire;
+  let lateReleased = false;
+  const queuedAcquire = queuedRegistry._acquireForRequest(
+    () => new Promise((resolve) => { resolveAcquire = resolve; }),
+    () => { lateReleased = true; },
+    queuedId,
+  );
+  await Promise.resolve();
+  queuedRegistry._markRequestCancelled(queuedId);
+  let queuedCancelled = false;
+  try { await queuedAcquire; } catch (e) { queuedCancelled = e.code === 'QUERY_CANCELED'; }
+  check('cancel 可立即结束连接池排队请求', queuedCancelled);
+  resolveAcquire({ id: 'late-connection' });
+  await new Promise((resolve) => setImmediate(resolve));
+  check('cancel 自动释放晚到连接', lateReleased);
+  queuedRegistry._endRequest(queuedId);
 
   // ---- 对象覆盖面 ----
   check('base objectCaps 默认关闭', Object.values(new SQLiteAdapter({}).objectCaps).filter(Boolean).length === 1); // 仅 triggers
@@ -462,10 +1012,11 @@ async function runSelfTest() {
   check('blob pg', pgA.blobLiteral(buf) === "'\\x01abff'");
   check('blob sqlite', new SQLiteAdapter({}).blobLiteral(buf) === "X'01abff'");
   check('blob oracle', obo.blobLiteral(buf) === "HEXTORAW('01abff')");
+  check('blob clickhouse', ch.blobLiteral(buf) === "unhex('01abff')");
   check('valueLiteral 混合', transfer.valueLiteral(my, null) === 'NULL'
     && transfer.valueLiteral(my, 12.5) === '12.5'
     && transfer.valueLiteral(my, buf) === '0x01abff'
-    && transfer.valueLiteral(my, "a'b") === "'a''b'");
+    && transfer.valueLiteral(my, "a'b\\c") === "_utf8mb4 X'6127625c63'");
 
   // 传输端到端：sqlite → sqlite（结构 + 数据 + BLOB 保真）
   const fSrc = path.join(os.tmpdir(), `dbc-tr-src-${Date.now()}.db`);
@@ -516,6 +1067,10 @@ async function runSelfTest() {
   check('cmpNum 基本', sync.cmpNum(2, 10) < 0 && sync.cmpNum('10', '9') > 0 && sync.cmpNum(5, 5) === 0);
   check('cmpNum 大整数', sync.cmpNum('9007199254740993', '9007199254740992') > 0
     && sync.cmpNum('-100', '99') < 0);
+  check('cmpNum 高精度小数',
+    sync.cmpNum('12345678901234567890.123456789012345679', '12345678901234567890.123456789012345678') > 0
+    && sync.cmpNum('-0.000000000000000002', '-0.000000000000000001') < 0
+    && sync.cmpNum('1e-30', '0.000000000000000000000000000002') < 0);
   check('normVal 数字归一', sync.normVal('3.50') === sync.normVal(3.5)
     && sync.normVal('007') === sync.normVal(7)
     && sync.normVal(null) !== sync.normVal(''));
@@ -643,6 +1198,23 @@ async function runSelfTest() {
     check('ai SSE 空delta', ai.parseSSELine('data: {"choices":[{"delta":{}}]}') === '');
     const store2 = require('./store');
     check('ai 默认配置', (() => { const c = store2.getAiConfig(); return c && c.baseUrl && c.model && c.provider; })());
+    store2.saveAiConfig({ provider: 'custom', baseUrl: 'https://example.invalid/v1', model: 'test-model', apiKey: 'ai-secret' });
+    const aiPublic = store2.getAiConfigPublic();
+    check('ai 公共配置不暴露 API Key', aiPublic.hasApiKey === true && !Object.prototype.hasOwnProperty.call(aiPublic, 'apiKey'));
+    store2.saveAiConfig({ provider: 'custom', baseUrl: 'https://example.invalid/v1', model: 'test-model-2' });
+    check('ai 脱敏编辑保留 API Key', store2.getAiConfig().apiKey === 'ai-secret'
+      && store2.hydrateAiConfig(aiPublic).apiKey === 'ai-secret');
+    let aiHydrateScopeDenied = false;
+    try { store2.hydrateAiConfig({ ...aiPublic, baseUrl: 'https://other.invalid/v1' }); } catch (e) { aiHydrateScopeDenied = /重新输入 API Key/.test(e.message); }
+    check('ai 禁止将旧 Key 代填到新接口', aiHydrateScopeDenied);
+    let aiSaveScopeDenied = false;
+    try {
+      store2.saveAiConfig({ provider: 'custom', baseUrl: 'https://other.invalid/v1', model: 'test-model-2' });
+    } catch (e) { aiSaveScopeDenied = /重新输入 API Key/.test(e.message); }
+    check('ai 禁止将旧 Key 保存到新接口', aiSaveScopeDenied);
+    let aiProtocolDenied = false;
+    try { store2.normalizeAiBaseUrl('file:///tmp/key'); } catch (e) { aiProtocolDenied = /HTTP\/HTTPS/.test(e.message); }
+    check('ai 拒绝非 HTTP 接口', aiProtocolDenied);
   } catch (eAi) { fail++; console.log('  ✗ AI 块异常:', eAi && eAi.stack || eAi); }
 
   console.log(`[SELFTEST] 通过 ${pass} 项, 失败 ${fail} 项`);

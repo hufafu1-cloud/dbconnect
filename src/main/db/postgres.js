@@ -6,6 +6,16 @@ const { BaseAdapter } = require('./base');
 for (const oid of [1082 /*date*/, 1083 /*time*/, 1114 /*timestamp*/, 1184 /*timestamptz*/, 1266 /*timetz*/]) {
   types.setTypeParser(oid, (v) => v);
 }
+// JSON.parse and the default numeric/date array parsers can turn exact database
+// text into lossy JavaScript Numbers/Dates. Keep scalar JSON raw and parse arrays
+// with the text[] parser so every element remains an exact string.
+for (const oid of [114 /*json*/, 3802 /*jsonb*/]) types.setTypeParser(oid, (v) => v);
+const parseTextArray = types.getTypeParser(1009 /*text[]*/, 'text');
+for (const oid of [
+  1231, // numeric[]
+  1115, 1182, 1183, 1185, 1187, 1270, // timestamp/date/time/timestamptz/interval/timetz arrays
+  199, 3807, // json[] / jsonb[]
+]) types.setTypeParser(oid, parseTextArray);
 
 class PostgresAdapter extends BaseAdapter {
   get dialect() { return 'postgres'; }
@@ -46,24 +56,35 @@ class PostgresAdapter extends BaseAdapter {
 
   boolLiteral(v) { return v ? 'TRUE' : 'FALSE'; }
 
-  async withSession(db, fn) {
-    const client = await this._getPool(db).connect();
-    if (!this._activePids) this._activePids = new Set();
-    if (client.processID) this._activePids.add(client.processID);
+  async withSession(db, fn, opts) {
+    const requestId = this._requestId(opts);
+    this._assertRequestActive(requestId);
+    const client = await this._acquireForRequest(
+      () => this._getPool(db).connect(),
+      (late) => late.release(),
+      requestId,
+    );
+    const handle = { client, released: false };
+    this._trackRequestHandle(handle, requestId);
     try {
-      return await fn((sql) => this._run(client, sql));
+      this._assertRequestActive(requestId);
+      return await fn((sql, opts) => this._run(client, sql, opts));
     } finally {
-      if (client.processID) this._activePids.delete(client.processID);
-      client.release();
+      this._untrackRequestHandle(handle, requestId);
+      if (!handle.released) {
+        handle.released = true;
+        client.release();
+      }
     }
   }
 
-  /** pg_cancel_backend 取消正在执行的会话 */
-  async cancel() {
-    if (!this._activePids || !this._activePids.size) return;
-    const pool = this._getPool(null);
-    for (const pid of [...this._activePids]) {
-      await pool.query('SELECT pg_cancel_backend($1)', [pid]).catch(() => {});
+  /** 销毁目标 PoolClient，避免 backend PID 被池内复用后误取消后续查询。 */
+  async cancel(requestId) {
+    this._markRequestCancelled(requestId);
+    for (const handle of this._requestHandlesFor(requestId)) {
+      if (!handle || handle.released) continue;
+      handle.released = true;
+      try { handle.client.release(new Error('查询已取消')); } catch (e) { /* 会话可能刚好结束 */ }
     }
   }
 
@@ -248,12 +269,17 @@ class PostgresAdapter extends BaseAdapter {
     return { format: 'tree', root: conv(arr[0].Plan) };
   }
 
-  async _run(client, sql) {
-    const res = await client.query({ text: sql, rowMode: 'array' });
+  async _run(client, sql, opts) {
+    const limited = this._prepareScriptQuery(sql, opts);
+    const res = await client.query({ text: limited.sql, rowMode: 'array' });
     const list = Array.isArray(res) ? res : [res];
     const norm = list.map((r) => {
       if (r.fields && r.fields.length) {
-        return { columns: r.fields.map((f) => ({ name: f.name, type: '' })), rows: r.rows };
+        return {
+          columns: r.fields.map((f) => ({ name: f.name, type: '' })),
+          rows: r.rows,
+          rowLimitApplied: limited.applied,
+        };
       }
       return { affected: r.rowCount || 0, message: r.command || '' };
     });

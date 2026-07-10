@@ -6,10 +6,13 @@
   "main": "src/main/main.js",
   "author": "Datavia",
   "license": "MIT",
+  "packageManager": "npm@9.6.5",
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",
     "selftest": "electron . --selftest",
+    "verify": "npm run selftest && npm run smoke",
+    "integration": "node scripts/integration-db.js",
     "demo": "electron . --demo",
     "icon": "node scripts/gen-icon.js",
     "pack": "electron-builder --dir",

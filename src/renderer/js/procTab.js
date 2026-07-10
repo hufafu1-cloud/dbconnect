@@ -4,6 +4,7 @@ import { connLabel, connColor } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, confirmDialog } from './toast.js';
+import { authorizeOperation } from './danger.js';
 
 const COLS = [
   { name: 'ID', type: '' },
@@ -87,20 +88,19 @@ export function openProcTab(connId) {
     const list = filtered();
     const sel = [...grid.selection].map((i) => list[i]).filter(Boolean);
     if (!sel.length) { toast.info('请先选中要结束的会话行'); return; }
-    const ok = await confirmDialog('结束进程',
-      `确定结束 ${sel.length} 个会话吗？\n${sel.map((p) => `#${p.id} ${p.user || ''}`).join('\n')}`,
-      { danger: true, okLabel: '结束' });
-    if (!ok) return;
-    let done = 0;
-    for (const p of sel) {
-      try {
-        await window.api.db.killProcess(connId, p.id);
-        done++;
-      } catch (e) {
-        toast.error(`结束 #${p.id} 失败: ${e.message}`);
-      }
+    const payload = { connId, pids: sel.map((p) => p.id) };
+    try {
+      const approved = await authorizeOperation('db.killProcesses', payload, {
+        confirmSafe: () => confirmDialog('结束进程',
+          `确定结束 ${sel.length} 个会话吗？\n${sel.map((p) => `#${p.id} ${p.user || ''}`).join('\n')}`,
+          { danger: true, okLabel: '结束' }),
+      });
+      if (!approved) return;
+      const result = await window.api.db.killProcesses(connId, approved.pids, approved.approvalToken);
+      if (result.count) toast.success(`已结束 ${result.count} 个会话`);
+    } catch (e) {
+      toast.error('结束会话失败: ' + e.message);
     }
-    if (done) toast.success(`已结束 ${done} 个会话`);
     await load();
   }
 

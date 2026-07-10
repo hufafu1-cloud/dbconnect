@@ -2,6 +2,7 @@
 const fs = require('fs');
 const ddl = require('./db/ddl');
 const { valueLiteral } = require('./transfer');
+const { tableProjection } = require('./exporter');
 const { formatDate } = require('./db/sqlutil');
 
 // ---------------- 工具 ----------------
@@ -10,19 +11,33 @@ const { formatDate } = require('./db/sqlutil');
 function cmpNum(a, b) {
   const sa = String(a).trim();
   const sb = String(b).trim();
+  const parse = (text) => {
+    const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text);
+    if (!match || (!match[2] && !match[3])) return null;
+    const exponent = Number(match[4] || 0);
+    if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 10000) return null;
+    const fraction = match[3] || '';
+    let digits = (match[2] || '0') + fraction;
+    let scale = fraction.length - exponent;
+    if (scale < 0) { digits += '0'.repeat(-scale); scale = 0; }
+    digits = digits.replace(/^0+/, '') || '0';
+    const negative = match[1] === '-' && digits !== '0';
+    return { negative, digits, scale };
+  };
+  const left = parse(sa);
+  const right = parse(sb);
+  if (left && right) {
+    if (left.negative !== right.negative) return left.negative ? -1 : 1;
+    const scale = Math.max(left.scale, right.scale);
+    const la = BigInt(left.digits + '0'.repeat(scale - left.scale));
+    const rb = BigInt(right.digits + '0'.repeat(scale - right.scale));
+    const cmp = la < rb ? -1 : la > rb ? 1 : 0;
+    return left.negative ? -cmp : cmp;
+  }
   const na = Number(sa);
   const nb = Number(sb);
-  if (Number.isSafeInteger(na) && Number.isSafeInteger(nb)) return na - nb;
-  if (!Number.isNaN(na) && !Number.isNaN(nb) && (sa.includes('.') || sb.includes('.'))) return na - nb;
-  // 大整数：按符号 + 位数 + 字典序
-  const negA = sa.startsWith('-');
-  const negB = sb.startsWith('-');
-  if (negA !== negB) return negA ? -1 : 1;
-  const da = sa.replace(/^-/, '').replace(/^0+(?=\d)/, '');
-  const db = sb.replace(/^-/, '').replace(/^0+(?=\d)/, '');
-  const sign = negA ? -1 : 1;
-  if (da.length !== db.length) return sign * (da.length - db.length);
-  return sign * (da < db ? -1 : da > db ? 1 : 0);
+  if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+  return sa.localeCompare(sb);
 }
 
 /** 单元格值归一化（用于跨库判断“值是否相同”） */
@@ -176,8 +191,10 @@ async function execMany(ad, db, sqls, progress) {
 
 const NUMERIC_TYPE_RE = /int|number|numeric|decimal|serial|real|double|float/i;
 
-async function fetchPage(ad, db, schema, table, cols, pkCols, page, pageSize) {
-  const colSql = cols.map((c) => ad.quoteIdent(c)).join(', ');
+async function fetchPage(ad, db, schema, table, cols, columnInfos, pkCols, page, pageSize) {
+  const colSql = ad.dialect === 'mssql'
+    ? tableProjection(ad, columnInfos)
+    : cols.map((c) => ad.quoteIdent(c)).join(', ');
   const order = ' ORDER BY ' + pkCols.map((c) => ad.quoteIdent(c)).join(', ');
   const sql = ad.pageSql(`SELECT ${colSql} FROM ${ad.qualify(db, schema, table)}`, order, pageSize, (page - 1) * pageSize);
   const r = await ad.exec(db, sql);
@@ -190,7 +207,7 @@ async function fetchPage(ad, db, schema, table, cols, pkCols, page, pageSize) {
 }
 
 /** 流式读取器：按页供行 */
-function makeReader(ad, db, schema, table, cols, pkCols, pageSize) {
+function makeReader(ad, db, schema, table, cols, columnInfos, pkCols, pageSize) {
   let page = 1;
   let buf = [];
   let idx = 0;
@@ -198,7 +215,7 @@ function makeReader(ad, db, schema, table, cols, pkCols, pageSize) {
   return {
     async peek() {
       if (idx >= buf.length && !eof) {
-        buf = await fetchPage(ad, db, schema, table, cols, pkCols, page++, pageSize);
+        buf = await fetchPage(ad, db, schema, table, cols, columnInfos, pkCols, page++, pageSize);
         idx = 0;
         if (buf.length < pageSize) eof = true;
         if (!buf.length) return null;
@@ -261,6 +278,8 @@ async function syncData(srcAd, dstAd, args, progress) {
         const typeByName = {};
         for (const c of srcInfo.columns) typeByName[c.name] = c.type || '';
         const pkNumeric = pk.every((p) => NUMERIC_TYPE_RE.test(typeByName[p] || ''));
+        const srcColumnInfos = cols.map((name) => srcInfo.columns.find((column) => column.name === name));
+        const dstColumnInfos = cols.map((name) => dstInfo.columns.find((column) => column.name === name));
 
         const T = dstAd.qualify(dstDb, dSchema, table);
         const q = (n) => dstAd.quoteIdent(n);
@@ -311,8 +330,8 @@ async function syncData(srcAd, dstAd, args, progress) {
 
         if (pkNumeric) {
           // 流式归并（数字主键，内存恒定）
-          const rs = makeReader(srcAd, srcDb, sSchema, table, cols, pk, 1000);
-          const rd = makeReader(dstAd, dstDb, dSchema, table, cols, pk, 1000);
+          const rs = makeReader(srcAd, srcDb, sSchema, table, cols, srcColumnInfos, pk, 1000);
+          const rd = makeReader(dstAd, dstDb, dSchema, table, cols, dstColumnInfos, pk, 1000);
           let n = 0;
           for (;;) {
             const a = await rs.peek();
@@ -332,11 +351,11 @@ async function syncData(srcAd, dstAd, args, progress) {
           }
         } else {
           // 字符串主键：内存映射比对（有行数上限）
-          const loadMap = async (ad, db2, sch2) => {
+          const loadMap = async (ad, db2, sch2, columnInfos) => {
             const map = new Map();
             let page = 1;
             for (;;) {
-              const rows = await fetchPage(ad, db2, sch2, table, cols, pk, page++, 5000);
+              const rows = await fetchPage(ad, db2, sch2, table, cols, columnInfos, pk, page++, 5000);
               for (const r of rows) map.set(pkIdx.map((i) => normVal(r[i])).join('\u0001'), r);
               if (map.size > MAP_CAP) throw new Error(`超过 ${MAP_CAP.toLocaleString()} 行（字符串主键的大表暂不支持）`);
               if (rows.length < 5000) break;
@@ -344,9 +363,9 @@ async function syncData(srcAd, dstAd, args, progress) {
             return map;
           };
           report('加载源');
-          const sMap = await loadMap(srcAd, srcDb, sSchema);
+          const sMap = await loadMap(srcAd, srcDb, sSchema, srcColumnInfos);
           report('加载目标');
-          const dMap = await loadMap(dstAd, dstDb, dSchema);
+          const dMap = await loadMap(dstAd, dstDb, dSchema, dstColumnInfos);
           for (const [k, sRow] of sMap) {
             const dRow = dMap.get(k);
             if (!dRow) await onInsert(sRow);

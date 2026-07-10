@@ -19,6 +19,9 @@ class MySQLAdapter extends BaseAdapter {
       dateStrings: true,
       supportBigNumbers: true,
       bigNumberStrings: true,
+      // mysql2 otherwise JSON.parse()s JSON columns and irreversibly rounds
+      // 64-bit identifiers / high-precision decimals before raw export.
+      jsonStrings: true,
       charset: 'utf8mb4',
       connectTimeout: 8000,
     });
@@ -44,30 +47,31 @@ class MySQLAdapter extends BaseAdapter {
     return (db ? this.quoteIdent(db) + '.' : '') + this.quoteIdent(table);
   }
 
-  async withSession(db, fn) {
-    const conn = await this.pool.getConnection();
-    const threadId = (conn.connection && conn.connection.threadId) || conn.threadId;
-    if (!this._activeThreads) this._activeThreads = new Set();
-    if (threadId) this._activeThreads.add(threadId);
+  async withSession(db, fn, opts) {
+    const requestId = this._requestId(opts);
+    this._assertRequestActive(requestId);
+    const conn = await this._acquireForRequest(
+      () => this.pool.getConnection(),
+      (late) => late.release(),
+      requestId,
+    );
+    this._trackRequestHandle(conn, requestId);
     try {
+      this._assertRequestActive(requestId);
       if (db) await conn.query('USE ' + this.quoteIdent(db));
-      return await fn((sql) => this._run(conn, sql));
+      this._assertRequestActive(requestId);
+      return await fn((sql, opts) => this._run(conn, sql, opts));
     } finally {
-      if (threadId) this._activeThreads.delete(threadId);
+      this._untrackRequestHandle(conn, requestId);
       conn.release();
     }
   }
 
-  /** 用另一条连接 KILL QUERY 正在执行的会话 */
-  async cancel() {
-    if (!this._activeThreads || !this._activeThreads.size) return;
-    const killer = await this.pool.getConnection();
-    try {
-      for (const id of [...this._activeThreads]) {
-        await killer.query('KILL QUERY ' + Number(id)).catch(() => {});
-      }
-    } finally {
-      killer.release();
+  /** 销毁目标会话本身，避免线程 ID 被连接池复用后误杀后续查询。 */
+  async cancel(requestId) {
+    this._markRequestCancelled(requestId);
+    for (const conn of this._requestHandlesFor(requestId)) {
+      try { conn.destroy(); } catch (e) { /* 会话可能刚好结束 */ }
     }
   }
 
@@ -190,15 +194,16 @@ class MySQLAdapter extends BaseAdapter {
     return `DROP USER ${this.literal(name)}@${this.literal(host || '%')}`;
   }
 
-  async _run(conn, sql) {
-    const [rows, fields] = await conn.query({ sql, rowsAsArray: true });
+  async _run(conn, sql, opts) {
+    const limited = this._prepareScriptQuery(sql, opts);
+    const [rows, fields] = await conn.query({ sql: limited.sql, rowsAsArray: true });
     // CALL 存储过程等可能返回多结果集：fields 为二维数组
     if (fields && Array.isArray(fields[0])) {
       const multi = [];
       for (let i = 0; i < rows.length; i++) {
         const f = fields[i];
         if (f) {
-          multi.push({ columns: f.map((x) => ({ name: x.name, type: '' })), rows: rows[i] });
+          multi.push({ columns: f.map((x) => ({ name: x.name, type: '' })), rows: rows[i], rowLimitApplied: limited.applied });
         } else if (rows[i] && typeof rows[i] === 'object' && 'affectedRows' in rows[i]) {
           multi.push({ affected: rows[i].affectedRows || 0 });
         }
@@ -206,7 +211,7 @@ class MySQLAdapter extends BaseAdapter {
       return { multi };
     }
     if (fields) {
-      return { columns: fields.map((f) => ({ name: f.name, type: '' })), rows };
+      return { columns: fields.map((f) => ({ name: f.name, type: '' })), rows, rowLimitApplied: limited.applied };
     }
     return {
       affected: (rows && rows.affectedRows) || 0,

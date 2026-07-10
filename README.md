@@ -17,9 +17,14 @@
 - 新建 / 编辑 / 删除连接，支持「测试连接」
 - **SSH 隧道**：所有网络型数据库均可经跳板机连接（密码 / 私钥文件认证，支持私钥口令），
   数据库主机/端口填写跳板机视角的内网地址；测试连接同样走隧道
-- 连接配置保存在本机（`%APPDATA%/Datavia/connections.json`），数据库密码、SSH 密码与
-  私钥口令均使用系统级加密（Electron safeStorage / DPAPI）
-- SQL Server 支持加密连接与信任服务器证书选项；SQLite 支持选择或新建数据库文件
+- SSH 首次连接会在主进程原生对话框中显示主机密钥 SHA256 指纹，须人工核验后才开始认证；
+  已信任指纹保存在 `%APPDATA%/Datavia/ssh-known-hosts.json`，指纹变化时默认拒绝，只有再次明确核验才会更新
+- 连接配置保存在本机（`%APPDATA%/Datavia/connections.json`）；数据库密码、SSH 密码、
+  私钥口令与 AI API Key 仅在主进程内解密，Renderer 只接收“是否已保存”标记。新凭据必须使用
+  Electron safeStorage / Windows DPAPI；系统安全存储不可用时会拒绝落盘，而不会退化为明文/Base64。
+  已保存凭据同时绑定主机、端口、大小写敏感用户名、SSH 路由及 TLS/HTTPS 策略，目标变化时必须重输
+- SQL Server 支持加密连接与信任服务器证书选项；SQLite 文件必须经固定用途的系统对话框选择或新建，
+  查询 SQL 禁止用 `ATTACH` / `VACUUM INTO` 绕过该本地文件边界
 - ClickHouse 走 HTTP 接口（默认 8123），支持 HTTPS（云服务 8443）
 - OceanBase 走 MySQL 兼容协议（直连 2881 / OBProxy 2883），用户名格式 `用户@租户#集群`；
   Oracle 模式租户按 Schema 浏览（`all_*` 视图取元数据、ROWNUM 分页、CURRENT_SCHEMA 切换）
@@ -54,13 +59,16 @@
   裸词联想表名与 SQL 关键字；别名自动解析（`FROM customers c … c.` 识别 `c`→customers）。
   整库表→列映射按库懒加载缓存，Ctrl+Space 亦可手动触发
 - F5 / Ctrl+Enter 运行；支持「运行选中」；多语句脚本逐条执行并分别显示结果
-- **停止查询**：MySQL 系 `KILL QUERY`、PostgreSQL `pg_cancel_backend`、SQL Server 请求取消、
-  ClickHouse HTTP 中止（SQLite 为同步引擎，不支持取消）
+- **停止查询**：按查询请求精确取消，不影响同一连接的其他标签页或后台任务；MySQL 系使用
+  定向会话销毁、PostgreSQL 销毁对应 PoolClient、SQL Server 取消 Request、ClickHouse 中止 HTTP
+  并按 `query_id` 尝试服务端 KILL（SQLite 为同步引擎，不支持取消）
 - **SQL 美化**（Ctrl+Shift+F）：按连接方言格式化（sql-formatter），可只格式化选中部分
 - **保存查询到连接**（Ctrl+S）：保存的查询挂在连接树「查询」节点下，双击打开、重命名、删除；
   也可「另存文件」/「打开」普通 .sql 文件
 - 多结果集标签页 + 「信息」面板（每条语句的影响行数 / 耗时 / 错误）
-- 结果行数上限可选（200 / 2000 / 10000），防止大结果集卡死界面
+- 结果行数上限可选（200 / 2000 / 10000）；可安全改写的常见 SELECT/CTE 会按方言在数据库侧下推
+  `maxRows + 1` 探针，避免驱动先完整加载大结果集，并明确标记总行数是否精确；无法保证等价改写的
+  特殊语法会保守退回驱动返回后的显示截断
 
 ### 查询历史
 - 自动记录每次查询（时间 / 连接 / 库 / SQL / 耗时 / 成败与错误信息），本地保留最近 500 条
@@ -82,12 +90,19 @@
 
 ### 数据导出（表 / 查询结果通用）
 - **CSV**（UTF-8 BOM）、**Excel xlsx**（流式写出，支持大表）、**JSON**、**SQL INSERT**（按连接方言转义）、**Markdown 表格**
-- 整表导出走分页拉取，亦可带 WHERE 筛选导出
+- 整表导出直接读取驱动原始值，不经过界面预览截断；CSV / JSON / SQL 中长文本与 BLOB 保真，
+  XLSX 会自动拆分工作表，但受 Excel 单元格 32,767 字符上限约束，超长值会明确提示改用无损格式
+- CSV 会给以 `= + - @` 等开头的**文本**增加防公式注入前缀，数值负数保持数值；SQL Server 的
+  精确小数、高精度时间和别名类型在驱动解析前由服务端转换为文本；MySQL/PG/ClickHouse 的 JSON、
+  64 位整数、小数和数组也禁用有损解析。NaN/Infinity 在 JSON 中保留为文本，SQL 格式会明确拒绝
+- 大表有真实主键时按复合主键做游标分页，避免 OFFSET 导致的重复/遗漏；没有稳定唯一主键且超过
+  5,000 行时会拒绝不可靠的多页导出。游标分页不是跨页一致性快照，持续写入期间应在低峰执行并复核
 
 ### DBA 工具
 - **数据传输**：跨连接/跨库复制表结构+数据，**支持跨数据库类型**（内置类型映射，如
   MySQL `datetime`→PG `timestamp`、`longtext`→`nvarchar(max)`），多表选择、批量事务、进度显示、
-  出错继续选项；BLOB 按方言十六进制字面量保真复制
+  出错继续选项；BLOB 按方言十六进制字面量保真复制；MySQL 行数据字面量不受
+  `NO_BACKSLASH_ESCAPES` 影响，SQL Server 精确数值/时间在转储、传输和同步读取时同样保真
 - **转储 SQL 文件**：库/模式右键一键导出全部表的 DROP+CREATE+INSERT 脚本
 - **运行 SQL 文件**：大 .sql 文件流式执行（不进编辑器），UTF-8/GBK、进度与失败统计、出错继续
 - **进程列表**：连接右键打开会话监控（MySQL/OB、PG、MSSQL、ClickHouse），自动刷新、过滤、
@@ -117,13 +132,24 @@
 - **BLOB 查看器**：单元格查看器自动识别图片（PNG/JPEG/GIF/BMP/WebP）并预览，其余二进制以
   十六进制 + ASCII 转储显示，可复制
 
+### AI 助手与生产库保护
+- AI 助手兼容 DeepSeek、OpenAI、通义、智谱、Ollama 等 `/chat/completions` 接口，可解释、优化、排查和生成 SQL；
+  发送前界面会明确说明 SQL/问题及按需读取的表名、列名将提交到用户配置的接口
+- 标记为「生产」的连接由**主进程**强制执行审批策略：查询页的全部自由 SQL（包括 SELECT）、表数据编辑、对象操作、设计器、导入、
+  数据传输、整表/转储导出、会话终止、结构同步执行、数据同步生成脚本或直接应用、SQL 文件执行等
+  生产操作需输入连接名，并通过主进程原生确认；审批令牌 30 秒有效、单次使用，并绑定窗口、操作、
+  完整参数及弹窗前的连接配置快照
+- Renderer 文件读写采用路径能力白名单：只有经系统打开/保存对话框由用户选择过的路径才可通过 IPC 访问；
+  SQLite 数据库和 SSH 私钥另用不可互相升级的专用授权，应用自身凭据/信任配置文件禁止从 Renderer 访问。
+  生产 SQL 文件/导入审批绑定 SHA-256 内容，执行前复制到 Renderer 无法改写的私有快照
+
 ### 体验
 - **Navicat 风格界面**：原生菜单栏（文件/编辑/查看/工具/窗口/帮助，常用功能全部接通）+
   大图标工具栏（图标在上文字在下）；工具栏「表/视图/函数/触发器/事件/序列/用户/查询」
   按钮即点即切对象页内容（当前类型高亮），对象页工具栏随类型自适应
 - **深色模式**：工具栏「主题」一键切换，全界面（含 SQL 编辑器）适配，偏好本地记忆
 - **连接分组与颜色标记**：连接可设分组（树上成文件夹）与颜色（生产标红）；
-  颜色体现在树的连接标记条与每个相关标签页的圆点上，防止误操作生产库
+  颜色体现在树的连接标记条与每个相关标签页的圆点上，配合主进程审批防止误操作生产库
 - **网格多格式复制**：右键行 → 复制为 Tab 分隔 / 带表头（直接贴 Excel）/ INSERT 语句
   （按连接方言转义）/ CSV / Markdown，支持多选行
 
@@ -135,7 +161,7 @@
 ## 开发运行
 
 ```bash
-npm install      # 安装依赖（已在 .npmrc 配置国内镜像）
+npm ci           # 按 package-lock 精确安装依赖（.npmrc 仅配置 Electron 等二进制下载镜像）
 npm start        # 启动应用
 ```
 
@@ -144,9 +170,14 @@ npm start        # 启动应用
 ```bash
 npm run selftest # 数据库层自检（无需外部数据库，使用 SQLite 跑通全链路）
 npm run smoke    # 界面冒烟测试（隐藏窗口，校验 DOM 与控制台无报错）
+npm run verify   # 依次运行 selftest + smoke
+npm run integration # 真实数据库适配器测试（元数据/服务端限行；可选 CRUD、原始导出与逐请求取消）
 npm run demo     # 演示模式：自动建示例库、打开界面操作并截图到 shots/
 npm run dist     # 打包 Windows 安装程序（输出到 release/）
 ```
+
+GitHub Actions 会在 Windows 跑自检、界面冒烟与目录打包，并以 MySQL 8.4、PostgreSQL 16、
+SQL Server 2022、ClickHouse 24.8 服务矩阵验证元数据、CRUD、高精度原始导出和逐请求取消。
 
 ## 打包安装程序
 
@@ -155,6 +186,8 @@ npm run dist
 ```
 
 输出 `release/Datavia-Setup-<版本>.exe`（NSIS 安装包，支持选择安装目录、创建桌面/开始菜单快捷方式）。
+正式发布可通过 electron-builder 标准的 `CSC_LINK` / `CSC_KEY_PASSWORD` 环境变量注入代码签名证书；
+仓库不保存任何签名私钥。
 
 ## 技术架构
 
@@ -164,6 +197,8 @@ src/
 │   ├── main.js           # 入口：窗口、单实例、退出确认、测试模式
 │   ├── ipc.js            # IPC 处理器（统一 {ok,data|error} envelope）
 │   ├── store.js          # 连接配置持久化（safeStorage 加密密码）
+│   ├── safety.js         # 生产库审批策略、短时单次令牌与参数指纹
+│   ├── fileAccess.js     # 系统文件对话框授予的路径能力白名单
 │   ├── preload.js        # contextBridge 暴露 window.api
 │   └── db/               # 数据库适配层
 │       ├── base.js       # 适配器基类：分页/脚本执行/编辑 SQL 生成/事务
@@ -183,6 +218,7 @@ src/
 ```
 
 - 渲染进程开启 `contextIsolation`，所有数据库操作经 IPC 在主进程执行
+- 生产环境策略、凭据解密与文件路径授权均在主进程校验，Renderer 不持有已保存密钥
 - 编辑提交按主键生成 `UPDATE/INSERT/DELETE`，在**事务**中执行，任一失败整体回滚
 - 单元格值经清洗后传输：日期格式化、BigInt/Buffer 安全转换、超长文本截断
 
@@ -206,10 +242,15 @@ src/
   mysql2 连接 Oracle 租户并按 Oracle 方言操作（Schema 浏览、ROWNUM 分页、`all_*` 目录、
   `DBMS_METADATA` 取 DDL、网格按主键编辑）。官方不承诺原生 MySQL 客户端的完全兼容，
   个别数据类型（如 INTERVAL、TIMESTAMP WITH TIME ZONE）或 PL/SQL 多语句块可能异常；
-  查询编辑器中 PL/SQL 块（BEGIN…END）按分号拆分会被切开，请单独执行单个块。
+  查询编辑器会将单个 PL/SQL 块（BEGIN…END）作为整体执行，多个独立块建议分别运行。
   没有 Schema 层级管理（建/删用户请用 `CREATE USER` / `DROP USER`）。
 
 ## 已知限制（后续规划）
 
-- 表设计器为只读查看（建表/改表请用 SQL）；暂无 SSH 隧道、用户权限管理、数据传输/同步、备份
-- 查询执行暂不支持中途取消
+- OceanBase Oracle 模式仍属实验性，复杂 PL/SQL 块和少数 Oracle 专有类型可能需要直接使用专有客户端
+- SQLite 查询由同步引擎执行，无法中途取消；特殊 SELECT、DML RETURNING/OUTPUT、多语句批次等无法
+  安全下推外层行数探针时，会退回驱动完整返回后的界面截断，此类查询仍应自行添加合适的 LIMIT/TOP
+- 数据同步要求两端主键一致；字符串主键采用内存映射，单表上限 50 万行
+- 跨库传输/同步采用分页读取和分批事务，不提供跨异构数据库的一致性快照；源库持续写入时应在业务低峰执行并复核结果
+- 表设计器会跳过目标方言不支持的变更并显示警告，例如 SQLite 修改列类型需要重建表
+- 当前仓库未内置自动更新服务；公开分发的 Windows 安装包应在发布环境配置代码签名

@@ -1,0 +1,144 @@
+name: Verification and database integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/database-integration.yml"
+  push:
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/database-integration.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: Windows selftest, smoke and package
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+
+      - name: Use locked npm version
+        run: npm install --global npm@9.6.5
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native Electron dependencies
+        run: npx --no-install electron-builder install-app-deps
+
+      - name: Run selftest and UI smoke test
+        run: npm run verify
+
+      - name: Build unpacked Windows application
+        run: npm run pack
+
+  adapters:
+    name: ${{ matrix.target }} adapter
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mysql
+            image: mysql:8.4
+            port: 3306
+          - target: postgres
+            image: postgres:16
+            port: 5432
+          - target: mssql
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            port: 1433
+          - target: clickhouse
+            image: clickhouse/clickhouse-server:24.8
+            port: 8123
+
+    services:
+      database:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          MYSQL_DATABASE: datavia_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          POSTGRES_DB: datavia_ci
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+          CLICKHOUSE_USER: datavia
+          CLICKHOUSE_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          CLICKHOUSE_DB: datavia_ci
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - "${{ matrix.port }}:${{ matrix.port }}"
+        options: --memory=3g
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+
+      - name: Use locked npm version
+        run: npm install --global npm@9.6.5
+
+      - name: Install production dependencies
+        run: npm ci --ignore-scripts --omit=dev
+
+      - name: Validate integration runner syntax
+        run: node --check scripts/integration-db.js
+
+      - name: Test ${{ matrix.target }} adapter
+        env:
+          DB_INTEGRATION_TARGETS: ${{ matrix.target }}
+          DB_INTEGRATION_CRUD: "1"
+          DB_INTEGRATION_CANCEL: "1"
+          DB_INTEGRATION_RETRIES: "30"
+          DB_INTEGRATION_RETRY_MS: "2000"
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: root
+          MYSQL_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          MYSQL_DATABASE: datavia_ci
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          POSTGRES_DATABASE: datavia_ci
+          MSSQL_HOST: 127.0.0.1
+          MSSQL_PORT: "1433"
+          MSSQL_USER: sa
+          MSSQL_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          MSSQL_DATABASE: tempdb
+          MSSQL_ENCRYPT: "0"
+          MSSQL_TRUST_CERT: "1"
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: "8123"
+          CLICKHOUSE_USER: datavia
+          CLICKHOUSE_PASSWORD: "Dv${{ github.run_id }}!CiDb"
+          CLICKHOUSE_DATABASE: datavia_ci
+          CLICKHOUSE_HTTPS: "0"
+        run: node scripts/integration-db.js

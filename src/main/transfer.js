@@ -1,27 +1,18 @@
 // DBA 工具：数据传输（跨连接/跨方言）、转储 SQL 文件、运行 SQL 文件
 const fs = require('fs');
 const ddl = require('./db/ddl');
-const { splitSql, formatDate, excerpt } = require('./db/sqlutil');
-
-/** 任意原始值 → 目标方言字面量（保真：BLOB 走十六进制，不截断） */
-function valueLiteral(ad, v) {
-  if (v === null || v === undefined) return 'NULL';
-  if (Buffer.isBuffer(v) || v instanceof Uint8Array) return ad.blobLiteral(Buffer.from(v));
-  if (v instanceof Date) return ad.literal(formatDate(v));
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'bigint') return v.toString();
-  if (typeof v === 'boolean') return ad.boolLiteral(v);
-  if (typeof v === 'object') return ad.literal(JSON.stringify(v));
-  return ad.literal(String(v));
-}
+const { splitSql, excerpt } = require('./db/sqlutil');
+const { valueLiteral } = require('./db/valueLiteral');
+const { tableProjection } = require('./exporter');
 
 /** 原始分页读取（不做展示用清洗），自动剔除 Oracle 分页辅助列 RN__ */
-async function fetchRawPage(ad, db, schema, table, pkCols, page, pageSize) {
+async function fetchRawPage(ad, db, schema, table, columns, pkCols, page, pageSize) {
   const qtable = ad.qualify(db, schema, table);
   const order = pkCols && pkCols.length
     ? ' ORDER BY ' + pkCols.map((c) => ad.quoteIdent(c)).join(', ')
     : '';
-  const sql = ad.pageSql(`SELECT * FROM ${qtable}`, order, pageSize, (page - 1) * pageSize);
+  const projection = ad.dialect === 'mssql' ? tableProjection(ad, columns || []) : '*';
+  const sql = ad.pageSql(`SELECT ${projection} FROM ${qtable}`, order, pageSize, (page - 1) * pageSize);
   const r = await ad.exec(db, sql);
   const rnIdx = r.columns.findIndex((c) => c.name === 'RN__');
   if (rnIdx >= 0) {
@@ -89,7 +80,7 @@ async function runTransfer(srcAd, dstAd, args, progress) {
         const pkCols = info.pk || [];
         let page = 1;
         for (;;) {
-          const r = await fetchRawPage(srcAd, srcDb, sSchema, table, pkCols, page, batchSize);
+          const r = await fetchRawPage(srcAd, srcDb, sSchema, table, info.columns, pkCols, page, batchSize);
           if (!r.rows.length) break;
           const colNames = r.columns.map((c) => c.name);
           await insertRows(dstAd, dstDb, dSchema, table, colNames, r.rows);
@@ -154,7 +145,7 @@ async function dumpSql(ad, args, progress) {
         const pkCols = info.pk || [];
         let page = 1;
         for (;;) {
-          const r = await fetchRawPage(ad, db, sch, table, pkCols, page, batchSize);
+          const r = await fetchRawPage(ad, db, sch, table, info.columns, pkCols, page, batchSize);
           if (!r.rows.length) break;
           const colSql = r.columns.map((c) => ad.quoteIdent(c.name)).join(', ');
           for (const row of r.rows) {

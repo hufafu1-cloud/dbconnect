@@ -6,6 +6,7 @@ import { showMenu } from './contextmenu.js';
 import * as actions from './actions.js';
 import { openConnDialog } from './connDialog.js';
 import { statusbar } from './statusbar.js';
+import { authorizeOperation } from './danger.js';
 
 let treeRoot = null;
 const connNodes = new Map(); // connId -> node element记录
@@ -495,10 +496,14 @@ function renderUsersFolder(conn) {
               { label: '复制名称', icon: 'copy', onClick: () => navigator.clipboard.writeText(label) },
               { sep: true },
               { label: '删除用户', icon: 'trash', danger: true, onClick: async () => {
-                const ok = await confirmDialog('删除用户', `确定删除用户 “${label}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' });
-                if (!ok) return;
                 try {
-                  await window.api.db.action(conn.id, { action: 'dropUser', name: u.name, host: u.host });
+                  const payload = { connId: conn.id, action: 'dropUser', name: u.name, host: u.host };
+                  const approved = await authorizeOperation('db.action', payload, {
+                    title: '删除用户',
+                    confirmSafe: () => confirmDialog('删除用户', `确定删除用户 “${label}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' }),
+                  });
+                  if (!approved) return;
+                  await window.api.db.action(conn.id, approved);
                   toast.success(`用户 ${label} 已删除`);
                   reload();
                 } catch (err) { toast.error(err.message); }
@@ -677,10 +682,14 @@ function renderObjLeaf(conn, db, schema, depth, kindDef, it, reloadFolder) {
         { label: '复制名称', icon: 'copy', onClick: () => navigator.clipboard.writeText(it.name) },
         { sep: true },
         { label: `删除${kindDef.title}`, icon: 'trash', danger: true, onClick: async () => {
-          const ok = await confirmDialog(`删除${kindDef.title}`, `确定删除 “${it.name}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' });
-          if (!ok) return;
           try {
-            await window.api.db.action(conn.id, { db, schema: it.schema || schema, ...kindDef.dropAction(it) });
+            const payload = { connId: conn.id, db, schema: it.schema || schema, ...kindDef.dropAction(it) };
+            const approved = await authorizeOperation('db.action', payload, {
+              title: `删除${kindDef.title}`,
+              confirmSafe: () => confirmDialog(`删除${kindDef.title}`, `确定删除 “${it.name}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' }),
+            });
+            if (!approved) return;
+            await window.api.db.action(conn.id, approved);
             toast.success(`${kindDef.title} ${it.name} 已删除`);
             reloadFolder();
           } catch (err) { toast.error(err.message); }

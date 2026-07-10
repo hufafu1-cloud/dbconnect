@@ -5,6 +5,7 @@ import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, confirmDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
+import { authorizeOperation } from './danger.js';
 
 const PAGE_SIZES = [100, 500, 1000];
 
@@ -319,9 +320,12 @@ export function openTableTab(target, openOpts) {
     const edits = grid.getPendingEdits();
     if (!edits.length) return;
     try {
-      const r = await window.api.db.applyEdits(target.connId, {
+      const approved = await authorizeOperation('db.applyEdits', {
+        connId: target.connId,
         db: target.db, schema: target.schema, table: target.table, edits,
       });
+      if (!approved) return;
+      const r = await window.api.db.applyEdits(target.connId, approved);
       toast.success(`已应用 ${r.count} 处更改`);
       await load();
     } catch (e) {

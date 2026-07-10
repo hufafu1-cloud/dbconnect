@@ -101,9 +101,14 @@ ipc.register(() => win);
 
 app.whenReady().then(async () => {
   if (isSelfTest) {
-    const { runSelfTest } = require('./selftest');
-    const code = await runSelfTest();
-    app.exit(code);
+    try {
+      const { runSelfTest } = require('./selftest');
+      const code = await runSelfTest();
+      app.exit(code);
+    } catch (err) {
+      console.error('[SELFTEST] 未捕获异常:', err && err.stack || err);
+      app.exit(1);
+    }
     return;
   }
   if (isDemo) {

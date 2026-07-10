@@ -8,6 +8,10 @@ const inv = (channel, ...args) =>
   });
 
 contextBridge.exposeInMainWorld('api', {
+  safety: {
+    inspect: (operation, payload) => inv('safety:inspect', { operation, payload }),
+    approve: (operation, payload, confirmation) => inv('safety:approve', { operation, payload, confirmation }),
+  },
   conn: {
     list: () => inv('conn:list'),
     save: (c) => inv('conn:save', c),
@@ -33,7 +37,7 @@ contextBridge.exposeInMainWorld('api', {
     action: (connId, t) => inv('db:action', { connId, ...t }),
     exportTable: (connId, t) => inv('db:exportTable', { connId, ...t }),
     exportRows: (connId, t) => inv('db:exportRows', { connId, ...t }),
-    cancel: (connId) => inv('db:cancel', { connId }),
+    cancel: (connId, requestId) => inv('db:cancel', { connId, requestId }),
     allColumns: (connId, db, schema) => inv('db:allColumns', { connId, db, schema }),
     foreignKeys: (connId, t) => inv('db:foreignKeys', { connId, ...t }),
     erModel: (connId, db, schema, opts) => inv('db:erModel', { connId, db, schema, opts }),
@@ -53,14 +57,15 @@ contextBridge.exposeInMainWorld('api', {
     users: (connId) => inv('db:users', { connId }),
     objectDdl: (connId, t) => inv('db:objectDdl', { connId, ...t }),
     processes: (connId) => inv('db:processes', { connId }),
-    killProcess: (connId, pid) => inv('db:killProcess', { connId, pid }),
+    killProcess: (connId, pid, approvalToken) => inv('db:killProcess', { connId, pid, approvalToken }),
+    killProcesses: (connId, pids, approvalToken) => inv('db:killProcesses', { connId, pids, approvalToken }),
   },
   dba: {
     transfer: (t) => inv('dba:transfer', t),
     dump: (connId, t) => inv('dba:dump', { connId, ...t }),
     runSqlFile: (connId, t) => inv('dba:runSqlFile', { connId, ...t }),
     structDiff: (t) => inv('dba:structDiff', t),
-    execSqls: (connId, db, sqls) => inv('dba:execSqls', { connId, db, sqls }),
+    execSqls: (connId, db, sqls, approvalToken) => inv('dba:execSqls', { connId, db, sqls, approvalToken }),
     dataSync: (t) => inv('dba:dataSync', t),
     onProgress: (cb) => {
       const listener = (_e, p) => cb(p);
@@ -91,6 +96,10 @@ contextBridge.exposeInMainWorld('api', {
   },
   dlg: {
     openFile: (opts) => inv('dlg:openFile', opts),
+    openEditableSqlFile: () => inv('dlg:openEditableSqlFile'),
+    openSQLiteFile: () => inv('dlg:openSQLiteFile'),
+    saveSQLiteFile: () => inv('dlg:saveSQLiteFile'),
+    openSshKeyFile: () => inv('dlg:openSshKeyFile'),
     saveFile: (opts) => inv('dlg:saveFile', opts),
   },
   file: {

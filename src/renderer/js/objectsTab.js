@@ -6,6 +6,7 @@ import { addTab } from './tabs.js';
 import * as actions from './actions.js';
 import { showMenu } from './contextmenu.js';
 import { toast, confirmDialog } from './toast.js';
+import { authorizeOperation } from './danger.js';
 
 const KINDS = {
   table: { label: '表', icon: 'table', needDb: true, capsKey: null },
@@ -253,8 +254,6 @@ async function deleteGeneric(it) {
   const cid = connIdNow();
   const k = it.kind;
   const label = KINDS[k].label;
-  const ok = await confirmDialog(`删除${label}`, `确定删除${label} “${it.name}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' });
-  if (!ok) return;
   const actionMap = {
     routine: { action: 'dropRoutine', routineType: it.type, name: it.name },
     trigger: { action: 'dropTrigger', name: it.name, table: it.table },
@@ -263,11 +262,18 @@ async function deleteGeneric(it) {
     user: { action: 'dropUser', name: it.name, host: it.host },
   };
   try {
-    await window.api.db.action(cid, {
+    const payload = {
+      connId: cid,
       db: KINDS[k].needDb ? current.db : null,
       schema: it.schema || (current && current.schema),
       ...actionMap[k],
+    };
+    const approved = await authorizeOperation('db.action', payload, {
+      title: `删除${label}`,
+      confirmSafe: () => confirmDialog(`删除${label}`, `确定删除${label} “${it.name}” 吗？该操作不可撤销！`, { danger: true, okLabel: '删除' }),
     });
+    if (!approved) return;
+    await window.api.db.action(cid, approved);
     toast.success(`${label} ${it.name} 已删除`);
     load(true);
   } catch (e) { toast.error(e.message); }

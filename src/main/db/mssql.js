@@ -57,34 +57,37 @@ class MSSQLAdapter extends BaseAdapter {
     return (db ? `USE ${this.quoteIdent(db)};\n` : '') + sql;
   }
 
-  _track(req) {
-    if (!this._activeReqs) this._activeReqs = new Set();
-    this._activeReqs.add(req);
-    return req;
+  _track(req, requestId) {
+    return this._trackRequestHandle(req, requestId);
   }
 
-  _untrack(req) {
-    if (this._activeReqs) this._activeReqs.delete(req);
+  _untrack(req, requestId) {
+    this._untrackRequestHandle(req, requestId);
   }
 
   /** 取消正在执行的请求 */
-  async cancel() {
-    if (!this._activeReqs) return;
-    for (const req of [...this._activeReqs]) {
+  async cancel(requestId) {
+    this._markRequestCancelled(requestId);
+    for (const req of this._requestHandlesFor(requestId)) {
       try { req.cancel(); } catch (e) { /* ignore */ }
     }
   }
 
   /** 单语句执行（数组行模式） */
-  async withSession(db, fn) {
-    return fn(async (sql) => {
-      const req = this._track(this.pool.request());
+  async withSession(db, fn, opts) {
+    const requestId = this._requestId(opts);
+    this._assertRequestActive(requestId);
+    return fn(async (sql, opts) => {
+      this._assertRequestActive(requestId);
+      const limited = this._prepareScriptQuery(sql, opts);
+      const req = this._track(this.pool.request(), requestId);
       req.arrayRowMode = true;
       try {
-        const r = await req.batch(this._useBatch(db, sql));
-        return this._normBatch(r);
+        this._assertRequestActive(requestId);
+        const r = await req.batch(this._useBatch(db, limited.sql));
+        return this._normBatch(r, limited.applied);
       } finally {
-        this._untrack(req);
+        this._untrack(req, requestId);
       }
     });
   }
@@ -264,7 +267,7 @@ class MSSQLAdapter extends BaseAdapter {
     return [...map.values()];
   }
 
-  _normBatch(r) {
+  _normBatch(r, rowLimitApplied) {
     const sets = r.recordsets || [];
     if (!sets.length) {
       const affected = (r.rowsAffected || []).reduce((a, b) => a + b, 0);
@@ -275,6 +278,7 @@ class MSSQLAdapter extends BaseAdapter {
       return {
         columns: colsMeta.map((c) => ({ name: c.name || '', type: (c.type && (c.type.declaration || c.type.name)) || '' })),
         rows: rs,
+        rowLimitApplied: !!rowLimitApplied,
       };
     });
     return norm.length === 1 ? norm[0] : { multi: norm };
@@ -282,44 +286,47 @@ class MSSQLAdapter extends BaseAdapter {
 
   /** 整段脚本作为单个批执行（保证会话一致），支持按 GO 行分批 */
   async runScript(db, sql, opts) {
-    const maxRows = (opts && opts.maxRows) || 2000;
+    const maxRows = this._scriptMaxRows(opts);
     const batches = sql.split(/^\s*GO\s*(?:--.*)?$/gim).map((s) => s.trim()).filter(Boolean);
     const out = [];
-    for (const batch of batches) {
-      const t0 = Date.now();
-      const req = this._track(this.pool.request());
-      try {
-        req.arrayRowMode = true;
-        const r = await req.batch(this._useBatch(db, batch));
-        const ms = Date.now() - t0;
-        const sets = r.recordsets || [];
-        if (!sets.length) {
-          const affected = (r.rowsAffected || []).reduce((a, b) => a + b, 0);
-          out.push({ sql: excerpt(batch), ms, affected, message: '' });
-        } else {
-          for (const rs of sets) {
-            const colsMeta = Array.isArray(rs.columns) ? rs.columns : Object.values(rs.columns || {});
-            const total = rs.length;
-            const rows = total > maxRows ? rs.slice(0, maxRows) : rs;
-            out.push({
-              sql: excerpt(batch), ms,
-              columns: colsMeta.map((c) => ({ name: c.name || '', type: (c.type && (c.type.declaration || c.type.name)) || '' })),
-              rows: sanitizeRows(rows),
-              rowCount: total,
-              truncated: total > maxRows,
-            });
+    const requestId = this._beginRequest(opts);
+    try {
+      for (const batch of batches) {
+        const t0 = Date.now();
+        const req = this._track(this.pool.request(), requestId);
+        try {
+          this._assertRequestActive(requestId);
+          const limited = this._prepareScriptQuery(batch, { maxRows });
+          req.arrayRowMode = true;
+          const r = await req.batch(this._useBatch(db, limited.sql));
+          const ms = Date.now() - t0;
+          const sets = r.recordsets || [];
+          if (!sets.length) {
+            const affected = (r.rowsAffected || []).reduce((a, b) => a + b, 0);
+            out.push({ sql: excerpt(batch), ms, affected, message: '' });
+          } else {
+            for (const rs of sets) {
+              const colsMeta = Array.isArray(rs.columns) ? rs.columns : Object.values(rs.columns || {});
+              out.push(this._normalizeResult(batch, {
+                columns: colsMeta.map((c) => ({ name: c.name || '', type: (c.type && (c.type.declaration || c.type.name)) || '' })),
+                rows: rs,
+                rowLimitApplied: limited.applied,
+              }, maxRows, ms));
+            }
           }
+        } catch (err) {
+          let m = (err && err.message) || String(err);
+          if (err && err.lineNumber) m += ` (第 ${err.lineNumber} 行)`;
+          out.push({ sql: excerpt(batch), ms: Date.now() - t0, error: m });
+          break;
+        } finally {
+          this._untrack(req, requestId);
         }
-      } catch (err) {
-        let m = (err && err.message) || String(err);
-        if (err && err.lineNumber) m += ` (第 ${err.lineNumber} 行)`;
-        out.push({ sql: excerpt(batch), ms: Date.now() - t0, error: m });
-        break;
-      } finally {
-        this._untrack(req);
       }
+      return out;
+    } finally {
+      this._endRequest(requestId);
     }
-    return out;
   }
 
   /** 事务：单批 + XACT_ABORT，保证原子性 */
@@ -365,11 +372,14 @@ class MSSQLAdapter extends BaseAdapter {
     const L = (v) => this.literal(v);
     const objId = `OBJECT_ID(${L(sch + '.' + table)})`;
     const cols = await this._q(db,
-      `SELECT c.name AS name, ty.name AS basetype, c.max_length, c.precision, c.scale,
+      `SELECT c.name AS name, ty.name AS typename, systy.name AS systemtype,
+              c.max_length, c.precision, c.scale,
               c.is_nullable, c.is_identity, dc.definition AS def, dc.name AS def_constraint,
               CAST(ep.value AS nvarchar(400)) AS comment
        FROM sys.columns c
        JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+       LEFT JOIN sys.types systy ON systy.user_type_id = c.system_type_id
+          AND systy.system_type_id = c.system_type_id
        LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
        LEFT JOIN sys.extended_properties ep ON ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
        WHERE c.object_id = ${objId} ORDER BY c.column_id`);
@@ -390,15 +400,18 @@ class MSSQLAdapter extends BaseAdapter {
       if (!imap.has(r.iname)) imap.set(r.iname, { name: r.iname, columns: [], unique: !!r.is_unique, primary: !!r.is_primary_key });
       imap.get(r.iname).columns.push(r.col);
     }
-    const typeStr = (c) => {
-      const t = c.basetype;
+    const baseTypeStr = (c) => {
+      const t = c.systemtype || c.typename;
       if (['varchar', 'char', 'varbinary', 'binary'].includes(t)) return `${t}(${c.max_length === -1 ? 'max' : c.max_length})`;
       if (['nvarchar', 'nchar'].includes(t)) return `${t}(${c.max_length === -1 ? 'max' : c.max_length / 2})`;
       if (['decimal', 'numeric'].includes(t)) return `${t}(${c.precision},${c.scale})`;
       return t;
     };
+    const typeStr = (c) => c.typename && c.systemtype && c.typename !== c.systemtype
+      ? c.typename
+      : baseTypeStr(c);
     const columns = cols.map((c) => ({
-      name: c.name, type: typeStr(c), nullable: !!c.is_nullable, def: c.def,
+      name: c.name, type: typeStr(c), baseType: baseTypeStr(c), nullable: !!c.is_nullable, def: c.def,
       key: pk.includes(c.name) ? 'PRI' : '', extra: c.is_identity ? 'identity' : '', comment: c.comment || '',
       defConstraint: c.def_constraint || null,
     }));

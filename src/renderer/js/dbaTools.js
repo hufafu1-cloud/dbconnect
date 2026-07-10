@@ -2,6 +2,7 @@
 import { el } from './util.js';
 import { openModal, toast, confirmDialog } from './toast.js';
 import { state, emit, connLabel, objectsCacheKey } from './state.js';
+import { authorizeOperation } from './danger.js';
 
 function openConnsOptions(selected) {
   return [...state.open.keys()].map((id) =>
@@ -154,10 +155,26 @@ export async function openTransferDialog(preset) {
     if (srcConn.value === dstConn.value && srcDb.value === dstDb.value && (srcSchema.value || '') === (dstSchema.value || '')) {
       toast.error('源与目标相同'); return;
     }
-    if (chkDrop.checked) {
-      const ok = await confirmDialog('确认覆盖', `将先删除目标库中同名的 ${picked.length} 个表，确定吗？`, { danger: true, okLabel: '继续' });
-      if (!ok) return;
+    const transferPayload = {
+      srcConnId: srcConn.value, dstConnId: dstConn.value,
+      srcDb: srcDb.value, srcSchema: srcSchema.value || null,
+      dstDb: dstDb.value, dstSchema: dstSchema.value || null,
+      tables: picked,
+      createTable: chkCreate.checked, dropExisting: chkDrop.checked,
+      copyData: chkData.checked, stopOnError: !chkContinue.checked, batchSize: 500,
+    };
+    let approvedTransfer;
+    try {
+      approvedTransfer = await authorizeOperation('dba.transfer', transferPayload, {
+        confirmSafe: chkDrop.checked
+          ? () => confirmDialog('确认覆盖', `将先删除目标库中同名的 ${picked.length} 个表，确定吗？`, { danger: true, okLabel: '继续' })
+          : null,
+      });
+    } catch (e) {
+      toast.error('生产库安全检查失败：' + e.message);
+      return;
     }
+    if (!approvedTransfer) return;
     running = true;
     bar.style.display = '';
     const off = window.api.dba.onProgress((p) => {
@@ -165,14 +182,7 @@ export async function openTransferDialog(preset) {
       text.textContent = `[${p.tablesDone}/${p.tablesTotal}] ${p.table || ''} — ${p.phase}${p.rows ? ` (${p.rows.toLocaleString()} 行)` : ''}`;
     });
     try {
-      const r = await window.api.dba.transfer({
-        srcConnId: srcConn.value, dstConnId: dstConn.value,
-        srcDb: srcDb.value, srcSchema: srcSchema.value || null,
-        dstDb: dstDb.value, dstSchema: dstSchema.value || null,
-        tables: picked,
-        createTable: chkCreate.checked, dropExisting: chkDrop.checked,
-        copyData: chkData.checked, stopOnError: !chkContinue.checked, batchSize: 500,
-      });
+      const r = await window.api.dba.transfer(approvedTransfer);
       const okTables = r.tables.filter((t) => t.status === 'ok');
       const totalRows = okTables.reduce((a, t) => a + t.rows, 0);
       let msg = `传输完成：${okTables.length}/${r.tables.length} 个表，共 ${totalRows.toLocaleString()} 行`;
@@ -208,6 +218,7 @@ export async function openDumpDialog(target) {
   const chkData = el('input', { type: 'checkbox' }); chkData.checked = true;
   const { bar, text, fill } = progressBarPair();
   let running = false;
+  let preparing = false;
 
   const m = openModal({
     title: `转储 SQL — ${connLabel(target.connId)} › ${target.db || ''}${target.schema ? ' › ' + target.schema : ''}`,
@@ -218,13 +229,31 @@ export async function openDumpDialog(target) {
         el('label', { class: 'form-check' }, chkData, '包含数据 (INSERT)')),
       bar, text),
     buttons: [
-      { label: '关闭', onClick: () => !running },
+      { label: '关闭', onClick: () => !running && !preparing },
       { label: '开始转储', primary: true, onClick: () => { run(); return false; } },
     ],
   });
 
   async function run() {
-    if (running) return;
+    if (running || preparing) return;
+    preparing = true;
+    let approvedDump;
+    try {
+      const tables = (await loadTables(target.connId, target.db, target.schema)).map((t) => ({ name: t.name, schema: t.schema || null }));
+      if (!tables.length) { toast.info('该库没有表'); return; }
+      approvedDump = await authorizeOperation('dba.dump', {
+        connId: target.connId,
+        db: target.db, schema: target.schema || null, tables, file,
+        includeDrop: chkDrop.checked, includeData: chkData.checked,
+      });
+    } catch (e) {
+      toast.error('转储安全检查失败：\n' + e.message, 15000);
+      text.textContent = '失败：' + e.message;
+      return;
+    } finally {
+      preparing = false;
+    }
+    if (!approvedDump) return;
     running = true;
     bar.style.display = '';
     const off = window.api.dba.onProgress((p) => {
@@ -232,12 +261,7 @@ export async function openDumpDialog(target) {
       text.textContent = `[${p.tablesDone}/${p.tablesTotal}] ${p.table || ''} — ${p.phase}${p.rows ? ` (${p.rows.toLocaleString()} 行)` : ''}`;
     });
     try {
-      const tables = (await loadTables(target.connId, target.db, target.schema)).map((t) => ({ name: t.name, schema: t.schema || null }));
-      if (!tables.length) { toast.info('该库没有表'); running = false; off(); return; }
-      const r = await window.api.dba.dump(target.connId, {
-        db: target.db, schema: target.schema || null, tables, file,
-        includeDrop: chkDrop.checked, includeData: chkData.checked,
-      });
+      const r = await window.api.dba.dump(target.connId, approvedDump);
       toast.success(`转储完成：${r.tables} 个表，${r.rows.toLocaleString()} 行\n${r.file}`, 8000);
       text.textContent = `完成：${r.tables} 个表，${r.rows.toLocaleString()} 行`;
     } catch (e) {
@@ -281,17 +305,18 @@ export async function openRunSqlFileDialog(target) {
 
   async function run() {
     if (running) return;
-    // 生产库：执行 SQL 文件前二次确认（扫描文件中的危险语句）
-    const { isProd, analyzeDanger, confirmDangerExecution } = await import('./danger.js');
-    if (isProd(target.connId)) {
-      let content = '';
-      try { content = await window.api.file.read(file); } catch (e) { /* ignore */ }
-      const items = analyzeDanger(content);
-      const c = state.connections.find((x) => x.id === target.connId);
-      const listed = items.length ? items : [{ level: 'high', reason: '在生产库上执行整个 SQL 文件', sql: file }];
-      const ok = await confirmDangerExecution(c ? c.name : target.connId, listed, { title: `即将在生产连接「${c ? c.name : ''}」上执行 SQL 文件` });
-      if (!ok) return;
+    const sqlFilePayload = {
+      connId: target.connId,
+      db: target.db || null, file, encoding: encSel.value, stopOnError: !chkContinue.checked,
+    };
+    let approvedFile;
+    try {
+      approvedFile = await authorizeOperation('dba.runSqlFile', sqlFilePayload);
+    } catch (e) {
+      toast.error('生产库安全检查失败：' + e.message);
+      return;
     }
+    if (!approvedFile) return;
     running = true;
     bar.style.display = '';
     const off = window.api.dba.onProgress((p) => {
@@ -299,9 +324,7 @@ export async function openRunSqlFileDialog(target) {
       text.textContent = `已执行 ${p.done} / ${p.total} 条语句`;
     });
     try {
-      const r = await window.api.dba.runSqlFile(target.connId, {
-        db: target.db || null, file, encoding: encSel.value, stopOnError: !chkContinue.checked,
-      });
+      const r = await window.api.dba.runSqlFile(target.connId, approvedFile);
       let msg = `执行完成：成功 ${r.executed}/${r.total} 条 · ${r.ms} ms`;
       if (r.failed) msg += `\n失败 ${r.failed} 条：\n${r.errors.join('\n')}`;
       (r.failed ? toast.error : toast.success)(msg, r.failed ? 15000 : 6000);

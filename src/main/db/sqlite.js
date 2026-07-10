@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { BaseAdapter } = require('./base');
+const { hasSQLiteExternalFileClause } = require('./sqlutil');
 
 class SQLiteAdapter extends BaseAdapter {
   get dialect() { return 'sqlite'; }
@@ -19,9 +20,10 @@ class SQLiteAdapter extends BaseAdapter {
       const initSqlJs = require('sql.js');
       const distDir = path.join(path.dirname(require.resolve('sql.js')), '..', 'dist');
       const SQL = await initSqlJs({ locateFile: (f) => path.join(distDir, f) });
-      const buf = fs.existsSync(this.file) ? fs.readFileSync(this.file) : null;
+      const inMemory = this.file === ':memory:';
+      const buf = !inMemory && fs.existsSync(this.file) ? fs.readFileSync(this.file) : null;
       this.db = buf ? new SQL.Database(buf) : new SQL.Database();
-      this._dirty = !buf;
+      this._dirty = !buf && !inMemory;
       console.warn('[sqlite] better-sqlite3 不可用，已回退 sql.js (WASM):', err.message);
     }
     const r = this._execRaw('SELECT sqlite_version()');
@@ -37,24 +39,33 @@ class SQLiteAdapter extends BaseAdapter {
   }
 
   _flush() {
+    if (this.file === ':memory:') return;
     if (this.mode === 'wasm' && this._dirty && this.db) {
       fs.writeFileSync(this.file, Buffer.from(this.db.export()));
       this._dirty = false;
     }
   }
 
-  _execRaw(sql) {
+  _execRaw(sql, opts) {
+    if (hasSQLiteExternalFileClause(sql)) {
+      throw new Error('SQLite SQL 不允许 ATTACH 或 VACUUM INTO 访问其他本地文件；请通过连接对话框单独选择目标数据库');
+    }
+    const limited = this._prepareScriptQuery(sql, opts);
+    sql = limited.sql;
     if (this.mode === 'native') {
       const stmt = this.db.prepare(sql);
+      // Preserve all 64-bit INTEGER values; callers sanitize BigInt to strings
+      // for IPC, while raw export/keyset pagination keeps the exact value.
+      stmt.safeIntegers(true);
       if (stmt.reader) {
         stmt.raw(true);
         const rows = stmt.all();
         const columns = stmt.columns().map((c) => ({ name: c.name, type: c.type || '' }));
-        return { columns, rows };
+        return { columns, rows, rowLimitApplied: limited.applied };
       }
       const info = stmt.run();
       return {
-        affected: info.changes || 0,
+        affected: Number(info.changes || 0),
         insertId: info.lastInsertRowid !== undefined ? String(info.lastInsertRowid) : undefined,
       };
     }
@@ -64,9 +75,9 @@ class SQLiteAdapter extends BaseAdapter {
     try { cols = stmt.getColumnNames(); } catch (e) { cols = []; }
     if (cols.length) {
       const rows = [];
-      while (stmt.step()) rows.push(stmt.get());
+      while (stmt.step()) rows.push(stmt.get(null, { useBigInt: true }));
       stmt.free();
-      return { columns: cols.map((n) => ({ name: n, type: '' })), rows };
+      return { columns: cols.map((n) => ({ name: n, type: '' })), rows, rowLimitApplied: limited.applied };
     }
     stmt.free();
     this.db.run(sql);
@@ -76,7 +87,7 @@ class SQLiteAdapter extends BaseAdapter {
 
   async withSession(_db, fn) {
     try {
-      return await fn(async (sql) => this._execRaw(sql));
+      return await fn(async (sql, opts) => this._execRaw(sql, opts));
     } finally {
       this._flush();
     }
@@ -173,7 +184,7 @@ class SQLiteAdapter extends BaseAdapter {
       name: r[1], type: r[2] || '', nullable: !r[3], def: r[4],
       key: r[5] > 0 ? 'PRI' : '', extra: '', comment: '',
     }));
-    const pk = ti.rows.filter((r) => r[5] > 0).sort((a, b) => a[5] - b[5]).map((r) => r[1]);
+    const pk = ti.rows.filter((r) => r[5] > 0).sort((a, b) => Number(a[5]) - Number(b[5])).map((r) => r[1]);
     const indexes = [];
     try {
       const il = this._execRaw(`PRAGMA index_list(${this.quoteIdent(table)})`);

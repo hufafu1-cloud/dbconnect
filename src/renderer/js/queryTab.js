@@ -10,6 +10,12 @@ import { showMenu } from './contextmenu.js';
 const CM_MODES = { mysql: 'text/x-mysql', postgres: 'text/x-pgsql', mssql: 'text/x-mssql', sqlite: 'text/x-sqlite', clickhouse: 'text/x-mysql', oceanbase: 'text/x-mysql', oboracle: 'text/x-plsql' };
 let queryNo = 0;
 
+function formatQueryRowCount(result) {
+  return result.rowCountExact === false
+    ? `超过 ${fmtCount(result.rowCount)} 行`
+    : `${fmtCount(result.rowCount)} 行`;
+}
+
 const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET',
   'INSERT INTO', 'UPDATE', 'DELETE FROM', 'SET', 'VALUES', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN',
   'JOIN', 'ON', 'AS', 'AND', 'OR', 'NOT', 'NULL', 'IS NULL', 'IS NOT NULL', 'IN', 'LIKE', 'BETWEEN',
@@ -28,6 +34,7 @@ export function openQueryTab(target, initialSql, opts) {
   let savedPath = null;
   let savedText = initialSql || '';
   let running = false;
+  let activeRequest = null;
 
   const pane = tab.pane;
   pane.classList.add('query-pane');
@@ -77,11 +84,15 @@ export function openQueryTab(target, initialSql, opts) {
   const btnRun = mkBtn('run', '运行 (F5)', () => run(false), 'success');
   const btnRunSel = mkBtn('runSel', '运行选中', () => run(true));
   const btnStop = mkBtn('stop', '停止', async () => {
+    const request = activeRequest;
+    if (!request) return;
+    btnStop.disabled = true;
     try {
-      await window.api.db.cancel(connId);
+      await window.api.db.cancel(request.connId, request.requestId);
       toast.info('已发送取消请求');
     } catch (e) {
       toast.error(e.message);
+      if (running && activeRequest === request) btnStop.disabled = false;
     }
   });
   btnStop.disabled = true;
@@ -383,7 +394,7 @@ export function openQueryTab(target, initialSql, opts) {
       } else if (r.columns) {
         list.append(el('div', { class: 'msg-item' },
           el('span', { class: 'msg-sql' }, r.sql + '  →  '),
-          el('b', {}, `${fmtCount(r.rowCount)} 行`),
+          el('b', {}, formatQueryRowCount(r)),
           ` · ${r.ms} ms` + (r.truncated ? ' · 仅显示前面部分' : '')));
       } else {
         const note = r.message && r.message.includes('不返回影响行数');
@@ -404,10 +415,20 @@ export function openQueryTab(target, initialSql, opts) {
     let sql = selectionOnly ? cm.getSelection() : cm.getValue();
     if (selectionOnly && !sql.trim()) sql = cm.getValue();
     if (!sql.trim()) { toast.info('没有可执行的 SQL'); return; }
-    // 生产库危险 SQL 二次确认
-    const { guardSql } = await import('./danger.js');
-    if (!(await guardSql(connId, sql))) { statusbar.setLeft('已取消（生产库危险操作未确认）'); return; }
+    const queryConnId = connId;
+    const requestId = uid('query-request');
+    const queryPayload = { connId: queryConnId, db, sql, maxRows: Number(maxRowsSel.value), requestId };
+    let approvedQuery;
+    try {
+      const { authorizeOperation } = await import('./danger.js');
+      approvedQuery = await authorizeOperation('db.query', queryPayload);
+    } catch (e) {
+      toast.error('生产库安全检查失败：' + e.message);
+      return;
+    }
+    if (!approvedQuery) { statusbar.setLeft('已取消（生产库危险操作未确认）'); return; }
     running = true;
+    activeRequest = { connId: queryConnId, requestId };
     btnRun.disabled = true;
     btnRunSel.disabled = true;
     btnStop.disabled = false;
@@ -417,9 +438,7 @@ export function openQueryTab(target, initialSql, opts) {
     activatePage(waiting);
     const t0 = Date.now();
     try {
-      const results = await window.api.db.query(connId, {
-        db, sql, maxRows: Number(maxRowsSel.value),
-      });
+      const results = await window.api.db.query(queryConnId, approvedQuery);
       const totalMs = Date.now() - t0;
       clearResults();
       const hasError = results.some((r) => r.error);
@@ -431,16 +450,16 @@ export function openQueryTab(target, initialSql, opts) {
         const host = el('div', { style: { flex: '1', minHeight: '0', display: 'flex', flexDirection: 'column' } });
         const grid = new DataGrid(host, {
           editable: false,
-          copyContext: { table: 'result_table', connType: connTypeOf(connId) },
+          copyContext: { table: 'result_table', connType: connTypeOf(queryConnId) },
         });
         grid.setData({ columns: r.columns, rows: r.rows, pk: [] });
         const bar = el('div', { class: 'pane-info' },
-          el('span', {}, `${fmtCount(r.rowCount)} 行 · ${r.ms} ms` + (r.truncated ? `（仅显示前 ${r.rows.length} 行）` : '')),
+          el('span', {}, `${formatQueryRowCount(r)} · ${r.ms} ms` + (r.truncated ? `（仅显示前 ${r.rows.length} 行）` : '')),
           el('span', { class: 'spring' }),
           el('button', { class: 'pbtn', onClick: async (ev) => {
             const { showRowsExportMenu } = await import('./exportMenu.js');
             showRowsExportMenu(ev.clientX, ev.clientY, {
-              connId, columns: r.columns, rows: r.rows, defaultName: 'result',
+              connId: queryConnId, columns: r.columns, rows: r.rows, defaultName: 'result',
             });
           } }, iconEl('exportIcon'), '导出…'));
         const wrap = el('div', { style: { display: 'flex', flexDirection: 'column', flex: '1', minHeight: '0' } }, host, bar);
@@ -460,6 +479,7 @@ export function openQueryTab(target, initialSql, opts) {
       statusbar.setLeft('执行失败');
       emit('history-changed');
     } finally {
+      if (activeRequest && activeRequest.requestId === requestId) activeRequest = null;
       running = false;
       btnRun.disabled = false;
       btnRunSel.disabled = false;
@@ -468,7 +488,7 @@ export function openQueryTab(target, initialSql, opts) {
   }
 
   async function openFile() {
-    const p = await window.api.dlg.openFile({ title: '打开 SQL 文件', filters: [{ name: 'SQL 文件', extensions: ['sql', 'txt'] }] });
+    const p = await window.api.dlg.openEditableSqlFile();
     if (!p) return;
     const text = await window.api.file.read(p);
     cm.setValue(text);

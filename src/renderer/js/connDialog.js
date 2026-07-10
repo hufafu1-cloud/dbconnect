@@ -1,7 +1,8 @@
 // 新建 / 编辑连接对话框
 import { el } from './util.js';
 import { openModal, toast } from './toast.js';
-import { reloadConnections } from './state.js';
+import { state, emit, reloadConnections } from './state.js';
+import { authorizeOperation } from './danger.js';
 
 const TYPE_DEFAULTS = {
   mysql: { port: 3306, user: 'root', database: '' },
@@ -96,17 +97,11 @@ export function openConnDialog(existing, presetType, presetGroup) {
     if (t === 'sqlite') {
       f.file = field('text', cfg.file, '数据库文件路径（不存在则自动创建）');
       const browse = el('button', { class: 'btn', onClick: async () => {
-        const p = await window.api.dlg.openFile({
-          title: '选择 SQLite 数据库文件',
-          filters: [{ name: 'SQLite 数据库', extensions: ['db', 'sqlite', 'sqlite3', 'db3'] }, { name: '所有文件', extensions: ['*'] }],
-        });
+        const p = await window.api.dlg.openSQLiteFile();
         if (p) f.file.value = p;
       } }, '浏览…');
       const newBtn = el('button', { class: 'btn', onClick: async () => {
-        const p = await window.api.dlg.saveFile({
-          title: '新建 SQLite 数据库文件', defaultPath: 'new.db',
-          filters: [{ name: 'SQLite 数据库', extensions: ['db'] }],
-        });
+        const p = await window.api.dlg.saveSQLiteFile();
         if (p) f.file.value = p;
       } }, '新建…');
       add('数据库文件', el('div', { class: 'row-flex' }, f.file, browse, newBtn));
@@ -115,7 +110,9 @@ export function openConnDialog(existing, presetType, presetGroup) {
       f.host = field('text', cfg.host || 'localhost');
       f.port = field('number', cfg.port || d.port);
       f.user = field('text', cfg.user !== undefined && cfg.user !== '' ? cfg.user : d.user);
-      f.password = field('password', cfg.password);
+      f.password = field('password', '', cfg.hasPassword ? '已安全保存；留空保持不变' : '');
+      f.passwordDirty = false;
+      f.password.addEventListener('input', () => { f.passwordDirty = true; });
       const showPw = el('button', { class: 'btn', tabIndex: -1, onClick: () => {
         f.password.type = f.password.type === 'password' ? 'text' : 'password';
       } }, '👁');
@@ -170,13 +167,17 @@ export function openConnDialog(existing, presetType, presetGroup) {
         el('option', { value: 'password' }, '密码'),
         el('option', { value: 'key' }, '私钥文件'));
       f.sshAuth.value = ssh.authType || 'password';
-      f.sshPassword = field('password', ssh.password, 'SSH 登录密码');
+      f.sshPassword = field('password', '', ssh.hasPassword ? '已安全保存；留空保持不变' : 'SSH 登录密码');
+      f.sshPasswordDirty = false;
+      f.sshPassword.addEventListener('input', () => { f.sshPasswordDirty = true; });
       f.sshKeyFile = field('text', ssh.keyFile, '如 C:\\Users\\you\\.ssh\\id_rsa');
       const sshKeyBrowse = el('button', { class: 'btn', onClick: async () => {
-        const p = await window.api.dlg.openFile({ title: '选择 SSH 私钥文件', filters: [{ name: '所有文件', extensions: ['*'] }] });
+        const p = await window.api.dlg.openSshKeyFile();
         if (p) f.sshKeyFile.value = p;
       } }, '浏览…');
-      f.sshPassphrase = field('password', ssh.passphrase, '私钥密码（没有则留空）');
+      f.sshPassphrase = field('password', '', ssh.hasPassphrase ? '已安全保存；留空保持不变' : '私钥密码（没有则留空）');
+      f.sshPassphraseDirty = false;
+      f.sshPassphrase.addEventListener('input', () => { f.sshPassphraseDirty = true; });
 
       const sshRows = [];
       const addSsh = (label, node, group) => {
@@ -226,7 +227,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       out.host = f.host.value.trim() || 'localhost';
       out.port = Number(f.port.value) || TYPE_DEFAULTS[t].port;
       out.user = f.user.value.trim();
-      out.password = f.password.value;
+      if (!isEdit || f.passwordDirty || !cfg.hasPassword) out.password = f.password.value;
       out.database = f.database.value.trim();
       if (t === 'mssql') out.options = { encrypt: f.encrypt.checked, trustCert: f.trustCert.checked };
       if (t === 'clickhouse') out.options = { https: f.https.checked };
@@ -236,12 +237,16 @@ export function openConnDialog(existing, presetType, presetGroup) {
         port: Number(f.sshPort.value) || 22,
         user: f.sshUser.value.trim(),
         authType: f.sshAuth.value,
-        password: f.sshPassword.value,
         keyFile: f.sshKeyFile.value.trim(),
-        passphrase: f.sshPassphrase.value,
       };
+      if (!isEdit || f.sshPasswordDirty || !sshHas(cfg, 'hasPassword')) out.ssh.password = f.sshPassword.value;
+      if (!isEdit || f.sshPassphraseDirty || !sshHas(cfg, 'hasPassphrase')) out.ssh.passphrase = f.sshPassphrase.value;
     }
     return out;
+  }
+
+  function sshHas(c, key) {
+    return !!(c && c.ssh && c.ssh[key]);
   }
 
   function validate(c) {
@@ -264,6 +269,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
     el('label', {}, '颜色标记'), swatches,
     fieldsBox);
 
+  let saving = false;
   const m = openModal({
     title: isEdit ? `编辑连接 — ${cfg.name}` : '新建连接',
     body,
@@ -292,10 +298,27 @@ export function openConnDialog(existing, presetType, presetGroup) {
         onClick: () => {
           const c = collect();
           if (!validate(c)) return false;
-          window.api.conn.save(c).then(async () => {
-            await reloadConnections();
-            toast.success(isEdit ? '连接已更新' : '连接已创建');
-          }).catch((e) => toast.error(e.message));
+          if (saving) return false;
+          saving = true;
+          (async () => {
+            try {
+              const approved = await authorizeOperation('conn.save', c);
+              if (!approved) return;
+              const saved = await window.api.conn.save(approved);
+              if (saved.connectionClosed) {
+                state.open.delete(saved.id);
+                emit('conn-closed', { connId: saved.id });
+              }
+              await reloadConnections();
+              toast.success(isEdit ? '连接已更新' : '连接已创建');
+              m.close();
+            } catch (e) {
+              toast.error(e.message);
+            } finally {
+              saving = false;
+            }
+          })();
+          return false;
         },
       },
     ],

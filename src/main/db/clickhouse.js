@@ -2,9 +2,12 @@
 // 说明：ClickHouse 的“主键”是排序键，不保证唯一，按键 UPDATE/DELETE 不安全，
 // 因此数据网格设为只读；增删改请用 SQL（INSERT / ALTER TABLE … UPDATE/DELETE）。
 const { createClient } = require('@clickhouse/client');
+const crypto = require('crypto');
 const { BaseAdapter } = require('./base');
+const { statementKind, hasClickHouseFormatClause } = require('./sqlutil');
 
-const QUERY_RE = /^\s*(select|with|show|desc|describe|explain|exists)\b/i;
+const QUERY_KINDS = new Set(['SELECT', 'SHOW', 'DESC', 'DESCRIBE', 'EXPLAIN', 'EXISTS']);
+const CANCEL_KILL_WAIT_MS = 1500;
 
 class ClickHouseAdapter extends BaseAdapter {
   get dialect() { return 'clickhouse'; }
@@ -26,16 +29,22 @@ class ClickHouseAdapter extends BaseAdapter {
       const c = this.cfg;
       const opts = c.options || {};
       const proto = opts.https ? 'https' : 'http';
-      this.clients.set(key, createClient({
+      const clientOptions = {
         url: `${proto}://${c.host || 'localhost'}:${Number(c.port) || 8123}`,
         username: c.user || 'default',
         password: c.password || '',
         database: key,
         request_timeout: 120000,
         application: 'Datavia',
-        // 长查询经代理/负载均衡时保持连接活跃，同时消除客户端配置告警
-        clickhouse_settings: { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: '50000' },
-      }));
+      };
+      // 某些只读账号无权启用进度响应头；仅在连接配置明确要求时开启。
+      if (opts.progressHeaders === true) {
+        clientOptions.clickhouse_settings = {
+          send_progress_in_http_headers: 1,
+          http_headers_progress_interval_ms: '50000',
+        };
+      }
+      this.clients.set(key, createClient(clientOptions));
     }
     return this.clients.get(key);
   }
@@ -58,52 +67,107 @@ class ClickHouseAdapter extends BaseAdapter {
     return (db ? this.quoteIdent(db) + '.' : '') + this.quoteIdent(table);
   }
 
-  async withSession(db, fn) {
+  async withSession(db, fn, opts) {
     // HTTP 接口无会话状态，直接执行
-    return fn((sql) => this._run(db, sql));
+    const requestId = this._requestId(opts);
+    this._assertRequestActive(requestId);
+    return fn((sql, runOpts) => {
+      const effectiveOpts = requestId && !this._requestId(runOpts)
+        ? { ...(runOpts || {}), requestId }
+        : runOpts;
+      return this._run(db, sql, effectiveOpts);
+    });
   }
 
-  async _run(db, sql) {
+  async _run(db, sql, opts) {
+    const requestId = this._requestId(opts);
+    this._assertRequestActive(requestId);
+    const kind = statementKind(sql, 'clickhouse');
+    if (QUERY_KINDS.has(kind) && hasClickHouseFormatClause(sql)) {
+      throw new Error('查询页会统一使用 JSONCompact 接收结果，请移除 SQL 末尾的 FORMAT 子句');
+    }
+    const limited = this._prepareScriptQuery(sql, opts);
     const client = this._getClient(db);
-    if (!this._aborts) this._aborts = new Set();
     const ac = new AbortController();
-    this._aborts.add(ac);
+    const queryId = `datavia:${requestId || 'internal'}:${crypto.randomUUID()}`;
+    const handle = { controller: ac, client, queryId };
+    this._trackRequestHandle(handle, requestId);
     try {
-      if (QUERY_RE.test(sql)) {
+      this._assertRequestActive(requestId);
+      if (QUERY_KINDS.has(kind)) {
         const rs = await client.query({
-          query: sql,
+          query: limited.sql,
+          query_id: queryId,
           format: 'JSONCompact',
           abort_signal: ac.signal,
-          clickhouse_settings: { max_result_rows: '100000', result_overflow_mode: 'break' },
+          clickhouse_settings: {
+            // Ensure an aborted HTTP read also stops the server-side query on
+            // self-managed ClickHouse installations (Cloud commonly defaults it on).
+            cancel_http_readonly_queries_on_client_close: 1,
+            // JSONCompact otherwise emits Int64/UInt64 and Decimal as JSON
+            // numbers, which loses precision when JavaScript parses the payload.
+            output_format_json_quote_64bit_integers: 1,
+            output_format_json_quote_decimals: 1,
+            output_format_json_quote_denormals: 1,
+          },
         });
         const j = await rs.json();
         return {
           columns: (j.meta || []).map((m) => ({ name: m.name, type: m.type })),
           rows: j.data || [],
+          // Never use max_result_rows + break here: ClickHouse can apply it to
+          // subqueries and silently corrupt outer aggregates. Only outer SQL LIMIT
+          // rewrites are marked as server-limited.
+          rowLimitApplied: limited.applied,
         };
       }
-      await client.command({ query: sql, abort_signal: ac.signal });
+      await client.command({
+        query: limited.sql,
+        query_id: queryId,
+        abort_signal: ac.signal,
+      });
       return { affected: 0, message: '执行成功（ClickHouse 不返回影响行数）' };
     } finally {
-      this._aborts.delete(ac);
+      this._untrackRequestHandle(handle, requestId);
     }
   }
 
   /** 中止正在执行的 HTTP 请求 */
-  async cancel() {
-    if (!this._aborts) return;
-    for (const ac of [...this._aborts]) {
-      try { ac.abort(); } catch (e) { /* ignore */ }
+  async cancel(requestId) {
+    this._markRequestCancelled(requestId);
+    const handles = this._requestHandlesFor(requestId);
+    for (const handle of handles) {
+      try { handle.controller.abort(); } catch (e) { /* ignore */ }
     }
+    // Abort closes the client side immediately. Explicit KILL also covers
+    // self-managed servers and non-read-only commands when the account permits it.
+    const kills = Promise.allSettled(handles.map(async (handle) => {
+      const killAbort = new AbortController();
+      const killTimer = setTimeout(() => killAbort.abort(), CANCEL_KILL_WAIT_MS);
+      try {
+        await handle.client.command({
+          query: `KILL QUERY WHERE query_id = ${this.literal(handle.queryId)} SYNC`,
+          query_id: `datavia-cancel:${crypto.randomUUID()}`,
+          abort_signal: killAbort.signal,
+        });
+      } catch (e) { /* query may already be gone or KILL permission may be absent */ }
+      finally { clearTimeout(killTimer); }
+    }));
+    // The user-visible stop action is complete once the HTTP reads are aborted.
+    // KILL is best effort and must not inherit the client's 120s request timeout.
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, CANCEL_KILL_WAIT_MS);
+      kills.finally(() => { clearTimeout(timer); resolve(); });
+    });
   }
 
   get objectCaps() {
     return { routines: true, triggers: false, events: false, sequences: false, users: true, processes: true };
   }
 
-  /** ClickHouse 无二进制字面量类型：按 UTF-8/base64 字符串处理（结合 translateModel 的 String 列） */
+  /** ClickHouse String/FixedString 可保存任意字节；unhex 可无损重建原始内容。 */
   blobLiteral(buf) {
-    return this.literal(buf.toString('base64'));
+    return `unhex('${buf.toString('hex')}')`;
   }
 
   async listProcesses() {

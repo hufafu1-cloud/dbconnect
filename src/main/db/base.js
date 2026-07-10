@@ -1,10 +1,15 @@
 // 适配器基类：定义统一接口与通用实现（分页查询、脚本执行、应用编辑等）
-const { splitSql, sanitizeRows, sanitizeValue, excerpt } = require('./sqlutil');
+const { splitSql, sanitizeRows, sanitizeValue, excerpt, limitQueryRows } = require('./sqlutil');
 
 class BaseAdapter {
   constructor(cfg) {
     this.cfg = cfg;
     this.serverVersion = '';
+    // 查询页请求的生命周期与活动驱动句柄。requestId 由 Renderer 每次运行生成，
+    // 用于把“停止”精确路由到对应会话；无 requestId 时仍可兼容取消全部活动句柄。
+    this._requestStates = new Map();
+    this._activeRequestHandles = new Set();
+    this._requestHandles = new Map();
   }
 
   get dialect() { return 'sql'; }
@@ -18,7 +23,7 @@ class BaseAdapter {
   // async listDatabases() -> [name]
   // async listObjects(db, schema) -> {tables:[{name,schema,rows,comment,engine}], views:[{name,schema}]}
   // async tableInfo(db, schema, table) -> {columns, indexes, pk, ddl}
-  // async withSession(db, fn(exec))   exec(sql) -> NormResult
+  // async withSession(db, fn(exec), opts)   exec(sql) -> NormResult
   // ---- 可选 ----
   async listSchemas(_db) { return null; }
 
@@ -109,7 +114,7 @@ class BaseAdapter {
   }
 
   /** 取消正在执行的查询；默认不支持 */
-  async cancel() { throw new Error('该数据库类型不支持取消查询'); }
+  async cancel(_requestId) { throw new Error('该数据库类型不支持取消查询'); }
 
   quoteIdent(name) { return '"' + String(name).replace(/"/g, '""') + '"'; }
 
@@ -136,9 +141,127 @@ class BaseAdapter {
     return this.withSession(db, (run) => run(sql));
   }
 
+  _requestId(value) {
+    const raw = value && typeof value === 'object' ? value.requestId : value;
+    return raw === undefined || raw === null || raw === '' ? null : String(raw);
+  }
+
+  /** 在连接池取会话前登记请求，使排队中的请求也能收到取消信号。 */
+  _beginRequest(opts) {
+    const requestId = this._requestId(opts);
+    if (!requestId) return null;
+    let state = this._requestStates.get(requestId);
+    if (!state) {
+      state = { cancelled: false, refs: 0, resolveCancel: null };
+      state.cancelPromise = new Promise((resolve) => { state.resolveCancel = resolve; });
+    }
+    state.refs++;
+    this._requestStates.set(requestId, state);
+    return requestId;
+  }
+
+  _endRequest(requestId) {
+    if (!requestId) return;
+    const state = this._requestStates.get(requestId);
+    if (!state || state.refs <= 1) this._requestStates.delete(requestId);
+    else state.refs--;
+  }
+
+  /** 标记单个请求已取消；未传 requestId 时标记所有运行中的查询请求。 */
+  _markRequestCancelled(requestId) {
+    const id = this._requestId(requestId);
+    if (id) {
+      const state = this._requestStates.get(id);
+      if (state && !state.cancelled) {
+        state.cancelled = true;
+        state.resolveCancel();
+      }
+      return id;
+    }
+    for (const state of this._requestStates.values()) {
+      if (!state.cancelled) {
+        state.cancelled = true;
+        state.resolveCancel();
+      }
+    }
+    return null;
+  }
+
+  _assertRequestActive(requestId) {
+    const id = this._requestId(requestId);
+    const state = id && this._requestStates.get(id);
+    if (!state || !state.cancelled) return;
+    const err = new Error('查询已取消');
+    err.code = 'QUERY_CANCELED';
+    throw err;
+  }
+
+  /**
+   * 可取消的连接池获取。取消先赢时立即让当前请求返回；晚到的连接会自动释放，
+   * 不会泄漏或继续执行 SQL。
+   */
+  async _acquireForRequest(acquire, releaseLate, requestId) {
+    const id = this._requestId(requestId);
+    const state = id && this._requestStates.get(id);
+    if (!state) return acquire();
+    this._assertRequestActive(id);
+    const pending = Promise.resolve().then(acquire);
+    const winner = await Promise.race([
+      pending.then((value) => ({ value })),
+      state.cancelPromise.then(() => ({ cancelled: true })),
+    ]);
+    if (!winner.cancelled) return winner.value;
+    pending.then((value) => releaseLate(value)).catch(() => {});
+    this._assertRequestActive(id);
+    throw new Error('查询已取消');
+  }
+
+  /** 同时维护全部活动句柄和 requestId 的精确索引。 */
+  _trackRequestHandle(handle, requestId) {
+    if (handle === undefined || handle === null) return handle;
+    this._activeRequestHandles.add(handle);
+    const id = this._requestId(requestId);
+    if (id) {
+      if (!this._requestHandles.has(id)) this._requestHandles.set(id, new Set());
+      this._requestHandles.get(id).add(handle);
+    }
+    return handle;
+  }
+
+  _untrackRequestHandle(handle, requestId) {
+    if (handle === undefined || handle === null) return;
+    this._activeRequestHandles.delete(handle);
+    const id = this._requestId(requestId);
+    if (!id) return;
+    const handles = this._requestHandles.get(id);
+    if (!handles) return;
+    handles.delete(handle);
+    if (!handles.size) this._requestHandles.delete(id);
+  }
+
+  _requestHandlesFor(requestId) {
+    const id = this._requestId(requestId);
+    return id
+      ? [...(this._requestHandles.get(id) || [])]
+      : [...this._activeRequestHandles];
+  }
+
+  /** 规范查询页的行数上限；给 maxRows + 1 探针预留一个安全整数。 */
+  _scriptMaxRows(opts) {
+    const n = Number(opts && opts.maxRows);
+    if (!Number.isFinite(n) || n <= 0) return 2000;
+    return Math.min(Math.floor(n), Number.MAX_SAFE_INTEGER - 1);
+  }
+
+  /** 仅 runScript 传入 maxRows 时才改写，内部元数据查询和导出不受影响。 */
+  _prepareScriptQuery(sql, opts) {
+    if (!opts || opts.maxRows === undefined) return { sql, applied: false };
+    return limitQueryRows(sql, this.dialect, opts.maxRows);
+  }
+
   /** 执行 SQL 脚本（多语句），返回每条语句的结果 */
   async runScript(db, sql, opts) {
-    const maxRows = (opts && opts.maxRows) || 2000;
+    const maxRows = this._scriptMaxRows(opts);
     // 存储过程/触发器等过程体内含分号：整段作为单条语句执行（MySQL 系 / Oracle 方言）
     const ROUTINE_START = {
       mysql: /^\s*CREATE\s+(DEFINER\s*=\s*\S+\s+)?(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i,
@@ -150,34 +273,45 @@ class BaseAdapter {
       : splitSql(sql, this.dialect);
     if (!stmts.length) return [];
     const out = [];
-    await this.withSession(db, async (run) => {
-      for (const s of stmts) {
-        const t0 = Date.now();
-        try {
-          const r = await run(s);
-          const results = r && r.multi ? r.multi : [r];
-          for (const one of results) {
-            out.push(this._normalizeResult(s, one, maxRows, Date.now() - t0));
+    const requestId = this._beginRequest(opts);
+    try {
+      await this.withSession(db, async (run) => {
+        for (const s of stmts) {
+          const t0 = Date.now();
+          try {
+            this._assertRequestActive(requestId);
+            // 执行层据此对安全的 SELECT/CTE 下推 maxRows + 1 探针，避免先完整物化再 slice。
+            const r = await run(s, { maxRows, requestId });
+            const results = r && r.multi ? r.multi : [r];
+            for (const one of results) {
+              out.push(this._normalizeResult(s, one, maxRows, Date.now() - t0));
+            }
+          } catch (err) {
+            out.push({ sql: excerpt(s), ms: Date.now() - t0, error: this._errMsg(err) });
+            return; // 出错即停止
           }
-        } catch (err) {
-          out.push({ sql: excerpt(s), ms: Date.now() - t0, error: this._errMsg(err) });
-          return; // 出错即停止
         }
-      }
-    });
-    return out;
+      }, { requestId });
+      return out;
+    } finally {
+      this._endRequest(requestId);
+    }
   }
 
   _normalizeResult(s, r, maxRows, ms) {
     if (r && r.columns) {
       const total = r.rows.length;
-      const rows = total > maxRows ? r.rows.slice(0, maxRows) : r.rows;
+      const truncated = total > maxRows;
+      const rows = truncated ? r.rows.slice(0, maxRows) : r.rows;
+      // 下推后第 maxRows+1 行只是“仍有更多”的探针，真实总数未知；未下推时驱动已完整返回，total 精确。
+      const rowCountExact = !(r.rowLimitApplied && truncated);
       return {
         sql: excerpt(s), ms,
         columns: r.columns,
         rows: sanitizeRows(rows),
-        rowCount: total,
-        truncated: total > maxRows,
+        rowCount: rowCountExact ? total : rows.length,
+        rowCountExact,
+        truncated,
       };
     }
     return {
@@ -197,6 +331,14 @@ class BaseAdapter {
   /** 分页读取表数据 */
   async tableData(db, args) {
     const { schema, table, page = 1, pageSize = 500, where = '', orderBy = '', orderDir = 'asc', skipCount = false } = args;
+    const safePage = Number(page);
+    const safePageSize = Number(pageSize);
+    if (!Number.isSafeInteger(safePage) || safePage < 1) throw new Error('页码必须是正整数');
+    if (!Number.isSafeInteger(safePageSize) || safePageSize < 1 || safePageSize > 10000) {
+      throw new Error('每页行数必须是 1 到 10000 之间的整数');
+    }
+    const offset = (safePage - 1) * safePageSize;
+    if (!Number.isSafeInteger(offset)) throw new Error('分页偏移量过大');
     const info = await this.tableInfo(db, schema, table);
     const qtable = this.qualify(db, schema, table);
     const whereClause = where && where.trim() ? ' WHERE ' + where.trim() : '';
@@ -209,7 +351,7 @@ class BaseAdapter {
       total = Number(cr.rows[0][0]);
     }
     const t0 = Date.now();
-    const sql = this.pageSql(`SELECT * FROM ${qtable}${whereClause}`, orderClause, pageSize, (page - 1) * pageSize);
+    const sql = this.pageSql(`SELECT * FROM ${qtable}${whereClause}`, orderClause, safePageSize, offset);
     const r = await this.exec(db, sql);
     const typeByName = {};
     for (const c of info.columns) typeByName[c.name] = c.type;
@@ -220,8 +362,8 @@ class BaseAdapter {
       pk: info.pk,
       readonlyReason: this.readonlyReason,
       ms: Date.now() - t0,
-      page,
-      pageSize,
+      page: safePage,
+      pageSize: safePageSize,
     };
   }
 

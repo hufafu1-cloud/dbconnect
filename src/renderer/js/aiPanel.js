@@ -65,8 +65,8 @@ function createPanel() {
   async function refreshModelBadge() {
     try {
       const cfg = await window.api.ai.getConfig();
-      modelBadge.textContent = cfg.apiKey ? (cfg.model || '已配置') : '未配置 ▸ 点此设置';
-      modelBadge.classList.toggle('unset', !cfg.apiKey);
+      modelBadge.textContent = cfg.hasApiKey ? (cfg.model || '已配置') : '未配置 ▸ 点此设置';
+      modelBadge.classList.toggle('unset', !cfg.hasApiKey);
     } catch (e) { modelBadge.textContent = '未配置'; }
   }
   modelBadge.addEventListener('click', () => openAiConfigDialog(() => refreshModelBadge()));
@@ -186,7 +186,7 @@ function createPanel() {
   async function send(sendContent, displayText) {
     if (busy) return;
     const cfg = await window.api.ai.getConfig().catch(() => null);
-    if (!cfg || !cfg.apiKey) {
+    if (!cfg || !cfg.hasApiKey) {
       toast.info('请先配置 AI（API Key）');
       openAiConfigDialog(() => refreshModelBadge());
       return;

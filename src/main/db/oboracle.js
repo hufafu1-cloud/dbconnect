@@ -8,7 +8,7 @@
 // 用户名格式：直连为 用户@租户（如 SYS@oracle_tenant），经 OBProxy 为 用户@租户#集群。
 const mysql = require('mysql2/promise');
 const { BaseAdapter } = require('./base');
-const { synthesizeDDL } = require('./sqlutil');
+const { synthesizeDDL, limitQueryRows } = require('./sqlutil');
 
 class OBOracleAdapter extends BaseAdapter {
   get dialect() { return 'oracle'; }
@@ -35,6 +35,12 @@ class OBOracleAdapter extends BaseAdapter {
       const [rows] = await this.pool.query('SELECT 1 AS "V" FROM dual'); // 至少验证 Oracle 方言可用
       this.serverVersion = 'OceanBase (Oracle 模式)';
     }
+    try {
+      await this.pool.query('SELECT 1 AS "V" FROM dual FETCH FIRST 1 ROWS ONLY');
+      this.supportsFetchFirst = true;
+    } catch (e) {
+      this.supportsFetchFirst = false;
+    }
   }
 
   async close() {
@@ -54,30 +60,36 @@ class OBOracleAdapter extends BaseAdapter {
     return `SELECT * FROM (SELECT t__.*, ROWNUM AS "RN__" FROM (${inner}) t__ WHERE ROWNUM <= ${offset + limit}) WHERE "RN__" > ${offset}`;
   }
 
-  async withSession(db, fn) {
-    const conn = await this.pool.getConnection();
-    const threadId = (conn.connection && conn.connection.threadId) || conn.threadId;
-    if (!this._activeThreads) this._activeThreads = new Set();
-    if (threadId) this._activeThreads.add(threadId);
+  _prepareScriptQuery(sql, opts) {
+    if (!opts || opts.maxRows === undefined || !this.supportsFetchFirst) return { sql, applied: false };
+    return limitQueryRows(sql, 'oracle12', opts.maxRows);
+  }
+
+  async withSession(db, fn, opts) {
+    const requestId = this._requestId(opts);
+    this._assertRequestActive(requestId);
+    const conn = await this._acquireForRequest(
+      () => this.pool.getConnection(),
+      (late) => late.release(),
+      requestId,
+    );
+    this._trackRequestHandle(conn, requestId);
     try {
+      this._assertRequestActive(requestId);
       if (db) await conn.query(`ALTER SESSION SET CURRENT_SCHEMA = ${this.quoteIdent(db)}`);
-      return await fn((sql) => this._run(conn, sql));
+      this._assertRequestActive(requestId);
+      return await fn((sql, opts) => this._run(conn, sql, opts));
     } finally {
-      if (threadId) this._activeThreads.delete(threadId);
+      this._untrackRequestHandle(conn, requestId);
       conn.release();
     }
   }
 
-  /** 尽力而为：OB 兼容 KILL QUERY 时可中断 */
-  async cancel() {
-    if (!this._activeThreads || !this._activeThreads.size) return;
-    const killer = await this.pool.getConnection();
-    try {
-      for (const id of [...this._activeThreads]) {
-        await killer.query('KILL QUERY ' + Number(id)).catch(() => {});
-      }
-    } finally {
-      killer.release();
+  /** 销毁目标会话本身，避免兼容层线程 ID 被连接池复用后误杀后续查询。 */
+  async cancel(requestId) {
+    this._markRequestCancelled(requestId);
+    for (const conn of this._requestHandlesFor(requestId)) {
+      try { conn.destroy(); } catch (e) { /* 会话可能刚好结束 */ }
     }
   }
 
@@ -181,19 +193,20 @@ class OBOracleAdapter extends BaseAdapter {
     return [...map.values()];
   }
 
-  async _run(conn, sql) {
-    const [rows, fields] = await conn.query({ sql, rowsAsArray: true });
+  async _run(conn, sql, opts) {
+    const limited = this._prepareScriptQuery(sql, opts);
+    const [rows, fields] = await conn.query({ sql: limited.sql, rowsAsArray: true });
     if (fields && Array.isArray(fields[0])) {
       const multi = [];
       for (let i = 0; i < rows.length; i++) {
         const f = fields[i];
-        if (f) multi.push({ columns: f.map((x) => ({ name: x.name, type: '' })), rows: rows[i] });
+        if (f) multi.push({ columns: f.map((x) => ({ name: x.name, type: '' })), rows: rows[i], rowLimitApplied: limited.applied });
         else if (rows[i] && typeof rows[i] === 'object' && 'affectedRows' in rows[i]) multi.push({ affected: rows[i].affectedRows || 0 });
       }
       return { multi };
     }
     if (fields) {
-      return { columns: fields.map((f) => ({ name: f.name, type: '' })), rows };
+      return { columns: fields.map((f) => ({ name: f.name, type: '' })), rows, rowLimitApplied: limited.applied };
     }
     return { affected: (rows && rows.affectedRows) || 0, message: (rows && rows.info) || '' };
   }
