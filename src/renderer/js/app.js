@@ -188,6 +188,7 @@ export async function runMenuAction(id) {
   const needConn = () => { if (!t) toast.info('请先打开一个连接'); return !!t; };
   switch (id) {
       case 'new-conn': openConnDialog(); break;
+      case 'import-navicat': (await import('./navicatImport.js')).openNavicatImport(); break;
       case 'new-query': newQueryFromToolbar(); break;
       case 'search': {
         if (!needConn()) break;

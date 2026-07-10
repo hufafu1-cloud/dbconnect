@@ -27,10 +27,12 @@
     "@clickhouse/client": "^1.20.0",
     "better-sqlite3": "^12.2.0",
     "codemirror": "^5.65.16",
+    "egoroof-blowfish": "^4.0.2",
     "exceljs": "^4.4.0",
     "mssql": "^11.0.1",
     "mysql2": "^3.14.1",
     "pg": "^8.16.0",
+    "sax": "^1.6.0",
     "sql-formatter": "^15.8.1",
     "sql.js": "^1.13.0",
     "ssh2": "^1.17.0"

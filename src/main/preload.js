@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   conn: {
     list: () => inv('conn:list'),
+    previewNavicat: (file) => inv('conn:previewNavicat', file),
+    importNavicat: (importId, selected) => inv('conn:importNavicat', { importId, selected }),
     save: (c) => inv('conn:save', c),
     remove: (id) => inv('conn:delete', id),
     test: (cfg) => inv('conn:test', cfg),
@@ -96,6 +98,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   dlg: {
     openFile: (opts) => inv('dlg:openFile', opts),
+    openNavicatConnections: () => inv('dlg:openNavicatConnections'),
     openEditableSqlFile: () => inv('dlg:openEditableSqlFile'),
     openSQLiteFile: () => inv('dlg:openSQLiteFile'),
     saveSQLiteFile: () => inv('dlg:saveSQLiteFile'),

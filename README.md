@@ -15,6 +15,10 @@
 
 ### 连接管理
 - 新建 / 编辑 / 删除连接，支持「测试连接」
+- **导入 Navicat 连接**：在「文件 → 导入 Navicat 连接…」选择 Navicat 导出的 `.ncx`，预览后可一次导入
+  MySQL/MariaDB、PostgreSQL、SQL Server、SQLite、ClickHouse、OceanBase 连接；重复项自动跳过，重名项自动改名。
+  数据库密码、SSH 密码及私钥口令会自动兼容 NCX V2 AES 与 V1 Blowfish 格式；明文仅在主进程短时存在，
+  导入时立即使用 Electron `safeStorage` / Windows DPAPI 加密保存，不会显示在预览界面。
 - **SSH 隧道**：所有网络型数据库均可经跳板机连接（密码 / 私钥文件认证，支持私钥口令），
   数据库主机/端口填写跳板机视角的内网地址；测试连接同样走隧道
 - SSH 首次连接会在主进程原生对话框中显示主机密钥 SHA256 指纹，须人工核验后才开始认证；

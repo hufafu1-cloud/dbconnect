@@ -13,6 +13,7 @@ export function buildMenuBar(runAction) {
   const MENUS = [
     ['文件', () => [
       { label: '新建连接…', hint: 'Ctrl+N', onClick: () => runAction('new-conn') },
+      { label: '导入 Navicat 连接…', onClick: () => runAction('import-navicat') },
       { label: '新建查询', hint: 'Ctrl+Q', onClick: () => runAction('new-query') },
       { sep: true },
       { label: '运行 SQL 文件…', onClick: () => runAction('run-sql-file') },

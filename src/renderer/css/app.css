@@ -611,6 +611,29 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   padding: 12px 16px; border-top: 1px solid var(--border-light);
 }
 .modal-foot .spring { flex: 1; }
+
+/* Navicat NCX connection import preview */
+.ncx-import { min-width: 0; }
+.ncx-summary { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 10px; color: var(--text-muted); }
+.ncx-summary strong { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ncx-notice { margin-bottom: 12px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--orange) 38%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--orange) 7%, var(--panel)); color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.ncx-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12.5px; }
+.ncx-table th, .ncx-table td { padding: 7px 8px; border: 1px solid var(--border-light); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ncx-table th { background: var(--th-bg); font-weight: 600; }
+.ncx-table th:nth-child(2) { width: 18%; }
+.ncx-table th:nth-child(3) { width: 17%; }
+.ncx-table th:nth-child(4) { width: 28%; }
+.ncx-table th:nth-child(5) { width: 13%; }
+.ncx-table th:nth-child(6) { width: 10%; }
+.ncx-table .ncx-check { width: 34px; text-align: center; }
+.ncx-table tr.duplicate { color: var(--text-muted); background: var(--hover-row); }
+.ncx-status { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; }
+.ncx-status.ready { color: var(--green); background: color-mix(in srgb, var(--green) 11%, transparent); }
+.ncx-status.skipped { color: var(--text-muted); background: var(--hover); }
+.ncx-selection { display: flex; justify-content: flex-end; margin-top: 8px; color: var(--text-muted); font-size: 12px; }
+.ncx-skipped { margin-top: 10px; color: var(--text-muted); font-size: 12px; }
+.ncx-skipped summary { cursor: pointer; }
+.ncx-skipped ul { margin: 7px 0 0; padding-left: 22px; line-height: 1.7; }
 .btn {
   padding: 7px 16px; border-radius: 6px; font-size: 13px; cursor: default;
   border: 1px solid var(--border); background: var(--panel); color: var(--text);

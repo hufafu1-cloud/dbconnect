@@ -2,6 +2,8 @@
 // 所有处理器统一返回 {ok:true, data} / {ok:false, error}，避免 invoke 报错信息被包一层前缀
 const { ipcMain, dialog, app } = require('electron');
 const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const store = require('./store');
 const dbm = require('./db');
 const ddl = require('./db/ddl');
@@ -11,8 +13,47 @@ const history = require('./history');
 const safety = require('./safety');
 const fileAccess = require('./fileAccess');
 const sshHostKeys = require('./sshHostKeys');
+const { parseNcxBuffer, targetLabel, MAX_FILE_BYTES } = require('./navicatNcx');
 const connectionLocks = new Map();
+const navicatImportSessions = new Map();
+const NAVICAT_SESSION_TTL = 10 * 60 * 1000;
+const MAX_NAVICAT_SESSIONS = 20;
 const own = (obj, key) => !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+
+function purgeNavicatImportSessions() {
+  const now = Date.now();
+  for (const [id, session] of navicatImportSessions) {
+    if (session.expiresAt <= now) navicatImportSessions.delete(id);
+  }
+}
+
+function createNavicatImportSession(ownerId, configs) {
+  purgeNavicatImportSessions();
+  while (navicatImportSessions.size >= MAX_NAVICAT_SESSIONS) {
+    navicatImportSessions.delete(navicatImportSessions.keys().next().value);
+  }
+  const id = crypto.randomUUID();
+  navicatImportSessions.set(id, {
+    ownerId,
+    configs,
+    expiresAt: Date.now() + NAVICAT_SESSION_TTL,
+  });
+  return id;
+}
+
+function selectedNavicatConfigs(event, payload) {
+  purgeNavicatImportSessions();
+  const importId = payload && typeof payload.importId === 'string' ? payload.importId : '';
+  const session = navicatImportSessions.get(importId);
+  if (!session || session.ownerId !== event.sender.id) throw new Error('Navicat 导入预览已失效，请重新选择 NCX 文件');
+  if (!Array.isArray(payload.selected)) throw new Error('请选择要导入的连接');
+  const indices = [...new Set(payload.selected)];
+  if (indices.length > session.configs.length
+      || indices.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= session.configs.length)) {
+    throw new Error('Navicat 导入选择无效');
+  }
+  return { importId, session, configs: indices.map((index) => session.configs[index]) };
+}
 
 function withConnectionLock(id, task) {
   if (!id) return task();
@@ -142,6 +183,72 @@ function register(getWin) {
 
   // ---- 连接配置 ----
   h('conn:list', () => store.listPublic());
+  ipcMain.handle('conn:previewNavicat', async (event, file) => {
+    try {
+      fileAccess.assertPurposeAllowed(file, 'navicat-ncx');
+      if (path.extname(file).toLowerCase() !== '.ncx') throw new Error('请选择 Navicat 导出的 .ncx 文件');
+      const stat = await fs.promises.stat(file);
+      if (!stat.isFile()) throw new Error('所选 NCX 路径不是文件');
+      if (stat.size > MAX_FILE_BYTES) throw new Error('NCX 文件超过 20 MB，已拒绝导入');
+      const parsed = parseNcxBuffer(await fs.promises.readFile(file));
+      const duplicates = store.previewImportConnections(parsed.connections);
+      const importId = createNavicatImportSession(event.sender.id, parsed.connections);
+      return {
+        ok: true,
+        data: {
+          importId,
+          fileName: path.basename(file),
+          connections: parsed.connections.map((connection, index) => ({
+            index,
+            type: connection.type,
+            name: connection.name,
+            target: targetLabel(connection),
+            group: connection.group || '',
+            hasSsh: !!(connection.ssh && connection.ssh.enabled),
+            duplicate: !!duplicates[index].duplicate,
+            credentialUpdate: !!duplicates[index].credentialUpdate,
+          })),
+          skipped: parsed.skipped,
+          warnings: parsed.warnings,
+          passwordImported: parsed.passwordImported,
+          passwordFailed: parsed.passwordFailed,
+        },
+      };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
+  ipcMain.handle('conn:importNavicat', async (event, payload) => {
+    try {
+      const selected = selectedNavicatConfigs(event, payload);
+      if (!selected.configs.length) throw new Error('请至少选择一个可导入连接');
+      const paths = [];
+      for (const config of selected.configs) {
+        if (config.type === 'sqlite' && config.file) paths.push(`SQLite：${config.file}`);
+        if (config.ssh && config.ssh.enabled && config.ssh.keyFile) paths.push(`SSH 私钥：${config.ssh.keyFile}`);
+      }
+      if (paths.length) {
+        const shown = paths.slice(0, 6);
+        const extra = paths.length > shown.length ? `\n另有 ${paths.length - shown.length} 个路径未展开。` : '';
+        const confirmed = await dialog.showMessageBox(getWin(), {
+          type: 'warning',
+          title: '确认导入本地文件路径',
+          message: '部分 Navicat 连接引用本地文件，是否允许保存这些路径？',
+          detail: `${shown.join('\n')}${extra}\n\n导入时不会复制或读取 SSH 私钥；以后使用该连接时才会读取。`,
+          buttons: ['取消', '允许并导入'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (confirmed.response !== 1) return { ok: true, data: { cancelled: true } };
+      }
+      const result = store.importConnections(selected.configs);
+      navicatImportSessions.delete(selected.importId);
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  });
   ipcMain.handle('conn:save', async (event, conn) => {
     try {
       const data = await withConnectionLock(conn && conn.id, async () => {
@@ -416,6 +523,14 @@ function register(getWin) {
     if (r.canceled || !r.filePaths.length) return null;
     if (opts && opts.access === 'path') return r.filePaths[0];
     return fileAccess.grant(r.filePaths[0], 'r');
+  });
+  h('dlg:openNavicatConnections', async () => {
+    const r = await dialog.showOpenDialog(getWin(), {
+      title: '选择 Navicat 连接导出文件',
+      filters: [{ name: 'Navicat 连接文件', extensions: ['ncx'] }],
+      properties: ['openFile'],
+    });
+    return r.canceled || !r.filePaths.length ? null : fileAccess.grantPurpose(r.filePaths[0], 'navicat-ncx');
   });
   h('dlg:openEditableSqlFile', async () => {
     const r = await dialog.showOpenDialog(getWin(), {

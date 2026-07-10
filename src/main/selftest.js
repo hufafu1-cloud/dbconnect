@@ -9,6 +9,8 @@ const {
 const { SQLiteAdapter } = require('./db/sqlite');
 const { MySQLAdapter } = require('./db/mysql');
 const { ClickHouseAdapter } = require('./db/clickhouse');
+const { parseNcx, parseNcxBuffer } = require('./navicatNcx');
+const { decryptNavicatSecret } = require('./navicatCrypto');
 
 let pass = 0, fail = 0;
 function check(name, cond, detail) {
@@ -17,6 +19,85 @@ function check(name, cond, detail) {
 }
 
 async function runSelfTest() {
+  const navicatV1 = decryptNavicatSecret('0EA71F51DD37BFB60CCBA219BE3A');
+  check('navicat decrypts V1 Blowfish passwords', navicatV1.plaintext === 'This is a test'
+    && navicatV1.version === 'v1', navicatV1);
+  const navicatV2 = decryptNavicatSecret('B75D320B6211468D63EB3B67C9E85933');
+  check('navicat decrypts V2 AES passwords', navicatV2.plaintext === 'This is a test'
+    && navicatV2.version === 'v2', navicatV2);
+  check('navicat rejects invalid encrypted passwords', (() => {
+    try { decryptNavicatSecret('not-a-navicat-cipher'); return false; }
+    catch (error) { return /Navicat|密码|密文/.test(error.message); }
+  })());
+  // ---- Navicat NCX import ----
+  const ncxBasic = parseNcx(`<?xml version="1.0" encoding="UTF-8"?>
+    <Connections>
+      <Connection ConnectionName="Local MySQL" ConnType="MYSQL" Host="127.0.0.1"
+        Port="3307" UserName="root" Database="app" Password="B75D320B6211468D63EB3B67C9E85933" />
+      <Connection Name="Unsupported" Type="ORACLE" Host="db.example" />
+    </Connections>`);
+  check('ncx maps a MySQL connection', ncxBasic.connections.length === 1
+    && ncxBasic.connections[0].type === 'mysql'
+    && ncxBasic.connections[0].name === 'Local MySQL'
+    && ncxBasic.connections[0].host === '127.0.0.1'
+    && ncxBasic.connections[0].port === 3307
+    && ncxBasic.connections[0].user === 'root'
+    && ncxBasic.connections[0].database === 'app', ncxBasic);
+  check('ncx automatically decrypts database passwords', ncxBasic.connections[0].password === 'This is a test'
+    && ncxBasic.passwordImported === 1, ncxBasic);
+  check('ncx reports unsupported connection types', ncxBasic.skipped.length === 1
+    && /ORACLE/i.test(ncxBasic.skipped[0].type), ncxBasic.skipped);
+
+  const ncxGrouped = parseNcx(`<NavicatConnections>
+    <MySQL><Group Name="Production"><Connection Name="Primary" Host="db.internal" UserName="deploy">
+      <SSH Enabled="true" Host="jump.internal" Port="2222" UserName="ops"
+        Authentication="publickey" PrivateKeyFile="C:\\keys\\ops.pem"
+        Password="B75D320B6211468D63EB3B67C9E85933" Passphrase="0EA71F51DD37BFB60CCBA219BE3A" />
+    </Connection></Group></MySQL>
+    <SQLite><Connection Name="Local Cache" DatabaseFile="C:\\data\\cache.db" /></SQLite>
+  </NavicatConnections>`);
+  const ncxSsh = ncxGrouped.connections.find((item) => item.name === 'Primary');
+  const ncxSqlite = ncxGrouped.connections.find((item) => item.type === 'sqlite');
+  check('ncx inherits type and group from ancestors', ncxSsh && ncxSsh.type === 'mysql'
+    && ncxSsh.group === 'Production', ncxSsh);
+  check('ncx decrypts SSH password and passphrase', ncxSsh && ncxSsh.ssh && ncxSsh.ssh.enabled
+    && ncxSsh.ssh.host === 'jump.internal' && ncxSsh.ssh.port === 2222
+    && ncxSsh.ssh.user === 'ops' && ncxSsh.ssh.authType === 'key'
+    && ncxSsh.ssh.keyFile === 'C:\\keys\\ops.pem'
+    && ncxSsh.ssh.password === 'This is a test' && ncxSsh.ssh.passphrase === 'This is a test', ncxSsh && ncxSsh.ssh);
+  check('ncx maps SQLite file paths', ncxSqlite && ncxSqlite.file === 'C:\\data\\cache.db', ncxSqlite);
+  const ncxChildFields = parseNcx(`<Connections><Connection ConnectionType="SQLite">
+    <Name>Child Fields</Name><DatabaseFileName>C:\\data\\child.db</DatabaseFileName>
+  </Connection></Connections>`);
+  check('ncx maps child-element fields', ncxChildFields.connections.length === 1
+    && ncxChildFields.connections[0].name === 'Child Fields'
+    && ncxChildFields.connections[0].file === 'C:\\data\\child.db', ncxChildFields);
+  const ncxBadPassword = parseNcx(`<Connections>
+    <Connection Name="Bad Password" Type="MYSQL" Host="localhost" Password="not-valid" />
+    <Connection Name="Good Password" Type="MYSQL" Host="localhost" Password="B75D320B6211468D63EB3B67C9E85933" />
+  </Connections>`);
+  check('ncx skips only connections whose password cannot decrypt', ncxBadPassword.connections.length === 1
+    && ncxBadPassword.connections[0].name === 'Good Password'
+    && ncxBadPassword.skipped.some((item) => item.name === 'Bad Password' && /密码|解密/.test(item.reason)), ncxBadPassword);
+
+  const utf16Source = '<?xml version="1.0"?><Connections><Connection Name="PG" Type="PostgreSQL" Host="localhost" /></Connections>';
+  const utf16Ncx = parseNcxBuffer(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(utf16Source, 'utf16le')]));
+  check('ncx decodes UTF-16LE files', utf16Ncx.connections.length === 1
+    && utf16Ncx.connections[0].type === 'postgres', utf16Ncx);
+  const utf16Le = Buffer.from(utf16Source.replace('PostgreSQL', 'SQL Server'), 'utf16le');
+  const utf16Be = Buffer.alloc(utf16Le.length);
+  for (let i = 0; i < utf16Le.length; i += 2) { utf16Be[i] = utf16Le[i + 1]; utf16Be[i + 1] = utf16Le[i]; }
+  const utf16BeNcx = parseNcxBuffer(Buffer.concat([Buffer.from([0xfe, 0xff]), utf16Be]));
+  check('ncx decodes UTF-16BE files', utf16BeNcx.connections.length === 1
+    && utf16BeNcx.connections[0].type === 'mssql', utf16BeNcx);
+  check('ncx rejects DTD and entities', (() => {
+    try { parseNcx('<!DOCTYPE x [<!ENTITY y "z">]><Connections/>'); return false; }
+    catch (error) { return /DTD|ENTITY|实体/.test(error.message); }
+  })());
+  check('ncx rejects malformed XML', (() => {
+    try { parseNcx('<Connections><Connection></Connections>'); return false; }
+    catch (error) { return /XML|解析/.test(error.message); }
+  })());
   console.log('[SELFTEST] 开始');
 
   // ---- splitSql ----
@@ -562,6 +643,84 @@ async function runSelfTest() {
 
   // ---- store 加解密 ----
   const store = require('./store');
+  const importTag = `NCX-${Date.now()}`;
+  const connectionFile = path.join(require('electron').app.getPath('userData'), 'connections.json');
+  const originalWriteFileSync = fs.writeFileSync;
+  let connectionWrites = 0;
+  fs.writeFileSync = function countedWrite(fileName, ...args) {
+    if (path.resolve(String(fileName)) === path.resolve(connectionFile)) connectionWrites += 1;
+    return originalWriteFileSync.call(this, fileName, ...args);
+  };
+  let importedBatch;
+  try {
+    importedBatch = store.importConnections([
+      {
+        name: importTag, type: 'mysql', host: 'db-one.example', port: 3306,
+        user: 'reader', database: 'app', password: ' db-imported-secret ', group: 'Imported',
+        ssh: { enabled: true, host: 'jump.example', port: 22, user: 'ops', authType: 'key', keyFile: 'C:\\keys\\ops.pem', password: ' ssh-imported-secret ', passphrase: ' key-imported-secret ' },
+      },
+      { name: importTag, type: 'postgres', host: 'db-two.example', port: 5432, user: 'reader', database: 'app' },
+    ]);
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+  }
+  check('store ncx import persists a batch once', connectionWrites === 1, connectionWrites);
+  check('store ncx import renames name conflicts', importedBatch.imported === 2
+    && importedBatch.renamed === 1
+    && importedBatch.connections.some((item) => item.name === `${importTag} (Navicat)`), importedBatch);
+  const importedSecret = store.list().find((item) => item.name === importTag);
+  check('store ncx import safely preserves decrypted secrets', importedSecret
+    && importedSecret.password === ' db-imported-secret '
+    && importedSecret.ssh.password === ' ssh-imported-secret '
+    && importedSecret.ssh.passphrase === ' key-imported-secret ', importedSecret);
+  const importedPublic = store.listPublic().find((item) => item.name === importTag);
+  check('store ncx public preview never exposes imported secrets', importedPublic && importedPublic.hasPassword
+    && importedPublic.ssh.hasPassword && importedPublic.ssh.hasPassphrase
+    && !Object.prototype.hasOwnProperty.call(importedPublic, 'password')
+    && !Object.prototype.hasOwnProperty.call(importedPublic.ssh, 'password')
+    && !Object.prototype.hasOwnProperty.call(importedPublic.ssh, 'passphrase'), importedPublic);
+  const importedRaw = fs.readFileSync(connectionFile, 'utf8');
+  check('store ncx imported secrets are never persisted as plaintext',
+    !importedRaw.includes('db-imported-secret')
+    && !importedRaw.includes('ssh-imported-secret')
+    && !importedRaw.includes('key-imported-secret'));
+  const duplicateBatch = store.importConnections([
+    {
+      name: importTag, type: 'mysql', host: 'db-one.example', port: 3306,
+      user: 'reader', database: 'app', group: 'Imported',
+      ssh: { enabled: true, host: 'jump.example', port: 22, user: 'ops', authType: 'key', keyFile: 'C:\\keys\\ops.pem' },
+    },
+  ]);
+  check('store ncx import skips exact duplicates', duplicateBatch.imported === 0 && duplicateBatch.skipped === 1, duplicateBatch);
+  const duplicatePreview = store.previewImportConnections([
+    {
+      name: importTag, type: 'mysql', host: 'db-one.example', port: 3306,
+      user: 'reader', database: 'app',
+      ssh: { enabled: true, host: 'jump.example', port: 22, user: 'ops', authType: 'key', keyFile: 'C:\\keys\\ops.pem' },
+    },
+    { name: `${importTag}-new`, type: 'sqlite', file: 'C:\\data\\new.db' },
+  ]);
+  check('store ncx preview marks duplicates without writing', duplicatePreview[0].duplicate === true
+    && duplicatePreview[1].duplicate === false, duplicatePreview);
+  const upgradeTag = `${importTag}-upgrade`;
+  store.importConnections([
+    { name: upgradeTag, type: 'mysql', host: 'upgrade.example', port: 3306, user: 'reader', database: 'app' },
+  ]);
+  const upgradePreview = store.previewImportConnections([
+    { name: upgradeTag, type: 'mysql', host: 'upgrade.example', port: 3306, user: 'reader', database: 'app', password: 'auto-filled' },
+  ]);
+  check('store ncx preview allows filling a missing password', upgradePreview[0].duplicate === false
+    && upgradePreview[0].credentialUpdate === true, upgradePreview);
+  const upgradedBatch = store.importConnections([
+    { name: upgradeTag, type: 'mysql', host: 'upgrade.example', port: 3306, user: 'reader', database: 'app', password: 'auto-filled' },
+  ]);
+  check('store ncx re-import fills missing credentials without duplicating', upgradedBatch.imported === 0
+    && upgradedBatch.updated === 1
+    && store.list().find((item) => item.name === upgradeTag).password === 'auto-filled', upgradedBatch);
+  for (const item of store.listPublic().filter((entry) => entry.name === importTag
+      || entry.name === `${importTag} (Navicat)` || entry.name === upgradeTag)) {
+    store.remove(item.id);
+  }
   const saved = store.save({ name: '自检', type: 'mysql', host: '127.0.0.1', user: 'CaseUser', password: 'p@ss中文' });
   const got = store.getById(saved.id);
   check('store 密码往返', got.password === 'p@ss中文');

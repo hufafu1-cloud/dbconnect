@@ -242,6 +242,201 @@ function save(conn) {
   return listPublic().find((x) => x.id === record.id);
 }
 
+const IMPORT_TYPES = new Set(['mysql', 'postgres', 'mssql', 'sqlite', 'clickhouse', 'oceanbase', 'oboracle']);
+
+function importString(value, max = 512) {
+  return String(value === undefined || value === null ? '' : value).trim().slice(0, max);
+}
+
+function importSecret(value, max = 4096) {
+  return String(value === undefined || value === null ? '' : value).slice(0, max);
+}
+
+function normalizeImportedConnection(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('NCX 连接配置无效');
+  const type = importString(input.type, 32).toLowerCase();
+  if (!IMPORT_TYPES.has(type)) throw new Error(`不支持导入数据库类型：${type || '未知'}`);
+  const name = importString(input.name, 128);
+  if (!name) throw new Error('NCX 连接名称不能为空');
+  const common = {
+    type,
+    name,
+    group: importString(input.group, 128),
+    env: ['prod', 'test', 'dev'].includes(input.env) ? input.env : '',
+    color: importString(input.color, 32),
+    password: encryptPassword(type === 'sqlite' ? '' : importSecret(input.password)),
+  };
+  if (type === 'sqlite') {
+    return { ...common, file: importString(input.file, 2048) };
+  }
+  const numberPort = Number(input.port);
+  const record = {
+    ...common,
+    host: importString(input.host),
+    port: Number.isSafeInteger(numberPort) && numberPort > 0 && numberPort <= 65535 ? numberPort : undefined,
+    user: importString(input.user),
+    database: importString(input.database),
+    options: {},
+  };
+  if (type === 'mssql') {
+    record.options = { encrypt: !!(input.options && input.options.encrypt), trustCert: !(input.options && input.options.trustCert === false) };
+  } else if (type === 'clickhouse') {
+    record.options = { https: !!(input.options && input.options.https) };
+  }
+  if (input.ssh && input.ssh.enabled) {
+    const sshPort = Number(input.ssh.port);
+    record.ssh = {
+      enabled: true,
+      host: importString(input.ssh.host),
+      port: Number.isSafeInteger(sshPort) && sshPort > 0 && sshPort <= 65535 ? sshPort : 22,
+      user: importString(input.ssh.user),
+      authType: input.ssh.authType === 'key' ? 'key' : 'password',
+      keyFile: importString(input.ssh.keyFile, 2048),
+      password: encryptPassword(importSecret(input.ssh.password)),
+      passphrase: encryptPassword(importSecret(input.ssh.passphrase)),
+    };
+  }
+  return record;
+}
+
+function importedSignature(connection) {
+  const normalizedPath = (value) => {
+    const result = normExact(value);
+    return process.platform === 'win32' ? result.toLowerCase() : result;
+  };
+  let options = {};
+  if (normFold(connection.type) === 'mssql') {
+    options = {
+      encrypt: !!(connection.options && connection.options.encrypt),
+      trustCert: !(connection.options && connection.options.trustCert === false),
+    };
+  } else if (normFold(connection.type) === 'clickhouse') {
+    options = { https: !!(connection.options && connection.options.https) };
+  }
+  const ssh = connection.ssh && connection.ssh.enabled ? {
+    host: normFold(connection.ssh.host),
+    port: Number(connection.ssh.port) || 22,
+    user: normExact(connection.ssh.user),
+    authType: connection.ssh.authType || 'password',
+    keyFile: normalizedPath(connection.ssh.keyFile),
+  } : null;
+  return JSON.stringify({
+    name: normFold(connection.name),
+    type: normFold(connection.type),
+    host: normFold(connection.host),
+    port: Number(connection.port) || null,
+    user: normExact(connection.user),
+    database: normExact(connection.database),
+    file: normalizedPath(connection.file),
+    options,
+    ssh,
+  });
+}
+
+function publicRecord(record) {
+  const out = { ...record, hasPassword: hasSecret(record.password) };
+  delete out.password;
+  if (record.ssh) {
+    out.ssh = {
+      ...record.ssh,
+      hasPassword: hasSecret(record.ssh.password),
+      hasPassphrase: hasSecret(record.ssh.passphrase),
+    };
+    delete out.ssh.password;
+    delete out.ssh.passphrase;
+  }
+  return out;
+}
+
+function needsCredentialUpdate(existing, candidate) {
+  if (hasSecret(candidate.password) && !hasSecret(existing.password)) return true;
+  if (!candidate.ssh || !existing.ssh) return false;
+  return (hasSecret(candidate.ssh.password) && !hasSecret(existing.ssh.password))
+    || (hasSecret(candidate.ssh.passphrase) && !hasSecret(existing.ssh.passphrase));
+}
+
+function fillMissingCredentials(existing, candidate) {
+  let changed = false;
+  if (hasSecret(candidate.password) && !hasSecret(existing.password)) {
+    existing.password = candidate.password;
+    changed = true;
+  }
+  if (candidate.ssh && existing.ssh) {
+    if (hasSecret(candidate.ssh.password) && !hasSecret(existing.ssh.password)) {
+      existing.ssh.password = candidate.ssh.password;
+      changed = true;
+    }
+    if (hasSecret(candidate.ssh.passphrase) && !hasSecret(existing.ssh.passphrase)) {
+      existing.ssh.passphrase = candidate.ssh.passphrase;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function importConnections(configs) {
+  if (!Array.isArray(configs) || !configs.length) return {
+    imported: 0, updated: 0, skipped: 0, renamed: 0, connections: [],
+  };
+  if (configs.length > 1000) throw new Error('单次最多导入 1000 个连接');
+  const normalized = configs.map(normalizeImportedConnection);
+  const records = loadRaw();
+  const recordsBySignature = new Map(records.map((record) => [importedSignature(record), record]));
+  const names = new Set(records.map((item) => normFold(item.name)));
+  const created = [];
+  const updated = [];
+  let skipped = 0;
+  let renamed = 0;
+  for (const candidate of normalized) {
+    const signature = importedSignature(candidate);
+    const existing = recordsBySignature.get(signature);
+    if (existing) {
+      if (fillMissingCredentials(existing, candidate)) updated.push(existing);
+      else skipped += 1;
+      continue;
+    }
+    if (names.has(normFold(candidate.name))) {
+      const original = candidate.name;
+      let sequence = 1;
+      let nextName = `${original} (Navicat)`;
+      while (names.has(normFold(nextName))) {
+        sequence += 1;
+        nextName = `${original} (Navicat ${sequence})`;
+      }
+      candidate.name = nextName;
+      renamed += 1;
+    }
+    candidate.id = crypto.randomUUID();
+    candidate.createdAt = new Date().toISOString();
+    records.push(candidate);
+    created.push(candidate);
+    recordsBySignature.set(signature, candidate);
+    recordsBySignature.set(importedSignature(candidate), candidate);
+    names.add(normFold(candidate.name));
+  }
+  if (created.length || updated.length) persist(records);
+  return {
+    imported: created.length,
+    updated: updated.length,
+    skipped,
+    renamed,
+    connections: [...created, ...updated].map(publicRecord),
+  };
+}
+
+function previewImportConnections(configs) {
+  if (!Array.isArray(configs)) throw new Error('NCX 连接列表无效');
+  if (configs.length > 1000) throw new Error('单次最多预览 1000 个连接');
+  const records = loadRaw();
+  const recordsBySignature = new Map(records.map((record) => [importedSignature(record), record]));
+  return configs.map((config) => {
+    const candidate = normalizeImportedConnection(config);
+    const existing = recordsBySignature.get(importedSignature(candidate));
+    const credentialUpdate = !!(existing && needsCredentialUpdate(existing, candidate));
+    return { duplicate: !!existing && !credentialUpdate, credentialUpdate };
+  });
+}
+
 function remove(id) {
   persist(loadRaw().filter((x) => x.id !== id));
 }
@@ -373,6 +568,7 @@ function saveAiConfig(cfg) {
 }
 
 module.exports = {
-  list, listPublic, getById, hydrateConfig, save, remove, listGroups, addGroup, renameGroup, removeGroup,
+  list, listPublic, getById, hydrateConfig, save, importConnections, previewImportConnections,
+  remove, listGroups, addGroup, renameGroup, removeGroup,
   getAiConfig, getAiConfigPublic, hydrateAiConfig, saveAiConfig, normalizeAiBaseUrl,
 };
