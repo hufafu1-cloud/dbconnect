@@ -16,7 +16,8 @@ function testPackageIdentity() {
   assert.strictEqual(pkg.build.nsis.shortcutName, 'DBPanda');
   assert.strictEqual(pkg.scripts['brand:test'], 'node scripts/test-brand-assets.js && node scripts/test-product-brand.js');
   assert.strictEqual(pkg.scripts['ui:test'], 'node scripts/test-dialog-layout.js');
-  assert.strictEqual(pkg.scripts.verify, 'npm run brand:test && npm run ui:test && npm run selftest && npm run smoke');
+  assert.strictEqual(pkg.scripts['workspace:test'], 'node scripts/test-workspace.js');
+  assert.strictEqual(pkg.scripts.verify, 'npm run brand:test && npm run ui:test && npm run workspace:test && npm run selftest && npm run smoke');
 }
 
 function testVisibleBrandCopy() {

@@ -1,6 +1,6 @@
 // 进程/会话监控页（MySQL/OB、PostgreSQL、SQL Server、ClickHouse）
 import { el, iconEl, fmtCount } from './util.js';
-import { connLabel, connColor } from './state.js';
+import { connLabel, connColor, setActiveTarget } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, confirmDialog } from './toast.js';
@@ -16,6 +16,7 @@ const COLS = [
 ];
 
 export function openProcTab(connId) {
+  setActiveTarget({ connId }, 'process-tab');
   const tab = addTab({
     id: `proc:${connId}`,
     title: `进程 - ${connLabel(connId)}`,
@@ -115,7 +116,7 @@ export function openProcTab(connId) {
     }
   });
   tab.setOnClose(() => clearInterval(timer));
-  tab.setOnShow(() => load());
+  tab.setOnShow(() => { setActiveTarget({ connId }, 'process-tab'); load(); });
 
   load();
   return tab;

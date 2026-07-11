@@ -246,7 +246,10 @@ class MSSQLAdapter extends BaseAdapter {
     const sch = schema || 'dbo';
     const rows = await this._q(db,
       `SELECT fk.name AS name, pc.name AS col,
-              rs.name AS refschema, rt.name AS reftab, rc.name AS refcol, fkc.constraint_column_id AS ord
+              rs.name AS refschema, rt.name AS reftab, rc.name AS refcol, fkc.constraint_column_id AS ord,
+              fk.update_referential_action_desc AS on_update,
+              fk.delete_referential_action_desc AS on_delete,
+              fk.is_disabled, fk.is_not_trusted, fk.is_not_for_replication
        FROM sys.foreign_keys fk
        JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
        JOIN sys.tables pt ON pt.object_id = fk.parent_object_id
@@ -259,12 +262,85 @@ class MSSQLAdapter extends BaseAdapter {
        ORDER BY fk.name, fkc.constraint_column_id`);
     const map = new Map();
     for (const r of rows) {
-      if (!map.has(r.name)) map.set(r.name, { name: r.name, columns: [], refSchema: r.refschema === 'dbo' ? null : r.refschema, refTable: r.reftab, refColumns: [] });
+      if (!map.has(r.name)) map.set(r.name, {
+        name: r.name, columns: [], refSchema: r.refschema === sch ? null : r.refschema,
+        refTable: r.reftab, refColumns: [],
+        onUpdate: String(r.on_update || 'NO_ACTION').replace(/_/g, ' '),
+        onDelete: String(r.on_delete || 'NO_ACTION').replace(/_/g, ' '),
+        rebuildSafe: !r.is_disabled && !r.is_not_trusted && !r.is_not_for_replication,
+      });
       const fk = map.get(r.name);
       fk.columns.push(r.col);
       fk.refColumns.push(r.refcol);
     }
     return [...map.values()];
+  }
+
+  async listReferencingForeignKeys(db, schema, table) {
+    const L = (v) => this.literal(v);
+    const sch = schema || 'dbo';
+    const rows = await this._q(db,
+      `SELECT fk.name AS name, ps.name AS child_schema, pt.name AS child_table,
+              pc.name AS col, rc.name AS refcol, fkc.constraint_column_id AS ord
+       FROM sys.foreign_keys fk
+       JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+       JOIN sys.tables pt ON pt.object_id = fk.parent_object_id
+       JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+       JOIN sys.columns pc ON pc.object_id = fk.parent_object_id AND pc.column_id = fkc.parent_column_id
+       JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
+       JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+       JOIN sys.columns rc ON rc.object_id = fk.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+       WHERE rs.name = ${L(sch)} AND rt.name = ${L(table)}
+         AND NOT (ps.name = ${L(sch)} AND pt.name = ${L(table)})
+       ORDER BY ps.name, pt.name, fk.name, fkc.constraint_column_id`);
+    const map = new Map();
+    for (const row of rows) {
+      const key = `${row.child_schema}\0${row.child_table}\0${row.name}`;
+      if (!map.has(key)) map.set(key, {
+        name: row.name, schema: row.child_schema, table: row.child_table,
+        columns: [], refColumns: [],
+      });
+      const fk = map.get(key);
+      fk.columns.push(row.col);
+      fk.refColumns.push(row.refcol);
+    }
+    return [...map.values()];
+  }
+
+  async listConstraints(db, schema, table) {
+    const sch = schema || 'dbo';
+    const L = (v) => this.literal(v);
+    const objId = `OBJECT_ID(${L(sch + '.' + table)})`;
+    const out = [];
+    const uniqueRows = await this._q(db,
+      `SELECT kc.name AS name, i.name AS index_name, c.name AS col, ic.key_ordinal AS ord,
+              i.type_desc, i.has_filter, i.fill_factor, i.is_disabled
+       FROM sys.key_constraints kc
+       JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+       JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+       JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+       WHERE kc.parent_object_id = ${objId} AND kc.type = 'UQ'
+       ORDER BY kc.name, ic.key_ordinal`);
+    const map = new Map();
+    for (const row of uniqueRows) {
+      if (!map.has(row.name)) map.set(row.name, {
+        kind: 'unique', name: row.name, columns: [], expression: '', indexName: row.index_name || null,
+        // SQL Server UNIQUE 还可能携带 filegroup/partition、压缩、
+        // IGNORE_DUP_KEY 等物理属性；当前网格不能无损重建，既有项只读。
+        rebuildSafe: false,
+      });
+      map.get(row.name).columns.push(row.col);
+    }
+    out.push(...map.values());
+    const checks = await this._q(db,
+      `SELECT name, definition AS expression, is_disabled, is_not_trusted, is_not_for_replication
+       FROM sys.check_constraints
+       WHERE parent_object_id = ${objId} ORDER BY name`);
+    out.push(...checks.map((row) => ({
+      kind: 'check', name: row.name, columns: [], expression: row.expression || '',
+      rebuildSafe: !row.is_disabled && !row.is_not_trusted && !row.is_not_for_replication,
+    })));
+    return out;
   }
 
   _normBatch(r, rowLimitApplied) {
@@ -284,10 +360,81 @@ class MSSQLAdapter extends BaseAdapter {
     return norm.length === 1 ? norm[0] : { multi: norm };
   }
 
+  _scriptStatements(sql) {
+    return String(sql || '').split(/^\s*GO\s*(?:--.*)?$/gim).map((s) => s.trim()).filter(Boolean);
+  }
+
+  /** SQL Server 必须通过驱动 Transaction 固定同一物理连接。 */
+  async _openExplicitTransaction(db) {
+    const transaction = new mssql.Transaction(this.pool);
+    const quarantine = async () => {
+      const conn = transaction._acquiredConnection;
+      if (conn) {
+        try { conn.removeListener('rollbackTransaction', transaction._abort); } catch (e) { /* private driver hook */ }
+        try { conn.hasError = true; } catch (e) { /* driver detail changed */ }
+        try { conn.close(); } catch (e) { /* already closed */ }
+        try { transaction.parent.release(conn); } catch (e) { /* pool may be closing */ }
+        transaction._acquiredConnection = null;
+        transaction._acquiredConfig = null;
+      }
+      // Some terminal failures are reported only after mssql has already put
+      // the connection back. Retire the whole pool asynchronously to ensure
+      // that returned session is destroyed without blocking this transaction.
+      const pool = this.pool;
+      this.pool = null;
+      if (pool) {
+        try { Promise.resolve(pool.close()).catch(() => {}); } catch (e) { /* already closing */ }
+      }
+    };
+    try {
+      await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
+    } catch (error) {
+      // BEGIN may have reached the server even when the acknowledgement fails.
+      // Retire the pool so that leased connection can never be reused.
+      await quarantine();
+      throw error;
+    }
+    let finished = false;
+    const run = async (sql, opts) => {
+      const requestId = this._requestId(opts);
+      const limited = this._prepareScriptQuery(sql, opts);
+      const req = this._track(new mssql.Request(transaction), requestId);
+      req.arrayRowMode = true;
+      try {
+        const result = await req.batch(this._useBatch(db, limited.sql));
+        return this._normBatch(result, limited.applied);
+      } finally {
+        this._untrack(req, requestId);
+      }
+    };
+    return {
+      run,
+      requestHandle: null,
+      finish: async (action) => {
+        if (finished) throw new Error('事务已经结束');
+        finished = true;
+        try {
+          if (action === 'commit') await transaction.commit();
+          else await transaction.rollback();
+        } catch (error) {
+          if (action === 'commit') {
+            try { await transaction.rollback(); } catch (e) { /* outcome remains unknown */ }
+          }
+          // mssql releases a connection to its pool before surfacing some
+          // COMMIT/ROLLBACK failures, so pool retirement is the safe quarantine.
+          await quarantine();
+          throw error;
+        }
+      },
+    };
+  }
+
   /** 整段脚本作为单个批执行（保证会话一致），支持按 GO 行分批 */
   async runScript(db, sql, opts) {
     const maxRows = this._scriptMaxRows(opts);
-    const batches = sql.split(/^\s*GO\s*(?:--.*)?$/gim).map((s) => s.trim()).filter(Boolean);
+    const batches = this._scriptStatements(sql);
+    if (!batches.length) return [];
+    this._assertQueryPageSql(batches);
     const out = [];
     const requestId = this._beginRequest(opts);
     try {
@@ -299,6 +446,7 @@ class MSSQLAdapter extends BaseAdapter {
           const limited = this._prepareScriptQuery(batch, { maxRows });
           req.arrayRowMode = true;
           const r = await req.batch(this._useBatch(db, limited.sql));
+          this._assertRequestOutcomeKnown(requestId);
           const ms = Date.now() - t0;
           const sets = r.recordsets || [];
           if (!sets.length) {
@@ -334,7 +482,17 @@ class MSSQLAdapter extends BaseAdapter {
     const body = sqls.join(';\n');
     const batch = `SET XACT_ABORT ON;\nBEGIN TRAN;\n${body};\nCOMMIT TRAN;`;
     const req = this.pool.request();
-    await req.batch(this._useBatch(db, batch));
+    try {
+      await req.batch(this._useBatch(db, batch));
+    } catch (error) {
+      if (error && error.code === 'EREQUEST') throw error;
+      const pool = this.pool;
+      this.pool = null;
+      if (pool) {
+        try { Promise.resolve(pool.close()).catch(() => {}); } catch (e) { /* already closed */ }
+      }
+      throw this._transactionTerminalError('commit', error);
+    }
   }
 
   /** 内部元数据查询（对象行） */
@@ -375,7 +533,7 @@ class MSSQLAdapter extends BaseAdapter {
       `SELECT c.name AS name, ty.name AS typename, systy.name AS systemtype,
               c.max_length, c.precision, c.scale,
               c.is_nullable, c.is_identity, dc.definition AS def, dc.name AS def_constraint,
-              CAST(ep.value AS nvarchar(400)) AS comment
+              c.collation_name, CAST(ep.value AS nvarchar(400)) AS comment
        FROM sys.columns c
        JOIN sys.types ty ON ty.user_type_id = c.user_type_id
        LEFT JOIN sys.types systy ON systy.user_type_id = c.system_type_id
@@ -383,6 +541,23 @@ class MSSQLAdapter extends BaseAdapter {
        LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
        LEFT JOIN sys.extended_properties ep ON ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
        WHERE c.object_id = ${objId} ORDER BY c.column_id`);
+    const riskyColumnProperties = [
+      'is_computed', 'is_sparse', 'is_column_set', 'is_rowguidcol', 'is_filestream',
+      'generated_always_type', 'encryption_type', 'is_hidden', 'is_masked',
+      'graph_type', 'ledger_view_column_type', 'vector_dimensions',
+    ];
+    const availableRisky = await this._q(db,
+      `SELECT name FROM sys.all_columns
+       WHERE object_id = OBJECT_ID('sys.columns')
+         AND name IN (${riskyColumnProperties.map(L).join(', ')})`);
+    const riskyNames = availableRisky.map((row) => row.name).filter((name) => riskyColumnProperties.includes(name));
+    const riskyByColumn = new Map();
+    if (riskyNames.length) {
+      const rows = await this._q(db,
+        `SELECT c.name, ${riskyNames.map((name) => `c.${this.quoteIdent(name)}`).join(', ')}
+         FROM sys.columns c WHERE c.object_id = ${objId}`);
+      for (const row of rows) riskyByColumn.set(row.name, row);
+    }
     const pkRows = await this._q(db,
       `SELECT c.name FROM sys.indexes i
        JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
@@ -390,15 +565,21 @@ class MSSQLAdapter extends BaseAdapter {
        WHERE i.is_primary_key = 1 AND i.object_id = ${objId} ORDER BY ic.key_ordinal`);
     const pk = pkRows.map((r) => r.name);
     const idxRows = await this._q(db,
-      `SELECT i.name AS iname, i.is_unique, i.is_primary_key, c.name AS col
+      `SELECT i.name AS iname, i.is_unique, i.is_primary_key, i.has_filter, i.type_desc,
+              ic.is_included_column, ic.is_descending_key, c.name AS col
        FROM sys.indexes i
        JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
        JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
        WHERE i.object_id = ${objId} AND i.type > 0 ORDER BY i.name, ic.key_ordinal`);
     const imap = new Map();
     for (const r of idxRows) {
-      if (!imap.has(r.iname)) imap.set(r.iname, { name: r.iname, columns: [], unique: !!r.is_unique, primary: !!r.is_primary_key });
-      imap.get(r.iname).columns.push(r.col);
+      if (!imap.has(r.iname)) imap.set(r.iname, {
+        name: r.iname, columns: [], unique: !!r.is_unique, primary: !!r.is_primary_key,
+        editable: !r.has_filter && r.type_desc === 'NONCLUSTERED',
+      });
+      const item = imap.get(r.iname);
+      if (r.is_included_column || r.is_descending_key) item.editable = false;
+      if (!r.is_included_column) item.columns.push(r.col);
     }
     const baseTypeStr = (c) => {
       const t = c.systemtype || c.typename;
@@ -410,11 +591,22 @@ class MSSQLAdapter extends BaseAdapter {
     const typeStr = (c) => c.typename && c.systemtype && c.typename !== c.systemtype
       ? c.typename
       : baseTypeStr(c);
-    const columns = cols.map((c) => ({
-      name: c.name, type: typeStr(c), baseType: baseTypeStr(c), nullable: !!c.is_nullable, def: c.def,
-      key: pk.includes(c.name) ? 'PRI' : '', extra: c.is_identity ? 'identity' : '', comment: c.comment || '',
-      defConstraint: c.def_constraint || null,
-    }));
+    const columns = cols.map((c) => {
+      const flags = riskyByColumn.get(c.name) || {};
+      const activeFlags = riskyNames.filter((name) => {
+        const value = flags[name];
+        return value !== null && value !== undefined && value !== false && value !== 0 && value !== '0';
+      });
+      if (c.is_identity) activeFlags.unshift('is_identity');
+      return {
+        name: c.name, type: typeStr(c), baseType: baseTypeStr(c), nullable: !!c.is_nullable, def: c.def,
+        key: pk.includes(c.name) ? 'PRI' : '', extra: c.is_identity ? 'identity' : '', comment: c.comment || '',
+        defConstraint: c.def_constraint || null, collation: c.collation_name || '',
+        editSafe: activeFlags.length === 0,
+        editUnsafeReason: activeFlags.length
+          ? `栏位含无法无损表示的 SQL Server 属性：${activeFlags.join(', ')}` : '',
+      };
+    });
     const indexes = [...imap.values()];
     const ddl = synthesizeDDL(this.qualify(db, sch, table), columns, pk, indexes, (n) => this.quoteIdent(n));
     return { columns, indexes, pk, ddl };

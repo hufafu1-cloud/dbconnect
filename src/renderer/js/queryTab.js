@@ -1,6 +1,6 @@
 // 查询标签页：CodeMirror SQL 编辑器 + 多结果集 + 信息面板
 import { el, iconEl, fmtCount } from './util.js';
-import { state, connLabel, connColor, objectsCacheKey, emit } from './state.js';
+import { state, connLabel, connColor, objectsCacheKey, emit, setActiveTarget } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, promptDialog } from './toast.js';
@@ -24,25 +24,51 @@ const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING
 const ID_CHARS = "[\\w$\\u4e00-\\u9fa5]";
 
 export function openQueryTab(target, initialSql, opts) {
+  const restoreState = (opts && opts.restoreState) || null;
+  const restoredTarget = restoreState && restoreState.target;
+  const initialText = restoreState && typeof restoreState.sql === 'string'
+    ? restoreState.sql : (initialSql || '');
   queryNo++;
-  const tabId = uid('query');
-  let savedQuery = (opts && opts.saved) || null; // {id, name} 绑定到连接的查询
-  const tab = addTab({ id: tabId, title: savedQuery ? savedQuery.name : `查询 ${queryNo}`, icon: 'query', color: connColor(target && target.connId) });
+  const tabId = (opts && opts.restoreId) || uid('query');
+  let savedQuery = (restoreState && restoreState.savedQuery) || (opts && opts.saved) || null; // {id, name} 绑定到连接的查询
+  const initialTitle = (restoreState && restoreState.title)
+    || (savedQuery && savedQuery.name)
+    || (restoreState && restoreState.savedPath && restoreState.savedPath.split(/[\\/]/).pop())
+    || `查询 ${queryNo}`;
+  const restoredConnId = restoredTarget && restoredTarget.connId;
+  const tab = addTab({ id: tabId, title: initialTitle, icon: 'query', color: connColor(restoredConnId || (target && target.connId)) });
 
-  let connId = target && target.connId;
-  let db = target && target.db;
+  let connId = restoredConnId || (target && target.connId);
+  let db = (restoredTarget && restoredTarget.db) || (target && target.db);
+  let schema = (restoredTarget && restoredTarget.schema) || (target && target.schema) || null;
+  let dbUnavailable = false;
+  // fileAccess 授权只在当前主进程有效；重启恢复的文件查询必须降级为独立草稿。
   let savedPath = null;
-  let savedText = initialSql || '';
+  // 模板/右键生成的 initialSql 是未保存草稿；只有已保存查询才以 initialText 为干净基线。
+  let savedText = restoreState
+    ? (restoreState.savedPath ? '' : (typeof restoreState.savedText === 'string' ? restoreState.savedText : ''))
+    : ((opts && opts.saved) ? initialText : '');
   let running = false;
   let activeRequest = null;
+  const transactionId = `query-tx:${tabId}`;
+  let transactionState = 'idle';
+  let transactionSupported = true;
+  let transactionWarning = '';
 
   const pane = tab.pane;
   pane.classList.add('query-pane');
+  function touchRecovery() {
+    if (tab.touchRecovery) tab.touchRecovery();
+  }
 
   // ---- 连接 / 数据库选择 ----
   const connSel = el('select', { title: '连接' });
   const dbSel = el('select', { title: '数据库' });
   const prodBadge = el('span', { class: 'tb-env-badge', style: { display: 'none' } }, '生产');
+  const schemaBadge = el('span', {
+    class: 'tb-context-badge',
+    style: { display: 'none', color: 'var(--text-muted)', fontSize: '12px', whiteSpace: 'nowrap' },
+  });
   function updateEnvBadge() {
     const c = state.connections.find((x) => x.id === connId);
     const env = c && c.env;
@@ -51,6 +77,16 @@ export function openQueryTab(target, initialSql, opts) {
     prodBadge.className = 'tb-env-badge env-' + (env || '');
     prodBadge.title = env === 'prod' ? '生产库：危险 SQL 执行前需二次确认' : '测试库';
   }
+  function syncActiveContext() {
+    if (connId) setActiveTarget({ connId, db, schema }, 'query-tab');
+  }
+  function updateSchemaBadge() {
+    schemaBadge.style.display = schema ? '' : 'none';
+    schemaBadge.textContent = schema ? `模式: ${schema}` : '';
+    schemaBadge.title = connTypeOf(connId) === 'mssql'
+      ? 'SQL Server 不支持会话级搜索路径；对象补全会使用模式限定名'
+      : '未限定对象名将优先在此模式中解析';
+  }
   function fillConnSel() {
     connSel.innerHTML = '';
     const opens = [...state.open.keys()];
@@ -58,7 +94,13 @@ export function openQueryTab(target, initialSql, opts) {
     for (const id of opens) {
       connSel.append(el('option', { value: id, selected: id === connId ? 'selected' : null }, connLabel(id)));
     }
-    if (!opens.includes(connId)) connId = opens[0] || null;
+    if (connId && !opens.includes(connId)) {
+      const saved = state.connections.find((item) => item.id === connId);
+      connSel.append(el('option', { value: connId, selected: 'selected', disabled: true },
+        `${saved ? saved.name : connId}（未打开）`));
+    } else if (!connId) {
+      connId = opens[0] || null;
+    }
     if (connId) connSel.value = connId;
     updateEnvBadge();
   }
@@ -67,22 +109,58 @@ export function openQueryTab(target, initialSql, opts) {
     const oc = connId && state.open.get(connId);
     const dbs = (oc && oc.databases) || [];
     for (const d of dbs) dbSel.append(el('option', { value: d, selected: d === db ? 'selected' : null }, d));
-    if (!dbs.includes(db)) db = dbs[0] || null;
+    if (db && !dbs.includes(db)) {
+      dbSel.append(el('option', { value: db, selected: 'selected', disabled: true }, `${db}（不可用）`));
+      dbUnavailable = true;
+    } else if (!db) {
+      db = dbs[0] || null;
+      dbUnavailable = false;
+    } else {
+      dbUnavailable = false;
+    }
     if (db) dbSel.value = db;
+    dbSel.title = dbUnavailable ? '恢复时保存的数据库已不存在或当前不可用；请明确选择新的数据库后再执行' : '数据库';
+    updateSchemaBadge();
   }
-  connSel.addEventListener('change', () => { connId = connSel.value || null; fillDbSel(); loadHintColumns(); updateEnvBadge(); });
-  dbSel.addEventListener('change', () => { db = dbSel.value || null; loadHintColumns(); });
+  connSel.addEventListener('change', () => {
+    connId = connSel.value || null;
+    db = null;
+    schema = null;
+    fillDbSel();
+    loadHintColumns();
+    updateEnvBadge();
+    if (cm) cm.setOption('mode', CM_MODES[connTypeOf(connId)] || 'text/x-sql');
+    syncActiveContext();
+    refreshTransactionSupport();
+    syncTransactionUi();
+    touchRecovery();
+  });
+  dbSel.addEventListener('change', () => {
+    db = dbSel.value || null;
+    dbUnavailable = false;
+    schema = null;
+    loadHintColumns();
+    syncActiveContext();
+    updateSchemaBadge();
+    syncTransactionUi();
+    touchRecovery();
+  });
 
   const maxRowsSel = el('select', { title: '结果行数上限' },
     el('option', { value: '200' }, '200 行'),
     el('option', { value: '2000', selected: 'selected' }, '2000 行'),
     el('option', { value: '10000' }, '10000 行'));
+  if (restoreState && ['200', '2000', '10000'].includes(String(restoreState.maxRows))) {
+    maxRowsSel.value = String(restoreState.maxRows);
+  }
+  maxRowsSel.addEventListener('change', () => touchRecovery());
 
   const mkBtn = (icon, label, onClick, cls) =>
     el('button', { class: 'pbtn' + (cls ? ' ' + cls : ''), onClick }, iconEl(icon), label);
 
-  const btnRun = mkBtn('run', '运行 (F5)', () => run(false), 'success');
-  const btnRunSel = mkBtn('runSel', '运行选中', () => run(true));
+  const btnRun = mkBtn('run', '运行 (F5)', () => run('current'), 'success');
+  const btnRunSel = mkBtn('runSel', '运行选中', () => run('selection'));
+  const btnRunAll = mkBtn('runSel', '运行全部', () => run('all'));
   const btnStop = mkBtn('stop', '停止', async () => {
     const request = activeRequest;
     if (!request) return;
@@ -96,6 +174,31 @@ export function openQueryTab(target, initialSql, opts) {
     }
   });
   btnStop.disabled = true;
+
+  const autoCommitInput = el('input', { type: 'checkbox', title: '关闭后，查询将在当前标签的显式事务中执行' });
+  autoCommitInput.checked = true;
+  if (restoreState && restoreState.autoCommit === false) autoCommitInput.checked = false;
+  const autoCommitControl = el('label', {
+    class: 'form-check',
+    title: '自动提交关闭后，首条查询会自动开始事务；请使用提交或回滚结束事务',
+    style: { whiteSpace: 'nowrap', margin: '0' },
+  }, autoCommitInput, '自动提交');
+  const txStatus = el('span', {
+    title: '',
+    style: { color: 'var(--text-muted)', fontSize: '12px', whiteSpace: 'nowrap' },
+  }, '自动提交');
+  const btnTxBegin = mkBtn('run', '开始', beginTransaction);
+  const btnTxCommit = mkBtn('save', '提交', commitTransaction);
+  const btnTxRollback = mkBtn('cross', '回滚', rollbackTransaction);
+  autoCommitInput.addEventListener('change', () => {
+    if (autoCommitInput.checked && transactionState !== 'idle') {
+      autoCommitInput.checked = false;
+      toast.info('请先提交或回滚当前事务，再开启自动提交');
+      return;
+    }
+    syncTransactionUi();
+    touchRecovery();
+  });
 
   const btnAi = mkBtn('ai', 'AI ▾', () => showAiMenu(btnAi));
 
@@ -123,10 +226,10 @@ export function openQueryTab(target, initialSql, opts) {
   }
 
   const toolbar = el('div', { class: 'pane-toolbar' },
-    btnRun, btnRunSel, btnStop,
+    btnRun, btnRunSel, btnRunAll, btnStop,
     el('span', { class: 'sep' }),
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '连接:'), connSel, prodBadge,
-    el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel,
+    el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel, schemaBadge,
     el('span', { class: 'sep' }),
     mkBtn('explain', '解释', explainSql),
     mkBtn('format', '美化', formatSql),
@@ -136,6 +239,8 @@ export function openQueryTab(target, initialSql, opts) {
     mkBtn('exportIcon', '另存文件', () => saveAsFile()),
     el('span', { class: 'sep' }),
     maxRowsSel,
+    el('span', { class: 'sep' }),
+    autoCommitControl, btnTxBegin, btnTxCommit, btnTxRollback, txStatus,
     el('span', { class: 'spring' }),
   );
 
@@ -167,6 +272,9 @@ export function openQueryTab(target, initialSql, opts) {
 
   // ---- 编辑器 ----
   const editorHost = el('div', { class: 'query-editor' });
+  let splitterHeight = Number(restoreState && restoreState.splitterHeight);
+  if (!Number.isFinite(splitterHeight) || splitterHeight < 60 || splitterHeight > 2000) splitterHeight = null;
+  if (splitterHeight) editorHost.style.flex = `0 0 ${splitterHeight}px`;
   // ---- 结果区 ----
   const splitter = el('div', { class: 'splitter-h' });
   const resultsHost = el('div', { class: 'query-results' });
@@ -176,8 +284,8 @@ export function openQueryTab(target, initialSql, opts) {
 
   pane.append(toolbar, editorHost, splitter, resultsHost);
 
-  const cm = CodeMirror(editorHost, {
-    value: initialSql || '',
+  let cm = CodeMirror(editorHost, {
+    value: initialText,
     mode: CM_MODES[connId && connTypeOf(connId)] || 'text/x-sql',
     lineNumbers: true,
     indentWithTabs: false,
@@ -187,16 +295,25 @@ export function openQueryTab(target, initialSql, opts) {
     autoCloseBrackets: true,
     styleActiveLine: true,
     extraKeys: {
-      'F5': () => run(false),
-      'Ctrl-Enter': () => run(false),
+      'F5': () => run('current'),
+      'Ctrl-Enter': () => run('current'),
       'Ctrl-Space': () => triggerHint(),
       'Ctrl-S': () => saveQuery(),
       'Shift-Ctrl-F': () => formatSql(),
     },
     hintOptions: { completeSingle: false },
   });
-  cm.on('change', () => tab.setDirty(cm.getValue() !== savedText));
-  setTimeout(() => cm.refresh(), 30);
+  cm.on('change', () => {
+    tab.setDirty(cm.getValue() !== savedText || transactionState !== 'idle');
+    touchRecovery();
+  });
+  setTimeout(() => {
+    if (!splitterHeight) {
+      const measured = Math.round(editorHost.getBoundingClientRect().height);
+      if (measured >= 60) splitterHeight = measured;
+    }
+    cm.refresh();
+  }, 30);
 
   function connTypeOf(id) {
     const c = state.connections.find((x) => x.id === id);
@@ -210,10 +327,10 @@ export function openQueryTab(target, initialSql, opts) {
     if (!connId || !db || !state.open.has(connId)) return;
     const oc = state.open.get(connId);
     if (!oc.columnsCache) oc.columnsCache = new Map();
-    const key = `${db}|${(target && target.schema) || ''}`;
+    const key = `${db}|${schema || ''}`;
     if (!oc.columnsCache.has(key)) {
       try {
-        oc.columnsCache.set(key, await window.api.db.allColumns(connId, db, target && target.schema));
+        oc.columnsCache.set(key, await window.api.db.allColumns(connId, db, schema));
       } catch (e) {
         oc.columnsCache.set(key, {});
       }
@@ -243,7 +360,12 @@ export function openQueryTab(target, initialSql, opts) {
         for (const n of names) { tableSet.add(n); if (!tableCols.has(n.toLowerCase())) tableCols.set(n.toLowerCase(), { name: n, cols: [] }); }
       }
     }
-    return { tableCols, dbTables, tableList: [...tableSet].sort((a, b) => a.localeCompare(b)) };
+    let tableList = [...tableSet].sort((a, b) => a.localeCompare(b));
+    if (connTypeOf(connId) === 'mssql' && schema) {
+      const bracket = (name) => `[${String(name).replace(/]/g, ']]')}]`;
+      tableList = tableList.map((name) => `${bracket(schema)}.${bracket(name)}`);
+    }
+    return { tableCols, dbTables, tableList };
   }
 
   // 当前光标所在的单条语句文本（按 ; 切分），用于把补全范围限定在本语句
@@ -409,15 +531,160 @@ export function openQueryTab(target, initialSql, opts) {
     return list;
   }
 
-  async function run(selectionOnly) {
+  function syncTransactionUi() {
+    const active = ['starting', 'active', 'failed', 'committing', 'rolling-back'].includes(transactionState);
+    connSel.disabled = active;
+    dbSel.disabled = active;
+    btnRun.disabled = running || dbUnavailable;
+    btnRunSel.disabled = running || dbUnavailable;
+    btnRunAll.disabled = running || dbUnavailable;
+    autoCommitInput.disabled = !transactionSupported;
+    btnTxBegin.disabled = running || !transactionSupported || transactionState !== 'idle';
+    btnTxCommit.disabled = running || transactionState !== 'active';
+    btnTxRollback.disabled = running || !['active', 'failed'].includes(transactionState);
+    if (!transactionSupported) {
+      autoCommitInput.checked = true;
+      txStatus.textContent = '仅自动提交';
+    } else if (transactionState === 'failed') {
+      txStatus.textContent = '事务异常 · 请回滚';
+    } else if (transactionState === 'active') {
+      txStatus.textContent = '事务中';
+    } else if (transactionState === 'starting') {
+      txStatus.textContent = '正在开始事务…';
+    } else if (transactionState === 'committing') {
+      txStatus.textContent = '正在提交…';
+    } else if (transactionState === 'rolling-back') {
+      txStatus.textContent = '正在回滚…';
+    } else {
+      txStatus.textContent = autoCommitInput.checked ? '自动提交' : '手动提交 · 未开始';
+    }
+    txStatus.title = transactionWarning || '';
+    txStatus.style.display = transactionSupported && transactionState === 'idle' && autoCommitInput.checked ? 'none' : '';
+    if (cm) {
+      tab.setDirty(cm.getValue() !== savedText || transactionState !== 'idle');
+    }
+  }
+
+  async function refreshTransactionSupport() {
+    if (!connId || !state.open.has(connId)) {
+      transactionSupported = true;
+      transactionWarning = '';
+      if (transactionState !== 'idle') transactionState = 'idle';
+      syncTransactionUi();
+      return;
+    }
+    if (transactionState !== 'idle') return;
+    const expectedConnId = connId;
+    try {
+      const status = await window.api.db.transactionStatus(connId, transactionId);
+      if (connId !== expectedConnId) return;
+      transactionSupported = status.supported !== false;
+      transactionWarning = status.warning || '';
+      transactionState = status.state === 'unsupported' ? 'idle' : (status.state || 'idle');
+    } catch (e) {
+      if (connId !== expectedConnId) return;
+      transactionSupported = false;
+      transactionWarning = e.message;
+    }
+    syncTransactionUi();
+  }
+
+  async function startTransaction(showToast) {
+    if (running) return false;
+    if (!connId || !state.open.has(connId)) { toast.info('请先打开一个连接'); return false; }
+    if (dbUnavailable) { toast.info('保存的数据库当前不可用，请先明确选择新的数据库'); return false; }
+    if (!transactionSupported) { toast.info(transactionWarning || '当前数据库仅支持自动提交'); return false; }
+    if (transactionState === 'active') return true;
+    if (transactionState === 'failed') { toast.info('当前事务已发生错误，请先回滚'); return false; }
+    autoCommitInput.checked = false;
+    transactionState = 'starting';
+    syncTransactionUi();
+    try {
+      const status = await window.api.db.beginTransaction(connId, transactionId, db, schema);
+      transactionState = status.state || 'active';
+      transactionWarning = status.warning || transactionWarning;
+      if (showToast) toast.success('事务已开始');
+      return true;
+    } catch (e) {
+      transactionState = 'idle';
+      toast.error('开始事务失败: ' + e.message);
+      return false;
+    } finally {
+      syncTransactionUi();
+    }
+  }
+
+  function beginTransaction() { return startTransaction(true); }
+
+  async function commitTransaction() {
+    if (running || transactionState !== 'active') return;
+    transactionState = 'committing';
+    syncTransactionUi();
+    try {
+      const result = await window.api.db.commitTransaction(connId, transactionId);
+      transactionState = 'idle';
+      if (result && result.warning) toast.info(result.warning, 12000);
+      else toast.success('事务已提交');
+    } catch (e) {
+      // 主进程无论提交成功与否都会释放该事务会话，避免未知事务继续悬挂。
+      transactionState = 'idle';
+      toast.error('提交事务失败: ' + e.message);
+    } finally {
+      syncTransactionUi();
+    }
+  }
+
+  async function rollbackTransaction() {
+    if (running || !['active', 'failed'].includes(transactionState)) return;
+    transactionState = 'rolling-back';
+    syncTransactionUi();
+    try {
+      const result = await window.api.db.rollbackTransaction(connId, transactionId);
+      transactionState = 'idle';
+      if (result && result.warning) toast.info(result.warning, 12000);
+      else toast.success('事务已回滚');
+    } catch (e) {
+      transactionState = 'idle';
+      toast.error('回滚事务失败: ' + e.message);
+    } finally {
+      syncTransactionUi();
+    }
+  }
+
+  async function sqlForRunMode(mode) {
+    if (mode === 'all') return cm.getValue();
+    const selection = cm.getSelection();
+    if (mode === 'selection') {
+      if (!selection.trim()) { toast.info('请先选择要运行的 SQL'); return ''; }
+      return selection;
+    }
+    // F5 / Ctrl+Enter：有选区优先执行选区，否则只执行光标所在语句。
+    if (selection.trim()) return selection;
+    const dialects = { oceanbase: 'mysql', oboracle: 'oracle' };
+    const type = connTypeOf(connId) || 'sql';
+    const found = await window.api.sql.statementAt(
+      cm.getValue(), dialects[type] || type, cm.indexFromPos(cm.getCursor()),
+    );
+    return found && found.sql || '';
+  }
+
+  async function run(mode = 'current') {
     if (running) return;
     if (!connId || !state.open.has(connId)) { toast.info('请先打开一个连接'); return; }
-    let sql = selectionOnly ? cm.getSelection() : cm.getValue();
-    if (selectionOnly && !sql.trim()) sql = cm.getValue();
+    if (dbUnavailable) { toast.info('保存的数据库当前不可用，请先明确选择新的数据库'); return; }
+    const sql = await sqlForRunMode(mode);
     if (!sql.trim()) { toast.info('没有可执行的 SQL'); return; }
+    if (!autoCommitInput.checked && transactionState === 'failed') {
+      toast.info('当前事务已发生错误，请先回滚');
+      return;
+    }
     const queryConnId = connId;
     const requestId = uid('query-request');
-    const queryPayload = { connId: queryConnId, db, sql, maxRows: Number(maxRowsSel.value), requestId };
+    const manualCommit = !autoCommitInput.checked;
+    const queryPayload = {
+      connId: queryConnId, db, schema, sql, maxRows: Number(maxRowsSel.value), requestId,
+      ...(manualCommit ? { transactionId } : {}),
+    };
     let approvedQuery;
     try {
       const { authorizeOperation } = await import('./danger.js');
@@ -427,11 +694,14 @@ export function openQueryTab(target, initialSql, opts) {
       return;
     }
     if (!approvedQuery) { statusbar.setLeft('已取消（生产库危险操作未确认）'); return; }
+    if (manualCommit && transactionState === 'idle' && !(await startTransaction(false))) return;
     running = true;
     activeRequest = { connId: queryConnId, requestId };
     btnRun.disabled = true;
     btnRunSel.disabled = true;
+    btnRunAll.disabled = true;
     btnStop.disabled = false;
+    syncTransactionUi();
     statusbar.setLeft('正在执行查询…');
     clearResults();
     const waiting = addResultPage('信息', el('div', { class: 'msg-list' }, '执行中…'), false);
@@ -442,6 +712,7 @@ export function openQueryTab(target, initialSql, opts) {
       const totalMs = Date.now() - t0;
       clearResults();
       const hasError = results.some((r) => r.error);
+      if (manualCommit && hasError) transactionState = 'failed';
       addResultPage(hasError ? '信息 ✗' : '信息', renderMessages(results, totalMs), hasError);
       let n = 0;
       for (const r of results) {
@@ -477,13 +748,16 @@ export function openQueryTab(target, initialSql, opts) {
       addResultPage('信息 ✗', el('div', { class: 'msg-list' }, el('div', { class: 'msg-item error' }, e.message)), true);
       activatePage(0);
       statusbar.setLeft('执行失败');
+      if (manualCommit) transactionState = 'failed';
       emit('history-changed');
     } finally {
       if (activeRequest && activeRequest.requestId === requestId) activeRequest = null;
       running = false;
-      btnRun.disabled = false;
-      btnRunSel.disabled = false;
+      btnRun.disabled = dbUnavailable;
+      btnRunSel.disabled = dbUnavailable;
+      btnRunAll.disabled = dbUnavailable;
       btnStop.disabled = true;
+      syncTransactionUi();
     }
   }
 
@@ -495,8 +769,9 @@ export function openQueryTab(target, initialSql, opts) {
     savedPath = p;
     savedQuery = null;
     savedText = text;
-    tab.setDirty(false);
+    tab.setDirty(transactionState !== 'idle');
     tab.setTitle(p.split(/[\\/]/).pop());
+    touchRecovery();
   }
 
   /** 保存：文件绑定的写回文件；否则保存为连接下的查询对象（树上「查询」节点） */
@@ -504,8 +779,9 @@ export function openQueryTab(target, initialSql, opts) {
     if (savedPath) {
       await window.api.file.write(savedPath, cm.getValue());
       savedText = cm.getValue();
-      tab.setDirty(false);
+      tab.setDirty(transactionState !== 'idle');
       toast.success('已保存 ' + savedPath);
+      touchRecovery();
       return;
     }
     if (!connId) { toast.info('请先选择连接'); return; }
@@ -521,10 +797,11 @@ export function openQueryTab(target, initialSql, opts) {
       });
       savedQuery = { id: rec.id, name: rec.name };
       savedText = cm.getValue();
-      tab.setDirty(false);
+      tab.setDirty(transactionState !== 'idle');
       tab.setTitle(rec.name);
       emit('queries-changed', { connId });
       toast.success(`查询 “${rec.name}” 已保存到连接`);
+      touchRecovery();
     } catch (e) {
       toast.error('保存失败: ' + e.message);
     }
@@ -537,18 +814,80 @@ export function openQueryTab(target, initialSql, opts) {
     savedPath = p;
     savedQuery = null;
     savedText = cm.getValue();
-    tab.setDirty(false);
+    tab.setDirty(transactionState !== 'idle');
     tab.setTitle(p.split(/[\\/]/).pop());
     toast.success('已保存 ' + p);
+    touchRecovery();
   }
 
-  tab.setIsDirty(() => cm.getValue() !== savedText && cm.getValue().trim() !== '');
+  tab.setIsDirty(() => cm.getValue() !== savedText || transactionState !== 'idle');
   tab.setOnShow(() => {
     fillConnSel();
     fillDbSel();
-    setTimeout(() => cm.refresh(), 10);
-    statusbar.setLeft(connId ? `${connLabel(connId)}${db ? ' › ' + db : ''}` : '');
+    syncActiveContext();
+    updateSchemaBadge();
+    refreshTransactionSupport();
+    setTimeout(() => {
+      if (!splitterHeight) {
+        const measured = Math.round(editorHost.getBoundingClientRect().height);
+        if (measured >= 60) splitterHeight = measured;
+      }
+      cm.refresh();
+    }, 10);
+    statusbar.setLeft(connId
+      ? `${connLabel(connId)}${db ? ' › ' + db : ''}${schema ? ' › ' + schema : ''}${dbUnavailable ? '（数据库不可用）' : ''}`
+      : '');
   });
+  if (tab.setBeforeClose) {
+    tab.setBeforeClose(async () => {
+      if (['starting', 'committing', 'rolling-back'].includes(transactionState)) {
+        toast.info('事务状态正在切换，请稍候再关闭标签页');
+        return false;
+      }
+      if (['active', 'failed'].includes(transactionState) && connId) {
+        if (!state.open.has(connId)) {
+          // 关闭连接时主进程会先回滚该适配器上的全部事务。
+          transactionState = 'idle';
+          return true;
+        }
+        const request = activeRequest;
+        if (request) await window.api.db.cancel(request.connId, request.requestId).catch(() => {});
+        transactionState = 'rolling-back';
+        syncTransactionUi();
+        try {
+          await window.api.db.rollbackTransaction(connId, transactionId);
+          transactionState = 'idle';
+        } catch (e) {
+          transactionState = 'failed';
+          syncTransactionUi();
+          toast.error('关闭前回滚事务失败: ' + e.message);
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+  tab.setOnClose(() => {
+    const request = activeRequest;
+    if (request) window.api.db.cancel(request.connId, request.requestId).catch(() => {});
+    if (transactionState !== 'idle' && connId) {
+      window.api.db.rollbackTransaction(connId, transactionId).catch(() => {});
+      transactionState = 'idle';
+    }
+  });
+  if (tab.setRecovery) {
+    tab.setRecovery('query', () => ({
+      target: connId ? { connId, ...(db ? { db } : {}), ...(schema ? { schema } : {}) } : null,
+      sql: cm.getValue(),
+      savedQuery: savedQuery ? { ...savedQuery } : null,
+      savedPath,
+      savedText,
+      maxRows: Number(maxRowsSel.value),
+      autoCommit: autoCommitInput.checked,
+      splitterHeight: Math.round(splitterHeight || 240),
+      title: savedQuery ? savedQuery.name : (savedPath ? savedPath.split(/[\\/]/).pop() : initialTitle),
+    }));
+  }
 
   // 上下分隔条拖拽
   splitter.addEventListener('mousedown', (e) => {
@@ -557,8 +896,10 @@ export function openQueryTab(target, initialSql, opts) {
     const startH = editorHost.getBoundingClientRect().height;
     const move = (ev) => {
       const h = Math.max(60, startH + ev.clientY - startY);
+      splitterHeight = h;
       editorHost.style.flex = `0 0 ${h}px`;
       cm.refresh();
+      touchRecovery();
     };
     const up = () => {
       document.removeEventListener('mousemove', move);
@@ -570,8 +911,11 @@ export function openQueryTab(target, initialSql, opts) {
 
   fillConnSel();
   fillDbSel();
+  syncActiveContext();
   loadHintColumns();
-  addResultPage('信息', el('div', { class: 'msg-list' }, '按 F5 或 Ctrl+Enter 运行；选中部分文本可只运行选中内容；Ctrl+Space 补全表/列名。'), false);
+  refreshTransactionSupport();
+  syncTransactionUi();
+  addResultPage('信息', el('div', { class: 'msg-list' }, 'F5 / Ctrl+Enter：有选区运行选区，否则运行光标所在语句；“运行全部”执行完整脚本。关闭自动提交后可显式提交或回滚。'), false);
   activatePage(0);
   setTimeout(() => cm.focus(), 50);
 

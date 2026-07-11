@@ -1,6 +1,6 @@
 // 执行计划（EXPLAIN）可视化：树 / 表 / 文本三种形态
 import { el, iconEl } from './util.js';
-import { connLabel, connColor } from './state.js';
+import { connLabel, connColor, setActiveTarget } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { toast } from './toast.js';
 
@@ -63,7 +63,9 @@ function renderTable(plan) {
 }
 
 export function openExplainTab(target, sql) {
+  setActiveTarget(target, 'explain-tab');
   const tab = addTab({ id: uid('explain'), title: '执行计划', icon: 'explain', color: connColor(target.connId), tooltip: `${connLabel(target.connId)} 执行计划` });
+  tab.setOnShow(() => setActiveTarget(target, 'explain-tab'));
   const pane = tab.pane;
   pane.style.display = 'flex';
   pane.style.flexDirection = 'column';

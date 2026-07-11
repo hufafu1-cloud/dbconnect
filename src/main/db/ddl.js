@@ -5,6 +5,9 @@
 //   table, comment, options,                  // options: 建表附加子句（如 ClickHouse 引擎）
 //   columns: [{ name, origName, type, length, scale, notNull, pk, autoInc, def, comment }],
 //   indexes: [{ name, origName, columns:[..], unique }],
+//   foreignKeys: [{ name, origName, columns:[..], refSchema, refTable,
+//                   refColumns:[..], onUpdate, onDelete }],
+//   constraints: [{ kind:'unique'|'check', name, origName, columns:[..], expression }],
 // }
 // def 约定：'' 表示无默认值；其余按“原样/字面量”启发式处理（见 composeDefault）。
 
@@ -28,13 +31,51 @@ const TYPE_OPTIONS = {
 };
 
 /** 各方言能力（设计器据此显示/隐藏控件，构建时据此给告警） */
+const FK_ACTIONS = {
+  mysql: ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL'],
+  postgres: ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'],
+  mssql: ['NO ACTION', 'CASCADE', 'SET NULL', 'SET DEFAULT'],
+  sqlite: ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'],
+  clickhouse: [],
+  oracle: ['NO ACTION'],
+};
+
+const FK_DELETE_ACTIONS = {
+  ...FK_ACTIONS,
+  oracle: ['NO ACTION', 'CASCADE', 'SET NULL'],
+};
+
 const CAPS = {
-  mysql: { autoInc: true, comments: true, alterColumn: true, pkChange: true, indexes: true },
-  postgres: { autoInc: true, comments: true, alterColumn: true, pkChange: true, indexes: true },
-  mssql: { autoInc: true, comments: false, alterColumn: true, pkChange: true, indexes: true },
-  sqlite: { autoInc: true, comments: false, alterColumn: false, pkChange: false, indexes: true },
-  clickhouse: { autoInc: false, comments: true, alterColumn: true, pkChange: false, indexes: false },
-  oracle: { autoInc: false, comments: true, alterColumn: true, pkChange: true, indexes: true },
+  mysql: {
+    autoInc: true, comments: true, alterColumn: true, pkChange: true, indexes: true,
+    foreignKeys: true, foreignKeyAlter: true, uniqueConstraints: true, checkConstraints: true, constraintAlter: true,
+    fkUpdateActions: FK_ACTIONS.mysql, fkDeleteActions: FK_DELETE_ACTIONS.mysql,
+  },
+  postgres: {
+    autoInc: true, comments: true, alterColumn: true, pkChange: true, indexes: true,
+    foreignKeys: true, foreignKeyAlter: true, uniqueConstraints: true, checkConstraints: true, constraintAlter: true,
+    fkUpdateActions: FK_ACTIONS.postgres, fkDeleteActions: FK_DELETE_ACTIONS.postgres,
+  },
+  mssql: {
+    autoInc: true, comments: false, alterColumn: true, pkChange: true, indexes: true,
+    foreignKeys: true, foreignKeyAlter: true, uniqueConstraints: true, checkConstraints: true, constraintAlter: true,
+    fkUpdateActions: FK_ACTIONS.mssql, fkDeleteActions: FK_DELETE_ACTIONS.mssql,
+  },
+  sqlite: {
+    autoInc: true, comments: false, alterColumn: false, pkChange: false, indexes: true,
+    foreignKeys: true, foreignKeyAlter: false, uniqueConstraints: true, checkConstraints: true, constraintAlter: false,
+    fkUpdateActions: FK_ACTIONS.sqlite, fkDeleteActions: FK_DELETE_ACTIONS.sqlite,
+  },
+  clickhouse: {
+    autoInc: false, comments: true, alterColumn: true, pkChange: false, indexes: false,
+    foreignKeys: false, foreignKeyAlter: false, uniqueConstraints: false, checkConstraints: false, constraintAlter: false,
+    fkUpdateActions: [], fkDeleteActions: [],
+  },
+  oracle: {
+    autoInc: false, comments: true, alterColumn: true, pkChange: true, indexes: true,
+    foreignKeys: true, foreignKeyAlter: true, uniqueConstraints: true, checkConstraints: true, constraintAlter: true,
+    fkUpdateActions: FK_ACTIONS.oracle, fkDeleteActions: FK_DELETE_ACTIONS.oracle,
+  },
 };
 
 function caps(dialect) { return CAPS[dialect] || CAPS.mysql; }
@@ -72,6 +113,12 @@ function columnDef(adapter, dialect, col, opts = {}) {
   const q = (n) => adapter.quoteIdent(n);
   const parts = [q(col.name), composeType(col, dialect)];
   const d = composeDefault(adapter, col.def);
+  const metadataName = (value, label) => {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    if (!/^[A-Za-z0-9_$#]+$/.test(text)) throw new Error(`${label}名称无效：${text}`);
+    return text;
+  };
 
   if (dialect === 'clickhouse') {
     if (d !== null) parts.push('DEFAULT ' + d);
@@ -83,9 +130,23 @@ function columnDef(adapter, dialect, col, opts = {}) {
     if (col.notNull) parts.push('NOT NULL');
     return parts.join(' ');
   }
+  if (dialect === 'mysql') {
+    const charset = metadataName(col.charset, '字符集');
+    const collation = metadataName(col.collation, '排序规则');
+    if (charset) parts.push('CHARACTER SET ' + charset);
+    if (collation) parts.push('COLLATE ' + collation);
+    parts.push(col.notNull ? 'NOT NULL' : 'NULL');
+    if (col.autoInc) parts.push('AUTO_INCREMENT');
+    if (d !== null && !col.autoInc) parts.push('DEFAULT ' + d);
+    if (col.comment) parts.push('COMMENT ' + adapter.literal(col.comment));
+    return parts.join(' ');
+  }
+  if (dialect === 'mssql') {
+    const collation = metadataName(col.collation, '排序规则');
+    if (collation) parts.push('COLLATE ' + collation);
+  }
   // mysql / postgres / mssql / sqlite
   if (col.autoInc) {
-    if (dialect === 'mysql') { parts.push('NOT NULL AUTO_INCREMENT'); return parts.join(' '); }
     if (dialect === 'mssql') parts.push('IDENTITY(1,1)');
     if (dialect === 'postgres') parts.push('GENERATED BY DEFAULT AS IDENTITY');
     if (dialect === 'sqlite' && opts.inlineSinglePk) {
@@ -94,12 +155,192 @@ function columnDef(adapter, dialect, col, opts = {}) {
   }
   parts.push(col.notNull ? 'NOT NULL' : 'NULL');
   if (d !== null && !col.autoInc) parts.push('DEFAULT ' + d);
-  if (dialect === 'mysql' && col.comment) parts.push('COMMENT ' + adapter.literal(col.comment));
   return parts.join(' ');
 }
 
 function indexName(ix, table) {
   return ix.name && ix.name.trim() ? ix.name.trim() : `idx_${table}_${ix.columns.join('_')}`.slice(0, 60);
+}
+
+function cleanName(value) { return String(value || '').trim(); }
+
+function generatedName(prefix, table, detail) {
+  const rawDetail = cleanName(detail).replace(/[^A-Za-z0-9_$#]+/g, '_').replace(/^_+|_+$/g, '') || 'item';
+  const raw = `${prefix}_${cleanName(table) || 'table'}_${rawDetail}`;
+  let hash = 2166136261;
+  for (const ch of `${table}|${detail}`) { hash ^= ch.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+  const suffix = (hash >>> 0).toString(36).padStart(7, '0').slice(-7);
+  if (raw.length + suffix.length + 1 <= 30) return `${raw}_${suffix}`;
+  return `${raw.slice(0, 22)}_${suffix}`;
+}
+
+function constraintName(item, table) {
+  const explicit = cleanName(item && item.name);
+  if (explicit) return explicit;
+  const cols = ((item && item.columns) || []).map(cleanName).filter(Boolean).join('_');
+  const prefix = item && String(item.kind).toLowerCase() === 'check' ? 'ck' : 'uq';
+  const detail = cols || String((item && item.expression) || 'expr');
+  return generatedName(prefix, table, detail);
+}
+
+function foreignKeyName(fk, table) {
+  const explicit = cleanName(fk && fk.name);
+  if (explicit) return explicit;
+  const cols = ((fk && fk.columns) || []).map(cleanName).filter(Boolean).join('_');
+  return generatedName('fk', table, `${cols || 'column'}_${cleanName(fk && fk.refTable) || 'ref'}`);
+}
+
+function normalizeAction(value) {
+  const action = String(value || 'NO ACTION').trim().replace(/\s+/g, ' ').toUpperCase();
+  return ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'].includes(action) ? action : 'NO ACTION';
+}
+
+function referenceTable(adapter, dialect, db, schema, fk, renamedTable) {
+  let refTable = cleanName(fk.refTable);
+  const refSchema = cleanName(fk.refSchema);
+  const localSchema = dialect === 'mysql' || dialect === 'oracle' ? cleanName(db) : cleanName(schema);
+  if (renamedTable && refTable === renamedTable.from && (!refSchema || refSchema === localSchema)) {
+    refTable = renamedTable.to;
+  }
+  if (dialect === 'mysql') return adapter.qualify(refSchema || db, null, refTable);
+  if (dialect === 'sqlite') return adapter.quoteIdent(refTable);
+  if (dialect === 'oracle') return adapter.qualify(refSchema || db, null, refTable);
+  return adapter.qualify(db, refSchema || schema, refTable);
+}
+
+function actionClauses(cap, fk, warnings, label) {
+  const clauses = [];
+  const update = normalizeAction(fk.onUpdate);
+  const del = normalizeAction(fk.onDelete);
+  if (del !== 'NO ACTION') {
+    if ((cap.fkDeleteActions || []).includes(del)) clauses.push(`ON DELETE ${del}`);
+    else warnings.push(`${label} 不支持 ON DELETE ${del}，已按 NO ACTION 处理`);
+  }
+  if (update !== 'NO ACTION') {
+    if ((cap.fkUpdateActions || []).includes(update)) clauses.push(`ON UPDATE ${update}`);
+    else warnings.push(`${label} 不支持 ON UPDATE ${update}，已按 NO ACTION 处理`);
+  }
+  return clauses.length ? ' ' + clauses.join(' ') : '';
+}
+
+function foreignKeyDef(adapter, dialect, db, schema, table, fk, warnings, renamedTable) {
+  const q = (n) => adapter.quoteIdent(n);
+  const cols = (fk.columns || []).map(cleanName).filter(Boolean);
+  const refCols = (fk.refColumns || []).map(cleanName).filter(Boolean);
+  const refTable = cleanName(fk.refTable);
+  if (!cols.length || !refTable || cols.length !== refCols.length) {
+    throw new Error(`外键 ${foreignKeyName(fk, table)} 的本表栏位、引用表和引用栏位必须完整，且栏位数量一致`);
+  }
+  const name = foreignKeyName(fk, table);
+  if (dialect === 'sqlite' && cleanName(fk.refSchema)) {
+    warnings.push(`SQLite 外键 ${name} 不支持跨 Schema 引用，引用 Schema 已忽略`);
+  }
+  const ref = referenceTable(adapter, dialect, db, schema, fk, renamedTable);
+  return `CONSTRAINT ${q(name)} FOREIGN KEY (${cols.map(q).join(', ')}) REFERENCES ${ref} (${refCols.map(q).join(', ')})`
+    + actionClauses(caps(dialect), fk, warnings, `外键 ${name}`);
+}
+
+function constraintDef(adapter, table, item) {
+  const q = (n) => adapter.quoteIdent(n);
+  const kind = String(item.kind || '').toLowerCase();
+  const name = constraintName(item, table);
+  if (kind === 'unique') {
+    const cols = (item.columns || []).map(cleanName).filter(Boolean);
+    if (!cols.length) throw new Error(`唯一约束 ${name} 至少需要一个栏位`);
+    return `CONSTRAINT ${q(name)} UNIQUE (${cols.map(q).join(', ')})`;
+  }
+  if (kind === 'check') {
+    const expression = String(item.expression || '').trim();
+    if (!expression) throw new Error(`检查约束 ${name} 的表达式不能为空`);
+    return `CONSTRAINT ${q(name)} CHECK (${expression})`;
+  }
+  throw new Error(`不支持的约束类型：${item.kind || '未知'}`);
+}
+
+function constraintSupported(cap, item) {
+  return String(item.kind || '').toLowerCase() === 'check' ? cap.checkConstraints : cap.uniqueConstraints;
+}
+
+function sameList(a, b) {
+  return JSON.stringify((a || []).map(cleanName)) === JSON.stringify((b || []).map(cleanName));
+}
+
+function foreignKeyChanged(before, after) {
+  return foreignKeyName(before, '') !== foreignKeyName(after, '')
+    || !sameList(before.columns, after.columns)
+    || cleanName(before.refSchema) !== cleanName(after.refSchema)
+    || cleanName(before.refTable) !== cleanName(after.refTable)
+    || !sameList(before.refColumns, after.refColumns)
+    || normalizeAction(before.onUpdate) !== normalizeAction(after.onUpdate)
+    || normalizeAction(before.onDelete) !== normalizeAction(after.onDelete);
+}
+
+function constraintChanged(before, after) {
+  const beforeKind = String(before.kind || '').toLowerCase();
+  const afterKind = String(after.kind || '').toLowerCase();
+  return beforeKind !== afterKind
+    || cleanName(before.name) !== cleanName(after.name)
+    || !sameList(before.columns, after.columns)
+    || String(before.expression || '').trim() !== String(after.expression || '').trim();
+}
+
+function expressionIdentifiers(expression) {
+  const text = String(expression || '');
+  const out = new Set();
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "'") {
+      i++;
+      while (i < text.length) {
+        if (text[i] === "'" && text[i + 1] === "'") { i += 2; continue; }
+        if (text[i++] === "'") break;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === '`' || ch === '[') {
+      const close = ch === '[' ? ']' : ch;
+      let value = '';
+      i++;
+      while (i < text.length) {
+        if (text[i] === close && text[i + 1] === close && ch !== '[') { value += close; i += 2; continue; }
+        if (text[i] === close) { i++; break; }
+        value += text[i++];
+      }
+      if (value) { out.add(value); out.add(value.toLowerCase()); }
+      continue;
+    }
+    if (/[A-Za-z_$#]/.test(ch)) {
+      let j = i + 1;
+      while (j < text.length && /[A-Za-z0-9_$#]/.test(text[j])) j++;
+      const value = text.slice(i, j);
+      out.add(value);
+      out.add(value.toLowerCase());
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return out;
+}
+
+function dropForeignKeySql(adapter, dialect, T, name) {
+  const q = (n) => adapter.quoteIdent(n);
+  if (dialect === 'mysql') return `ALTER TABLE ${T} DROP FOREIGN KEY ${q(name)}`;
+  return `ALTER TABLE ${T} DROP CONSTRAINT ${q(name)}`;
+}
+
+function dropConstraintSql(adapter, dialect, T, item) {
+  const q = (n) => adapter.quoteIdent(n);
+  const name = cleanName(item.name);
+  if (dialect === 'mysql') {
+    return String(item.kind || '').toLowerCase() === 'check'
+      ? (/mariadb/i.test(String(adapter.serverVersion || ''))
+        ? `ALTER TABLE ${T} DROP CONSTRAINT ${q(name)}`
+        : `ALTER TABLE ${T} DROP CHECK ${q(name)}`)
+      : `ALTER TABLE ${T} DROP INDEX ${q(item.indexName || name)}`;
+  }
+  return `ALTER TABLE ${T} DROP CONSTRAINT ${q(name)}`;
 }
 
 /** CREATE TABLE（+ 索引 + 注释），返回 {sqls, warnings} */
@@ -122,6 +363,25 @@ function buildCreateTable(adapter, db, schema, model) {
   if (pkCols.length && !sqliteInlinePk && dialect !== 'clickhouse') {
     lines.push(`  PRIMARY KEY (${pkCols.map(q).join(', ')})`);
   }
+  const cap = caps(dialect);
+  const foreignKeys = model.foreignKeys || [];
+  if (foreignKeys.length) {
+    if (!cap.foreignKeys) {
+      warnings.push('该数据库不支持在设计器中创建外键，相关定义已忽略');
+    } else {
+      for (const fk of foreignKeys) {
+        lines.push('  ' + foreignKeyDef(adapter, dialect, db, schema, model.table, fk, warnings));
+      }
+    }
+  }
+  const constraints = model.constraints || [];
+  for (const item of constraints) {
+    if (!constraintSupported(cap, item)) {
+      warnings.push(`该数据库不支持 ${String(item.kind || '').toUpperCase()} 约束，约束 ${constraintName(item, model.table)} 已忽略`);
+      continue;
+    }
+    lines.push('  ' + constraintDef(adapter, model.table, item));
+  }
   let sql = `CREATE TABLE ${T} (\n${lines.join(',\n')}\n)`;
   if (dialect === 'mysql') {
     sql += ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
@@ -137,7 +397,7 @@ function buildCreateTable(adapter, db, schema, model) {
 
   // 索引
   if ((model.indexes || []).length) {
-    if (!caps(dialect).indexes) {
+    if (!cap.indexes) {
       warnings.push('该数据库的索引不支持在设计器中创建，已忽略');
     } else {
       for (const ix of model.indexes) {
@@ -166,15 +426,202 @@ function buildAlterTable(adapter, db, schema, original, model) {
   const q = (n) => adapter.quoteIdent(n);
   const T = adapter.qualify(db, schema, original.table);
   const sqls = [];
+  const preSqls = [];
+  const postSqls = [];
   const warnings = [];
   const L = (v) => adapter.literal(v);
-
+  const finalTable = model.table || original.table;
+  const finalT = adapter.qualify(db, schema, finalTable);
+  const renamedTable = finalTable !== original.table ? { from: original.table, to: finalTable } : null;
   const origByName = new Map(original.columns.map((c) => [c.name, c]));
   const newCols = model.columns.filter((c) => c.name && c.name.trim());
   const keptOrig = new Set(newCols.filter((c) => c.origName).map((c) => c.origName));
-
   const fullType = (c) => composeType(c, dialect);
+  const columnTypeSignature = (c) => JSON.stringify([
+    fullType(c), String(c.charset || '').toLowerCase(), String(c.collation || '').toLowerCase(),
+  ]);
   const defStr = (c) => composeDefault(adapter, c.def);
+  const typeChangedColumns = new Set();
+  const deletedColumns = new Set();
+  const renamedColumns = new Map();
+  for (const c of newCols) {
+    if (!c.origName) continue;
+    const before = origByName.get(c.origName);
+    if (!before) continue;
+    if (columnTypeSignature(before) !== columnTypeSignature(c)) {
+      typeChangedColumns.add(c.origName);
+    }
+    if (c.name !== c.origName) {
+      renamedColumns.set(c.origName, c.name);
+      renamedColumns.set(String(c.origName).toLowerCase(), c.name);
+    }
+  }
+  for (const before of original.columns) {
+    if (keptOrig.has(before.name)) continue;
+    if (before.editSafe === false) {
+      throw new Error(`栏位 ${before.name} 含设计器无法无损保留的高级属性，不能在设计器中删除；请改用审核后的迁移 SQL`);
+    }
+    deletedColumns.add(before.name);
+  }
+  const changesColumnType = (columns) => (columns || []).some((name) => typeChangedColumns.has(name));
+  const renamedList = (columns) => (columns || []).map((name) => renamedColumns.get(name) || name);
+  const isSelfReference = (fk) => cleanName(fk.refTable) === cleanName(original.table)
+    && (!cleanName(fk.refSchema) || cleanName(fk.refSchema) === cleanName(schema || db));
+  const origPk = original.columns.filter((c) => c.pk).map((c) => c.name);
+  const newPkOrigNames = newCols.filter((c) => c.pk).map((c) => c.origName || c.name);
+  const newPk = newCols.filter((c) => c.pk).map((c) => c.name);
+
+  // 其他表指向当前表的外键不能由本设计页协调重建。涉及被引用栏位或
+  // 其候选键时必须先阻止，避免 MySQL/Oracle 已删本地约束后才在 ALTER 处失败。
+  const referencedBy = Array.isArray(original._referencedBy) ? original._referencedBy : [];
+  const isReferencedKey = (columns) => referencedBy.some((ref) => sameList(ref.refColumns || [], columns || []));
+  const touchedReferencedColumn = referencedBy.flatMap((ref) => ref.refColumns || []).find((name) => (
+    typeChangedColumns.has(name) || renamedColumns.has(name) || deletedColumns.has(name)
+  ));
+  if (touchedReferencedColumn) {
+    const ref = referencedBy.find((item) => (item.refColumns || []).includes(touchedReferencedColumn));
+    throw new Error(`栏位 ${touchedReferencedColumn} 正被外部表 ${(ref && [ref.schema, ref.table].filter(Boolean).join('.')) || ''} 的外键引用；请先用迁移 SQL 协调处理入站外键`);
+  }
+  if (referencedBy.length && JSON.stringify(origPk) !== JSON.stringify(newPkOrigNames) && isReferencedKey(origPk)) {
+    throw new Error('当前主键正被其他表外键引用；请先用迁移 SQL 协调处理入站外键，再修改主键');
+  }
+  for (const before of (original.constraints || []).filter((item) => String(item.kind || '').toLowerCase() === 'unique')) {
+    if (!isReferencedKey(before.columns)) continue;
+    const next = (model.constraints || []).find((item) => cleanName(item.origName) === cleanName(before.name));
+    const effective = next && {
+      ...next,
+      columns: sameList(next.columns, before.columns) ? renamedList(next.columns) : next.columns,
+    };
+    const expected = { ...before, columns: renamedList(before.columns) };
+    if (!effective || constraintChanged(expected, effective)) {
+      throw new Error(`唯一约束 ${before.name} 正被其他表外键引用；请先用迁移 SQL 协调处理入站外键`);
+    }
+  }
+  for (const before of (original.indexes || []).filter((item) => item.unique && !item.primary)) {
+    if (!isReferencedKey(before.columns)) continue;
+    const next = (model.indexes || []).find((item) => cleanName(item.origName) === cleanName(before.name));
+    const effectiveColumns = next && (sameList(next.columns, before.columns) ? renamedList(next.columns) : next.columns);
+    if (!next || indexName(next, original.table) !== before.name || !next.unique
+        || !sameList(effectiveColumns, renamedList(before.columns))) {
+      throw new Error(`唯一索引 ${before.name} 正被其他表外键引用；请先用迁移 SQL 协调处理入站外键`);
+    }
+  }
+
+  // 外键和表约束必须在栏位变化前删除，并在栏位/表重命名完成后重建。
+  // SQLite 无通用 ALTER CONSTRAINT，明确降级为只读而不是生成必然失败的 SQL。
+  const originalFks = new Map((original.foreignKeys || []).map((fk) => [cleanName(fk.name), fk]));
+  const nextFks = model.foreignKeys || [];
+  const keptFks = new Set();
+  let unsupportedFkChange = false;
+  for (const fk of nextFks) {
+    const oldName = cleanName(fk.origName);
+    const before = oldName ? originalFks.get(oldName) : null;
+    if (before) keptFks.add(oldName);
+    const dependencyChanged = !!before && (changesColumnType(before.columns)
+      || (isSelfReference(before) && changesColumnType(before.refColumns)));
+    let effectiveFk = fk;
+    if (before) {
+      const deletedLocal = (before.columns || []).find((name) => deletedColumns.has(name));
+      const deletedRef = isSelfReference(before)
+        && (before.refColumns || []).find((name) => deletedColumns.has(name));
+      if ((deletedLocal && sameList(fk.columns, before.columns))
+          || (deletedRef && sameList(fk.refColumns, before.refColumns))) {
+        throw new Error(`外键 ${oldName} 仍引用已删除栏位 ${deletedLocal || deletedRef}，请先删除或修改该外键`);
+      }
+      effectiveFk = {
+        ...fk,
+        columns: sameList(fk.columns, before.columns) ? renamedList(fk.columns) : fk.columns,
+        refColumns: isSelfReference(before) && sameList(fk.refColumns, before.refColumns)
+          ? renamedList(fk.refColumns) : fk.refColumns,
+      };
+      const expectedAfterRename = {
+        ...before,
+        columns: renamedList(before.columns),
+        refColumns: isSelfReference(before) ? renamedList(before.refColumns) : before.refColumns,
+      };
+      const explicitlyChanged = foreignKeyChanged(expectedAfterRename, effectiveFk);
+      if (!explicitlyChanged && !dependencyChanged) continue;
+      if (before.rebuildSafe === false) {
+        throw new Error(`外键 ${oldName} 含设计器无法无损保留的高级属性，请先用 SQL 手动处理该外键，再修改相关栏位`);
+      }
+    }
+    if (!cap.foreignKeys || !cap.foreignKeyAlter) {
+      unsupportedFkChange = true;
+      continue;
+    }
+    if (before) preSqls.push(dropForeignKeySql(adapter, dialect, T, oldName));
+    postSqls.push(`ALTER TABLE ${finalT} ADD ${foreignKeyDef(adapter, dialect, db, schema, finalTable, effectiveFk, warnings, renamedTable)}`);
+  }
+  for (const [name] of originalFks) {
+    if (keptFks.has(name)) continue;
+    if (!cap.foreignKeys || !cap.foreignKeyAlter) unsupportedFkChange = true;
+    else preSqls.push(dropForeignKeySql(adapter, dialect, T, name));
+  }
+  if (unsupportedFkChange) warnings.push('该数据库不能直接修改既有表外键（需要重建表），外键改动已忽略');
+
+  const originalConstraints = new Map((original.constraints || []).map((item) => [cleanName(item.name), item]));
+  const nextConstraints = model.constraints || [];
+  const keptConstraints = new Set();
+  let unsupportedConstraintChange = false;
+  for (const item of nextConstraints) {
+    const oldName = cleanName(item.origName);
+    const before = oldName ? originalConstraints.get(oldName) : null;
+    if (before) keptConstraints.add(oldName);
+    const kind = before && String(before.kind || '').toLowerCase();
+    const checkIdentifiers = kind === 'check' ? expressionIdentifiers(before.expression) : null;
+    const checkTouches = !!checkIdentifiers && [...typeChangedColumns].some((name) => (
+      checkIdentifiers.has(name) || checkIdentifiers.has(String(name).toLowerCase())
+    ));
+    const checkRenameTouches = !!checkIdentifiers && [...renamedColumns.keys()].some((name) => (
+      checkIdentifiers.has(name) || checkIdentifiers.has(String(name).toLowerCase())
+    ));
+    const dependencyChanged = !!before && (kind === 'unique' ? changesColumnType(before.columns) : checkTouches);
+    let effectiveItem = item;
+    if (before) {
+      if (kind === 'unique') {
+        const deleted = (before.columns || []).find((name) => deletedColumns.has(name));
+        if (deleted && sameList(item.columns, before.columns)) {
+          throw new Error(`唯一约束 ${oldName} 仍引用已删除栏位 ${deleted}，请先删除或修改该约束`);
+        }
+        effectiveItem = {
+          ...item,
+          columns: sameList(item.columns, before.columns) ? renamedList(item.columns) : item.columns,
+        };
+      } else if (kind === 'check') {
+        const deleted = [...deletedColumns].find((name) => (
+          checkIdentifiers.has(name) || checkIdentifiers.has(String(name).toLowerCase())
+        ));
+        if (deleted && String(item.expression || '').trim() === String(before.expression || '').trim()) {
+          throw new Error(`检查约束 ${oldName} 仍引用已删除栏位 ${deleted}，请先删除或修改该约束`);
+        }
+        if (checkRenameTouches
+            && String(item.expression || '').trim() === String(before.expression || '').trim()
+            && (dialect === 'mysql' || dependencyChanged)) {
+          throw new Error(`检查约束 ${oldName} 可能引用已改名栏位；请在“约束”页手动更新 CHECK 表达式后再保存`);
+        }
+      }
+      const expectedAfterRename = kind === 'unique'
+        ? { ...before, columns: renamedList(before.columns) }
+        : before;
+      const explicitlyChanged = constraintChanged(expectedAfterRename, effectiveItem);
+      if (!explicitlyChanged && !dependencyChanged) continue;
+      if (before.rebuildSafe === false) {
+        throw new Error(`${kind === 'check' ? '检查' : '唯一'}约束 ${oldName} 含设计器无法无损保留的高级属性，请先用 SQL 手动处理该约束`);
+      }
+    }
+    if (!constraintSupported(cap, item) || !cap.constraintAlter) {
+      unsupportedConstraintChange = true;
+      continue;
+    }
+    if (before) preSqls.push(dropConstraintSql(adapter, dialect, T, before));
+    postSqls.push(`ALTER TABLE ${finalT} ADD ${constraintDef(adapter, finalTable, effectiveItem)}`);
+  }
+  for (const [name, item] of originalConstraints) {
+    if (keptConstraints.has(name)) continue;
+    if (!constraintSupported(cap, item) || !cap.constraintAlter) unsupportedConstraintChange = true;
+    else preSqls.push(dropConstraintSql(adapter, dialect, T, item));
+  }
+  if (unsupportedConstraintChange) warnings.push('该数据库不能直接修改既有表 UNIQUE/CHECK 约束（需要重建表），约束改动已忽略');
 
   // 1) 重命名 + 修改
   for (const c of newCols) {
@@ -182,11 +629,18 @@ function buildAlterTable(adapter, db, schema, original, model) {
     const o = origByName.get(c.origName);
     if (!o) continue;
     const renamed = c.name !== c.origName;
-    const typeChanged = fullType(c) !== fullType(o);
+    const typeChanged = columnTypeSignature(c) !== columnTypeSignature(o);
     const nullChanged = !!c.notNull !== !!o.notNull;
     const defChanged = String(c.def || '') !== String(o.def || '');
     const cmtChanged = String(c.comment || '') !== String(o.comment || '');
-    if (!renamed && !typeChanged && !nullChanged && !defChanged && !cmtChanged) continue;
+    const autoChanged = !!c.autoInc !== !!o.autoInc;
+    if (!renamed && !typeChanged && !nullChanged && !defChanged && !cmtChanged && !autoChanged) continue;
+    if (o.editSafe === false) {
+      throw new Error(`栏位 ${o.name} 含设计器无法无损保留的高级属性，当前为只读；请改用审核后的迁移 SQL`);
+    }
+    if (autoChanged && dialect !== 'mysql') {
+      throw new Error(`当前数据库不能通过设计器修改既有栏位 ${o.name} 的自增/标识属性，请使用专用迁移 SQL`);
+    }
 
     if (dialect === 'mysql') {
       // CHANGE 同时处理改名与定义
@@ -203,7 +657,7 @@ function buildAlterTable(adapter, db, schema, original, model) {
         sqls.push(`ALTER TABLE ${T} RENAME COLUMN ${q(c.origName)} TO ${q(c.name)}`);
       }
     }
-    if (typeChanged || nullChanged || defChanged || cmtChanged) {
+    if (typeChanged || nullChanged || defChanged || cmtChanged || autoChanged) {
       if (dialect === 'sqlite') {
         warnings.push(`SQLite 不支持修改栏位 ${c.name} 的类型/约束（需重建表），相关改动已忽略`);
         continue;
@@ -275,9 +729,6 @@ function buildAlterTable(adapter, db, schema, original, model) {
   }
 
   // 4) 主键变化
-  const origPk = original.columns.filter((c) => c.pk).map((c) => c.name);
-  const newPkOrigNames = newCols.filter((c) => c.pk).map((c) => c.origName || c.name);
-  const newPk = newCols.filter((c) => c.pk).map((c) => c.name);
   if (JSON.stringify(origPk) !== JSON.stringify(newPkOrigNames)) {
     if (!cap.pkChange) {
       warnings.push('该数据库不支持在设计器中修改主键，相关改动已忽略');
@@ -297,7 +748,8 @@ function buildAlterTable(adapter, db, schema, original, model) {
 
   // 5) 索引变化（按名称对比；忽略主键索引）
   if (cap.indexes) {
-    const origIx = new Map((original.indexes || []).filter((i) => !i.primary).map((i) => [i.name, i]));
+    // 表达式/筛选索引无法由当前网格无损表示；保留但不纳入差异，避免无关编辑误删。
+    const origIx = new Map((original.indexes || []).filter((i) => !i.primary && i.columns && i.columns.length).map((i) => [i.name, i]));
     const newIxs = (model.indexes || []).filter((i) => i.columns && i.columns.length);
     const seen = new Set();
     for (const ix of newIxs) {
@@ -308,15 +760,15 @@ function buildAlterTable(adapter, db, schema, original, model) {
         const changed = name !== ix.origName ||
           JSON.stringify(o.columns) !== JSON.stringify(ix.columns) || !!o.unique !== !!ix.unique;
         if (!changed) continue;
-        sqls.push(dropIndexSql(adapter, dialect, T, ix.origName));
-        sqls.push(createIndexSql(adapter, dialect, T, { ...ix, name }));
+        preSqls.push(dropIndexSql(adapter, dialect, db, schema, T, ix.origName));
+        postSqls.push(createIndexSql(adapter, dialect, finalT, { ...ix, name }));
       } else {
-        sqls.push(createIndexSql(adapter, dialect, T, { ...ix, name }));
+        postSqls.push(createIndexSql(adapter, dialect, finalT, { ...ix, name }));
       }
     }
     for (const [name] of origIx) {
       if (!seen.has(name) && !newIxs.some((i) => i.origName === name)) {
-        sqls.push(dropIndexSql(adapter, dialect, T, name));
+        preSqls.push(dropIndexSql(adapter, dialect, db, schema, T, name));
       }
     }
   }
@@ -334,19 +786,45 @@ function buildAlterTable(adapter, db, schema, original, model) {
     sqls.push(adapter.renameSql(db, schema, original.table, model.table));
   }
 
-  return { sqls, warnings };
+  const orderedSqls = [...preSqls, ...sqls, ...postSqls];
+  if (dialect === 'mysql') {
+    // MySQL/MariaDB DDL 会隐式提交。把同一张表的 DROP/栏位变化/ADD
+    // 合成一个 ALTER TABLE，避免后续语句失败时只留下“已删约束”的半成品。
+    if (renamedTable && orderedSqls.some((statement) => !/^RENAME\s+TABLE\b/i.test(statement))) {
+      throw new Error('MySQL/MariaDB 的表重命名请单独保存；完成并重新打开设计页后，再修改栏位、索引或约束');
+    }
+    if (!renamedTable) {
+      const prefix = `ALTER TABLE ${T} `;
+      const clauses = [];
+      const others = [];
+      for (const statement of orderedSqls) {
+        if (statement.startsWith(prefix)) clauses.push(statement.slice(prefix.length));
+        else others.push(statement);
+      }
+      return {
+        sqls: [...(clauses.length ? [`${prefix}${clauses.join(',\n  ')}`] : []), ...others],
+        warnings,
+      };
+    }
+  }
+  return { sqls: orderedSqls, warnings };
 }
 
 function createIndexSql(adapter, dialect, T, ix) {
   const q = (n) => adapter.quoteIdent(n);
+  if (dialect === 'mysql') {
+    return `ALTER TABLE ${T} ADD ${ix.unique ? 'UNIQUE ' : ''}INDEX ${q(ix.name)} (${ix.columns.map(q).join(', ')})`;
+  }
   return `CREATE ${ix.unique ? 'UNIQUE ' : ''}INDEX ${q(ix.name)} ON ${T} (${ix.columns.map(q).join(', ')})`;
 }
 
-function dropIndexSql(adapter, dialect, T, name) {
+function dropIndexSql(adapter, dialect, db, schema, T, name) {
   const q = (n) => adapter.quoteIdent(n);
   if (dialect === 'mysql') return `ALTER TABLE ${T} DROP INDEX ${q(name)}`;
   if (dialect === 'mssql') return `DROP INDEX ${q(name)} ON ${T}`;
-  return `DROP INDEX ${q(name)}`; // postgres / sqlite / oracle
+  if (dialect === 'postgres') return `DROP INDEX ${adapter.qualify(db, schema, name)}`;
+  if (dialect === 'oracle') return `DROP INDEX ${adapter.qualify(db, null, name)}`;
+  return `DROP INDEX ${q(name)}`; // sqlite
 }
 
 /** 把 tableInfo 结果转换为设计器模型 */
@@ -377,10 +855,29 @@ function infoToModel(info, table, dialect) {
       def,
       comment: c.comment || '',
       defConstraint: c.defConstraint || null,
+      charset: c.charset || '',
+      collation: c.collation || '',
+      editSafe: c.editSafe !== false,
+      editUnsafeReason: c.editUnsafeReason || '',
     };
   });
+  const constraints = (info.constraints || []).map((item) => ({
+    kind: String(item.kind || '').toLowerCase(),
+    name: item.name || '',
+    origName: item.name || '',
+    columns: (item.columns || []).slice(),
+    expression: item.expression || '',
+    indexName: item.indexName || null,
+    rebuildSafe: item.rebuildSafe !== false,
+  }));
+  const constraintIndexes = new Set();
+  for (const item of constraints) {
+    if (item.kind !== 'unique') continue;
+    if (item.indexName) constraintIndexes.add(item.indexName);
+    if (item.name) constraintIndexes.add(item.name);
+  }
   const indexes = (info.indexes || [])
-    .filter((i) => !i.primary && i.name !== 'PRIMARY')
+    .filter((i) => i.editable !== false && !i.primary && i.name !== 'PRIMARY' && !constraintIndexes.has(i.name))
     .map((i) => ({
       name: i.name,
       origName: i.name,
@@ -389,12 +886,25 @@ function infoToModel(info, table, dialect) {
       primary: false,
     }));
   const pkIdx = (info.indexes || []).filter((i) => i.primary || i.name === 'PRIMARY');
+  const foreignKeys = (info.foreignKeys || []).map((fk) => ({
+    name: fk.name || '',
+    origName: fk.name || '',
+    columns: (fk.columns || []).slice(),
+    refSchema: fk.refSchema || '',
+    refTable: fk.refTable || '',
+    refColumns: (fk.refColumns || []).slice(),
+    onUpdate: normalizeAction(fk.onUpdate),
+    onDelete: normalizeAction(fk.onDelete),
+    rebuildSafe: fk.rebuildSafe !== false,
+  }));
   return {
     table,
     comment: info.tableComment || '',
     options: '',
     columns,
     indexes,
+    foreignKeys,
+    constraints,
     // 保留主键索引信息供 ALTER 时取约束名
     _pkIndexes: pkIdx,
   };

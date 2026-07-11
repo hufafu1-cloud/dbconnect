@@ -11,6 +11,36 @@ export const state = {
   activeTarget: null,         // {connId, db, schema}
 };
 
+function normalizeTarget(target) {
+  if (!target || !target.connId) return null;
+  const out = { connId: String(target.connId) };
+  if (target.db !== undefined && target.db !== null && target.db !== '') out.db = String(target.db);
+  if (target.schema !== undefined && target.schema !== null && target.schema !== '') out.schema = String(target.schema);
+  if (target.table !== undefined && target.table !== null && target.table !== '') out.table = String(target.table);
+  return out;
+}
+
+/**
+ * 更新全局“当前连接 / 数据库 / 模式 / 对象”上下文。
+ * 所有树、对象页和工作标签都应通过这里切换，避免不同功能各自猜测目标。
+ */
+export function setActiveTarget(target, source = 'unknown') {
+  const next = normalizeTarget(target);
+  const prev = state.activeTarget;
+  if (JSON.stringify(prev) === JSON.stringify(next)) return next;
+  state.activeTarget = next;
+  emit('target-selected', next ? { ...next, source } : null);
+  return next;
+}
+
+export function getActiveTarget({ requireOpen = false, requireDb = false } = {}) {
+  const target = state.activeTarget;
+  if (!target) return null;
+  if (requireOpen && !state.open.has(target.connId)) return null;
+  if (requireDb && !target.db) return null;
+  return { ...target };
+}
+
 export function connById(id) {
   return state.connections.find((c) => c.id === id);
 }

@@ -9,6 +9,7 @@
 const mysql = require('mysql2/promise');
 const { BaseAdapter } = require('./base');
 const { synthesizeDDL, limitQueryRows } = require('./sqlutil');
+const invalidSessions = new WeakSet();
 
 class OBOracleAdapter extends BaseAdapter {
   get dialect() { return 'oracle'; }
@@ -22,6 +23,7 @@ class OBOracleAdapter extends BaseAdapter {
       password: c.password || '',
       waitForConnections: true,
       connectionLimit: 5,
+      resetOnRelease: true,
       multipleStatements: false,
       dateStrings: true,
       supportBigNumbers: true,
@@ -74,14 +76,27 @@ class OBOracleAdapter extends BaseAdapter {
       requestId,
     );
     this._trackRequestHandle(conn, requestId);
+    const run = (sql, runOpts) => this._run(conn, sql, runOpts);
+    run.requestHandle = conn;
+    let invalidated = false;
+    let released = false;
+    run.invalidate = () => {
+      if (invalidated || released) return;
+      invalidated = true;
+      invalidSessions.add(conn);
+      try { conn.destroy(); } catch (e) { /* already disconnected */ }
+    };
     try {
       this._assertRequestActive(requestId);
       if (db) await conn.query(`ALTER SESSION SET CURRENT_SCHEMA = ${this.quoteIdent(db)}`);
       this._assertRequestActive(requestId);
-      return await fn((sql, opts) => this._run(conn, sql, opts));
+      return await fn(run);
     } finally {
       this._untrackRequestHandle(conn, requestId);
-      conn.release();
+      if (!invalidated && !invalidSessions.has(conn)) {
+        released = true;
+        conn.release();
+      }
     }
   }
 
@@ -89,7 +104,7 @@ class OBOracleAdapter extends BaseAdapter {
   async cancel(requestId) {
     this._markRequestCancelled(requestId);
     for (const conn of this._requestHandlesFor(requestId)) {
-      try { conn.destroy(); } catch (e) { /* 会话可能刚好结束 */ }
+      try { invalidSessions.add(conn); conn.destroy(); } catch (e) { /* 会话可能刚好结束 */ }
     }
   }
 
@@ -170,27 +185,213 @@ class OBOracleAdapter extends BaseAdapter {
   async listForeignKeys(db, _schema, table) {
     const L = (v) => this.literal(v);
     const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);
-    let rows;
-    try {
-      rows = await this._q(
-        `SELECT ac.constraint_name AS name, cc.column_name AS col, cc.position AS pos,
-                rc.owner AS refowner, rc.table_name AS reftab, rcc.column_name AS refcol
-         FROM all_constraints ac
-         JOIN all_cons_columns cc ON cc.owner = ac.owner AND cc.constraint_name = ac.constraint_name
-         JOIN all_constraints rc ON rc.owner = ac.r_owner AND rc.constraint_name = ac.r_constraint_name
-         JOIN all_cons_columns rcc ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name AND rcc.position = cc.position
-         WHERE ac.constraint_type = 'R' AND ac.owner = ${L(db)} AND ac.table_name = ${L(table)}
-         ORDER BY ac.constraint_name, cc.position`);
-    } catch (e) { return []; }
+    const rebuildSafe = (r) => /^ENABLED?$/.test(String(val(r, 'status') || 'ENABLED').toUpperCase())
+      && String(val(r, 'deferrable') || 'NOT DEFERRABLE').toUpperCase() === 'NOT DEFERRABLE'
+      && String(val(r, 'deferred') || 'IMMEDIATE').toUpperCase() === 'IMMEDIATE'
+      && String(val(r, 'validated') || 'VALIDATED').toUpperCase() === 'VALIDATED'
+      && String(val(r, 'rely') || 'NORELY').toUpperCase() === 'NORELY';
+    const rows = await this._q(
+      `SELECT ac.constraint_name AS name, cc.column_name AS col, cc.position AS pos,
+              rc.owner AS refowner, rc.table_name AS reftab, rcc.column_name AS refcol,
+              ac.delete_rule AS delete_rule, ac.status, ac.deferrable, ac.deferred, ac.validated, ac.rely
+       FROM all_constraints ac
+       JOIN all_cons_columns cc ON cc.owner = ac.owner AND cc.constraint_name = ac.constraint_name
+       JOIN all_constraints rc ON rc.owner = ac.r_owner AND rc.constraint_name = ac.r_constraint_name
+       JOIN all_cons_columns rcc ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name AND rcc.position = cc.position
+       WHERE ac.constraint_type = 'R' AND ac.owner = ${L(db)} AND ac.table_name = ${L(table)}
+       ORDER BY ac.constraint_name, cc.position`);
     const map = new Map();
     for (const r of rows) {
       const name = val(r, 'name');
-      if (!map.has(name)) map.set(name, { name, columns: [], refSchema: val(r, 'refowner') === db ? null : val(r, 'refowner'), refTable: val(r, 'reftab'), refColumns: [] });
+      if (!map.has(name)) map.set(name, {
+        name, columns: [], refSchema: val(r, 'refowner') === db ? null : val(r, 'refowner'),
+        refTable: val(r, 'reftab'), refColumns: [], onUpdate: 'NO ACTION',
+        onDelete: val(r, 'delete_rule') || 'NO ACTION',
+        rebuildSafe: rebuildSafe(r),
+      });
       const fk = map.get(name);
       fk.columns.push(val(r, 'col'));
       fk.refColumns.push(val(r, 'refcol'));
     }
     return [...map.values()];
+  }
+
+  async listReferencingForeignKeys(db, _schema, table) {
+    const L = (v) => this.literal(v);
+    const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);
+    const rows = await this._q(
+      `SELECT ac.constraint_name AS name, ac.owner AS child_schema,
+              ac.table_name AS child_table, cc.column_name AS col,
+              rcc.column_name AS refcol, cc.position AS pos
+       FROM all_constraints ac
+       JOIN all_cons_columns cc ON cc.owner = ac.owner AND cc.constraint_name = ac.constraint_name
+       JOIN all_constraints rc ON rc.owner = ac.r_owner AND rc.constraint_name = ac.r_constraint_name
+       JOIN all_cons_columns rcc ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name AND rcc.position = cc.position
+       WHERE ac.constraint_type = 'R' AND rc.owner = ${L(db)} AND rc.table_name = ${L(table)}
+         AND NOT (ac.owner = ${L(db)} AND ac.table_name = ${L(table)})
+       ORDER BY ac.owner, ac.table_name, ac.constraint_name, cc.position`);
+    const map = new Map();
+    for (const row of rows) {
+      const name = val(row, 'name');
+      const childSchema = val(row, 'child_schema');
+      const childTable = val(row, 'child_table');
+      const key = `${childSchema}\0${childTable}\0${name}`;
+      if (!map.has(key)) map.set(key, {
+        name, schema: childSchema, table: childTable, columns: [], refColumns: [],
+      });
+      const fk = map.get(key);
+      fk.columns.push(val(row, 'col'));
+      fk.refColumns.push(val(row, 'refcol'));
+    }
+    return [...map.values()];
+  }
+
+  async listConstraints(db, _schema, table) {
+    const L = (v) => this.literal(v);
+    const val = (r, k) => (r[k.toUpperCase()] !== undefined ? r[k.toUpperCase()] : r[k.toLowerCase()]);
+    const rebuildSafe = (r) => /^ENABLED?$/.test(String(val(r, 'status') || 'ENABLED').toUpperCase())
+      && String(val(r, 'deferrable') || 'NOT DEFERRABLE').toUpperCase() === 'NOT DEFERRABLE'
+      && String(val(r, 'deferred') || 'IMMEDIATE').toUpperCase() === 'IMMEDIATE'
+      && String(val(r, 'validated') || 'VALIDATED').toUpperCase() === 'VALIDATED'
+      && String(val(r, 'rely') || 'NORELY').toUpperCase() === 'NORELY';
+    const nonNullRows = await this._q(
+      `SELECT column_name
+       FROM all_tab_columns
+       WHERE owner = ${L(db)} AND table_name = ${L(table)} AND nullable = 'N'`);
+    const nonNullColumns = new Set(nonNullRows.map((row) => val(row, 'column_name')));
+
+    const uniqueRows = await this._q(
+      `SELECT ac.constraint_name AS name, ac.index_name AS index_name,
+              ac.status, ac.deferrable, ac.deferred, ac.validated, ac.rely,
+              cc.column_name AS col, cc.position AS pos
+       FROM all_constraints ac
+       JOIN all_cons_columns cc ON cc.owner = ac.owner AND cc.constraint_name = ac.constraint_name
+       WHERE ac.constraint_type = 'U' AND ac.owner = ${L(db)} AND ac.table_name = ${L(table)}
+       ORDER BY ac.constraint_name, cc.position`);
+    const uniqueMap = new Map();
+    for (const row of uniqueRows) {
+      const name = val(row, 'name');
+      if (!uniqueMap.has(name)) uniqueMap.set(name, {
+        kind: 'unique', name, columns: [], expression: '', indexName: val(row, 'index_name') || null,
+        // Oracle UNIQUE may carry index storage/physical attributes that this grid cannot express.
+        rebuildSafe: false,
+      });
+      uniqueMap.get(name).columns.push(val(row, 'col'));
+    }
+
+    let checkRows;
+    let usedSearchConditionVc = true;
+    try {
+      checkRows = await this._q(
+        `SELECT constraint_name AS name, search_condition_vc AS expression,
+                status, deferrable, deferred, validated, rely
+         FROM all_constraints
+         WHERE constraint_type = 'C' AND owner = ${L(db)} AND table_name = ${L(table)}
+         ORDER BY constraint_name`);
+    } catch (searchConditionVcError) {
+      usedSearchConditionVc = false;
+      try {
+        checkRows = await this._q(
+          `SELECT constraint_name AS name, search_condition AS expression,
+                  status, deferrable, deferred, validated, rely
+           FROM all_constraints
+           WHERE constraint_type = 'C' AND owner = ${L(db)} AND table_name = ${L(table)}
+           ORDER BY constraint_name`);
+      } catch (searchConditionError) {
+        throw new Error(`读取 CHECK 约束表达式失败，已禁止在设计器中修改该表：SEARCH_CONDITION_VC: ${searchConditionVcError.message || searchConditionVcError}; SEARCH_CONDITION: ${searchConditionError.message || searchConditionError}`);
+      }
+    }
+
+    const checkColumnRows = await this._q(
+      `SELECT ac.constraint_name AS name, cc.column_name AS col, cc.position AS pos
+       FROM all_constraints ac
+       LEFT JOIN all_cons_columns cc ON cc.owner = ac.owner AND cc.constraint_name = ac.constraint_name
+       WHERE ac.constraint_type = 'C' AND ac.owner = ${L(db)} AND ac.table_name = ${L(table)}
+       ORDER BY ac.constraint_name, cc.position`);
+    const checkColumns = new Map();
+    for (const row of checkColumnRows) {
+      const name = val(row, 'name');
+      if (!checkColumns.has(name)) checkColumns.set(name, []);
+      const column = val(row, 'col');
+      if (column !== null && column !== undefined && !checkColumns.get(name).includes(column)) {
+        checkColumns.get(name).push(column);
+      }
+    }
+
+    const checkMap = new Map();
+    for (const row of checkRows) {
+      const name = val(row, 'name');
+      const rawExpression = val(row, 'expression');
+      if (rawExpression === null || rawExpression === undefined
+          || (typeof rawExpression === 'object' && !Buffer.isBuffer(rawExpression))) {
+        throw new Error(`CHECK 约束 ${name || '(unknown)'} 的表达式元数据不完整，已禁止在设计器中修改该表`);
+      }
+      const expression = (Buffer.isBuffer(rawExpression)
+        ? rawExpression.toString('utf8') : String(rawExpression)).trim();
+      if (!expression || (usedSearchConditionVc && expression.length >= 4000)) {
+        throw new Error(`CHECK 约束 ${name || '(unknown)'} 的表达式缺失或疑似被截断，已禁止在设计器中修改该表`);
+      }
+      if (checkMap.has(name)) {
+        throw new Error(`CHECK 约束 ${name || '(unknown)'} 的表达式元数据重复，已禁止在设计器中修改该表`);
+      }
+      checkMap.set(name, {
+        name, expression, columns: checkColumns.get(name) || [], row,
+      });
+    }
+    for (const name of checkColumns.keys()) {
+      if (!checkMap.has(name)) {
+        throw new Error(`CHECK 约束 ${name || '(unknown)'} 的表达式元数据缺失，已禁止在设计器中修改该表`);
+      }
+    }
+
+    const stripOuterParens = (value) => {
+      let text = String(value).trim();
+      while (text.startsWith('(') && text.endsWith(')')) {
+        let depth = 0;
+        let quote = null;
+        let enclosesAll = true;
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i];
+          if (quote) {
+            if (ch === quote && text[i + 1] === quote) { i++; continue; }
+            if (ch === quote) quote = null;
+            continue;
+          }
+          if (ch === "'" || ch === '"') { quote = ch; continue; }
+          if (ch === '(') depth++;
+          else if (ch === ')') {
+            depth--;
+            if (depth === 0 && i !== text.length - 1) { enclosesAll = false; break; }
+            if (depth < 0) { enclosesAll = false; break; }
+          }
+        }
+        if (!enclosesAll || depth !== 0 || quote) break;
+        text = text.slice(1, -1).trim();
+      }
+      return text;
+    };
+    const isNotNullExpression = (expression, column) => {
+      const match = /^(?:"((?:[^"]|"")*)"|([A-Za-z_$#][A-Za-z0-9_$#]*))\s+IS\s+NOT\s+NULL$/i.exec(
+        stripOuterParens(expression),
+      );
+      if (!match) return false;
+      const actual = String(column);
+      if (match[1] !== undefined) return match[1].replace(/""/g, '"') === actual;
+      return match[2].toUpperCase() === actual.toUpperCase();
+    };
+
+    const out = [...uniqueMap.values()];
+    for (const item of checkMap.values()) {
+      const onlyColumn = item.columns.length === 1 ? item.columns[0] : null;
+      // Oracle 把 NOT NULL 也表示为系统 CHECK；仅在列元数据和表达式均精确匹配时排除。
+      if (onlyColumn && nonNullColumns.has(onlyColumn)
+          && isNotNullExpression(item.expression, onlyColumn)) continue;
+      out.push({
+        kind: 'check', name: item.name, columns: [], expression: item.expression,
+        rebuildSafe: rebuildSafe(item.row),
+      });
+    }
+    return out;
   }
 
   async _run(conn, sql, opts) {
@@ -291,8 +492,13 @@ class OBOracleAdapter extends BaseAdapter {
       key: pk.includes(val(r, 'column_name')) ? 'PRI' : '',
       extra: '',
       comment: val(r, 'comments') || '',
+      // OceanBase Oracle 兼容视图在不同版本对虚拟、隐藏、identity、
+      // collation 等属性暴露不一致；既有栏位只读，避免 ALTER 时降级。
+      editSafe: false,
+      editUnsafeReason: 'OceanBase Oracle 既有栏位可能含虚拟、隐藏或标识等高级属性；请使用迁移 SQL 修改',
     }));
     let indexes = [];
+    let metadataComplete = true;
     try {
       const ix = await this._q(
         `SELECT i.index_name, i.uniqueness, ic.column_name
@@ -307,7 +513,7 @@ class OBOracleAdapter extends BaseAdapter {
         map.get(nm).columns.push(val(r, 'column_name'));
       }
       indexes = [...map.values()];
-    } catch (e) { /* ignore */ }
+    } catch (e) { metadataComplete = false; }
     let ddl = '';
     try {
       const rows = await this._q(
@@ -322,7 +528,7 @@ class OBOracleAdapter extends BaseAdapter {
         `SELECT comments FROM all_tab_comments WHERE owner = ${L(db)} AND table_name = ${L(table)}`);
       tableComment = (r[0] && (r[0].COMMENTS !== undefined ? r[0].COMMENTS : r[0].comments)) || '';
     } catch (e) { /* ignore */ }
-    return { columns, indexes, pk, ddl, tableComment };
+    return { columns, indexes, pk, ddl, tableComment, metadataComplete };
   }
 
   /** 去掉 ROWNUM 分页引入的辅助列 RN__ */
@@ -337,6 +543,14 @@ class OBOracleAdapter extends BaseAdapter {
   }
 
   /** Oracle 模式无 BEGIN；用会话级 autocommit 关闭实现原子提交 */
+  _transactionBeginSqls() { return ['SET AUTOCOMMIT = 0']; }
+
+  _transactionEndSqls(action) {
+    return [action === 'commit' ? 'COMMIT' : 'ROLLBACK'];
+  }
+
+  _transactionCleanupSqls() { return ['SET AUTOCOMMIT = 1']; }
+
   async execTxn(db, sqls) {
     await this.withSession(db, async (run) => {
       await run('SET AUTOCOMMIT = 0');

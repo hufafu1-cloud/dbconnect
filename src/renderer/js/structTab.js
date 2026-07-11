@@ -1,10 +1,11 @@
 // 设计表（结构查看）标签页：列 / 索引 / DDL
 import { el } from './util.js';
-import { connLabel, connColor } from './state.js';
+import { connLabel, connColor, setActiveTarget } from './state.js';
 import { addTab } from './tabs.js';
 import { toast } from './toast.js';
 
 export function openStructTab(target) {
+  setActiveTarget(target, 'structure-tab');
   const tabId = `struct:${target.connId}|${target.db}|${target.schema || ''}|${target.table}`;
   const tab = addTab({
     id: tabId,
@@ -13,6 +14,7 @@ export function openStructTab(target) {
     color: connColor(target.connId),
     tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}`,
   });
+  tab.setOnShow(() => setActiveTarget(target, 'structure-tab'));
   if (tab.pane.childElementCount) return tab;
 
   const body = el('div', { class: 'struct-pane' }, el('div', { style: { color: 'var(--text-muted)' } }, '加载中…'));

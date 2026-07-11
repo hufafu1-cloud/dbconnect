@@ -13,12 +13,67 @@ const history = require('./history');
 const safety = require('./safety');
 const fileAccess = require('./fileAccess');
 const sshHostKeys = require('./sshHostKeys');
+const workspaceStore = require('./workspaceStore');
 const { parseNcxBuffer, targetLabel, MAX_FILE_BYTES } = require('./navicatNcx');
 const connectionLocks = new Map();
 const navicatImportSessions = new Map();
 const NAVICAT_SESSION_TTL = 10 * 60 * 1000;
 const MAX_NAVICAT_SESSIONS = 20;
 const own = (obj, key) => !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+
+function rendererTransactionId(event, transactionId) {
+  const id = String(transactionId || '');
+  if (!id) throw new Error('事务 ID 不能为空');
+  return `wc-${event.sender.id}:${id}`;
+}
+
+function rendererRequestId(event, requestId) {
+  const id = String(requestId || '');
+  if (!id || id.length > 160 || !/^[A-Za-z0-9._:-]+$/.test(id)) throw new Error('查询请求 ID 无效');
+  return `wc-${event.sender.id}:${id}`;
+}
+
+const transactionOwners = new WeakMap();
+
+/**
+ * Transactions belong to the renderer document that opened them. Navigation,
+ * reload, crash, or destruction must retire that owner's sessions; otherwise
+ * a pooled connection can remain indefinitely inside an uncommitted transaction.
+ */
+function bindTransactionOwner(event) {
+  const sender = event && event.sender;
+  if (!sender) throw new Error('事务调用缺少渲染进程上下文');
+  let state = transactionOwners.get(sender);
+  if (state) return state;
+  const ownerId = sender.id;
+  state = { cleanup: Promise.resolve() };
+  const cleanup = () => {
+    state.cleanup = state.cleanup.catch(() => {})
+      .then(() => dbm.closeTransactionsByOwner(ownerId))
+      .catch(() => {});
+    return state.cleanup;
+  };
+  const onNavigation = (_navEvent, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) cleanup();
+  };
+  const onProcessGone = () => cleanup();
+  const onDestroyed = () => {
+    try { sender.removeListener('did-start-navigation', onNavigation); } catch (e) { /* destroyed */ }
+    try { sender.removeListener('render-process-gone', onProcessGone); } catch (e) { /* destroyed */ }
+    cleanup();
+  };
+  sender.on('did-start-navigation', onNavigation);
+  sender.on('render-process-gone', onProcessGone);
+  sender.once('destroyed', onDestroyed);
+  transactionOwners.set(sender, state);
+  return state;
+}
+
+async function transactionOwnerReady(event) {
+  const state = bindTransactionOwner(event);
+  await state.cleanup;
+  if (event.sender.isDestroyed && event.sender.isDestroyed()) throw new Error('渲染进程已关闭');
+}
 
 function purgeNavicatImportSessions() {
   const now = Date.now();
@@ -130,15 +185,43 @@ function assertConnectionFilesAuthorized(cfg) {
   }
 }
 
-function h(channel, fn, approvalOperation) {
+function h(channel, fn, approvalOperation, passEvent = false) {
   ipcMain.handle(channel, async (event, ...args) => {
     try {
       if (approvalOperation) safety.consume(event, approvalOperation, args[0]);
-      return { ok: true, data: await fn(...args) };
+      return { ok: true, data: await (passEvent ? fn(event, ...args) : fn(...args)) };
     } catch (err) {
       return { ok: false, error: (err && err.message) || String(err) };
     }
   });
+}
+
+async function readDesignModel(ad, target) {
+  const [info, foreignKeys, constraints, referencedBy] = await Promise.all([
+    ad.tableInfo(target.db, target.schema, target.table),
+    ad.listForeignKeys(target.db, target.schema, target.table),
+    ad.listConstraints(target.db, target.schema, target.table),
+    ad.listReferencingForeignKeys(target.db, target.schema, target.table),
+  ]);
+  if (info && info.metadataComplete === false) {
+    throw new Error('表的索引或栏位元数据读取不完整。为避免丢失数据库属性，已禁止在设计器中修改该表');
+  }
+  const indexesByName = new Map((info.indexes || []).map((item) => [String(item.name || '').toLowerCase(), item]));
+  for (const item of constraints) {
+    if (String(item.kind || '').toLowerCase() !== 'unique' || !item.indexName) continue;
+    const index = indexesByName.get(String(item.indexName).toLowerCase());
+    if (index && index.editable === false) item.rebuildSafe = false;
+  }
+  info.foreignKeys = foreignKeys;
+  info.constraints = constraints;
+  const model = ddl.infoToModel(info, target.table, ad.dialect);
+  model._referencedBy = Array.isArray(referencedBy) ? referencedBy : [];
+  return model;
+}
+
+function sameDesignModel(left, right) {
+  try { return JSON.stringify(left) === JSON.stringify(right); }
+  catch (e) { return false; }
 }
 
 function register(getWin) {
@@ -310,7 +393,28 @@ function register(getWin) {
       }
     });
   });
-  h('db:close', (connId) => withConnectionLock(connId, () => dbm.close(connId)));
+  h('db:close', (connId) => withConnectionLock(connId, async () => {
+    const activity = dbm.activity(connId);
+    if (activity.transactions || activity.requests) {
+      const details = [
+        activity.transactions ? `${activity.transactions} 个未提交事务将回滚` : '',
+        activity.requests ? `${activity.requests} 个执行中查询将取消` : '',
+      ].filter(Boolean).join('，');
+      const confirmed = await dialog.showMessageBox(getWin(), {
+        type: 'warning',
+        title: '关闭数据库连接',
+        message: `此连接仍有活动操作：${details}。`,
+        detail: '只有明确继续才会关闭连接；事务回滚或查询取消失败时，该物理连接也会被直接退役，不会回到连接池。',
+        buttons: ['取消', '关闭并回滚'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      if (confirmed.response !== 1) return { closed: false, cancelled: true };
+    }
+    await dbm.close(connId);
+    return { closed: true };
+  }));
   h('db:databases', (connId) => dbm.get(connId).listDatabases());
   h('db:schemas', (a) => dbm.get(a.connId).listSchemas(a.db));
   h('db:objects', (a) => dbm.get(a.connId).listObjects(a.db, a.schema));
@@ -319,15 +423,24 @@ function register(getWin) {
     safety.assertWhereFragment(a.where);
     return dbm.get(a.connId).tableData(a.db, a);
   });
-  h('db:query', async (a) => {
+  h('db:query', async (event, a) => {
     const t0 = Date.now();
     let connName = '';
     try { connName = store.getById(a.connId).name; } catch (e) { /* ignore */ }
     try {
-      const results = await dbm.get(a.connId).runScript(a.db, a.sql, {
+      await transactionOwnerReady(event);
+      const adapter = dbm.get(a.connId);
+      const runOptions = {
         maxRows: a.maxRows,
-        requestId: a.requestId,
-      });
+        requestId: rendererRequestId(event, a.requestId),
+        schema: a.schema,
+      };
+      let results;
+      if (a.transactionId) {
+        results = await adapter.runTransactionScript(rendererTransactionId(event, a.transactionId), a.db, a.sql, runOptions);
+      } else {
+        results = await adapter.runScript(a.db, a.sql, runOptions);
+      }
       const firstErr = results.find((r) => r.error);
       history.add({
         connId: a.connId, connName, db: a.db || '', sql: a.sql,
@@ -342,10 +455,28 @@ function register(getWin) {
       });
       throw err;
     }
-  }, 'db.query');
+  }, 'db.query', true);
 
   // ---- 取消查询 / 列补全 / 外键 / BLOB ----
-  h('db:cancel', (a) => dbm.get(a.connId).cancel(a.requestId));
+  h('db:cancel', (event, a) => dbm.get(a.connId).cancel(rendererRequestId(event, a.requestId)), null, true);
+  h('db:transactionStatus', async (event, a) => {
+    await transactionOwnerReady(event);
+    return dbm.get(a.connId).transactionStatus(rendererTransactionId(event, a.transactionId));
+  }, null, true);
+  h('db:transactionBegin', async (event, a) => {
+    await transactionOwnerReady(event);
+    return dbm.get(a.connId).beginTransaction(
+      rendererTransactionId(event, a.transactionId), a.db, { schema: a.schema },
+    );
+  }, null, true);
+  h('db:transactionCommit', async (event, a) => {
+    await transactionOwnerReady(event);
+    return dbm.get(a.connId).commitTransaction(rendererTransactionId(event, a.transactionId));
+  }, null, true);
+  h('db:transactionRollback', async (event, a) => {
+    await transactionOwnerReady(event);
+    return dbm.get(a.connId).rollbackTransaction(rendererTransactionId(event, a.transactionId));
+  }, null, true);
   h('db:allColumns', (a) => dbm.get(a.connId).listAllColumns(a.db, a.schema));
   h('db:foreignKeys', (a) => dbm.get(a.connId).listForeignKeys(a.db, a.schema, a.table));
   h('db:erModel', (a) => dbm.get(a.connId).erModel(a.db, a.schema, a.opts || {}));
@@ -474,6 +605,10 @@ function register(getWin) {
       linesBetweenQueries: 1,
     });
   });
+  h('sql:statementAt', (a) => {
+    const { statementAt } = require('./db/sqlutil');
+    return statementAt(a && a.sql, a && a.dialect, a && a.cursor);
+  });
   h('db:applyEdits', (a) => dbm.get(a.connId).applyEdits(a.db, a), 'db.applyEdits');
   h('db:action', (a) => dbm.get(a.connId).action(a.db, a), 'db.action');
 
@@ -484,8 +619,7 @@ function register(getWin) {
   });
   h('design:model', async (a) => {
     const ad = dbm.get(a.connId);
-    const info = await ad.tableInfo(a.db, a.schema, a.table);
-    return ddl.infoToModel(info, a.table, ad.dialect);
+    return readDesignModel(ad, a);
   });
   h('design:ddl', (a) => {
     const ad = dbm.get(a.connId);
@@ -495,10 +629,22 @@ function register(getWin) {
   });
   h('design:apply', async (a) => {
     const ad = dbm.get(a.connId);
+    if (a.original) {
+      const live = await readDesignModel(ad, {
+        db: a.db, schema: a.schema, table: a.original.table,
+      });
+      if (!sameDesignModel(live, a.original)) {
+        throw new Error('表结构已在设计器之外发生变化。为避免覆盖他人修改，本次保存已取消；请关闭并重新打开设计页后再操作');
+      }
+    }
     const built = a.original
       ? ddl.buildAlterTable(ad, a.db, a.schema, a.original, a.model)
       : ddl.buildCreateTable(ad, a.db, a.schema, a.model);
     if (!built.sqls.length) return { executed: 0, warnings: built.warnings };
+    if (['postgres', 'mssql', 'sqlite'].includes(ad.dialect)) {
+      await ad.execTxn(a.db, built.sqls);
+      return { executed: built.sqls.length, warnings: built.warnings };
+    }
     const r = await ad.execSequential(a.db, built.sqls);
     return { ...r, warnings: built.warnings };
   }, 'design.apply');
@@ -605,6 +751,11 @@ function register(getWin) {
   h('file:read', (p) => fs.promises.readFile(fileAccess.assertAllowed(p, 'read'), 'utf8'));
   h('file:write', (p, content) => fs.promises.writeFile(fileAccess.assertAllowed(p, 'write'), content, 'utf8'));
   h('file:writeBase64', (p, b64) => fs.promises.writeFile(fileAccess.assertAllowed(p, 'write'), Buffer.from(b64, 'base64')));
+
+  // ---- 工作区崩溃恢复（固定 userData 路径、原子写入，不接受任意文件路径） ----
+  h('workspace:read', () => workspaceStore.read());
+  h('workspace:write', (snapshot) => workspaceStore.write(snapshot));
+  h('workspace:clear', () => workspaceStore.clear());
 
   h('app:info', () => ({
     version: app.getVersion(),

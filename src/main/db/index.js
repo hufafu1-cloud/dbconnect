@@ -20,6 +20,44 @@ const ADAPTERS = {
 const openMap = new Map(); // connId -> adapter
 const tunnels = new Map(); // connId -> ssh tunnel
 
+const SHUTDOWN_TIMEOUTS = Object.freeze({ cancelMs: 750, transactionsMs: 2000, closeMs: 2000 });
+
+async function settleWithin(task, timeoutMs) {
+  let timer = null;
+  const work = Promise.resolve().then(task).then(() => true, () => true);
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), Math.max(1, Number(timeoutMs) || 1));
+  });
+  const settled = await Promise.race([work, timeout]);
+  if (timer) clearTimeout(timer);
+  return settled;
+}
+
+async function settleSuccessfulWithin(task, timeoutMs) {
+  let timer = null;
+  const work = Promise.resolve().then(task).then(() => true, () => false);
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), Math.max(1, Number(timeoutMs) || 1));
+  });
+  const settled = await Promise.race([work, timeout]);
+  if (timer) clearTimeout(timer);
+  return settled;
+}
+
+/** Cancel first, then roll back, while keeping connection shutdown bounded. */
+async function shutdownAdapter(ad, timeouts = SHUTDOWN_TIMEOUTS) {
+  if (!ad) return;
+  if (typeof ad.cancel === 'function') {
+    await settleWithin(() => ad.cancel(null), timeouts.cancelMs);
+  }
+  if (typeof ad.closeTransactions === 'function') {
+    await settleWithin(() => ad.closeTransactions(), timeouts.transactionsMs);
+  }
+  if (typeof ad.close === 'function') {
+    await settleWithin(() => ad.close(), timeouts.closeMs);
+  }
+}
+
 const DEFAULT_PORTS = { mysql: 3306, postgres: 5432, mssql: 1433, clickhouse: 8123, oceanbase: 2881, oboracle: 2881 };
 
 function createAdapter(cfg) {
@@ -64,11 +102,22 @@ function get(connId) {
 
 function isOpen(connId) { return openMap.has(connId); }
 
+function activity(connId) {
+  const ad = openMap.get(connId);
+  if (!ad) return { open: false, requests: 0, transactions: 0 };
+  const summary = typeof ad.connectionActivity === 'function' ? ad.connectionActivity() : {};
+  return {
+    open: true,
+    requests: Math.max(0, Number(summary.requests) || 0),
+    transactions: Math.max(0, Number(summary.transactions) || 0),
+  };
+}
+
 async function close(connId) {
   const ad = openMap.get(connId);
   if (ad) {
     openMap.delete(connId);
-    await ad.close().catch(() => {});
+    await shutdownAdapter(ad);
   }
   const tun = tunnels.get(connId);
   if (tun) {
@@ -80,9 +129,28 @@ async function close(connId) {
 async function closeAll() {
   const all = [...openMap.values()];
   openMap.clear();
-  await Promise.all(all.map((a) => a.close().catch(() => {})));
+  await Promise.all(all.map(async (a) => {
+    await shutdownAdapter(a);
+  }));
   for (const t of tunnels.values()) t.close();
   tunnels.clear();
+}
+
+async function closeTransactionsByOwner(ownerId) {
+  const numericOwner = Number(ownerId);
+  if (!Number.isSafeInteger(numericOwner) || numericOwner < 0) return;
+  const prefix = `wc-${numericOwner}:`;
+  const entries = [...openMap.entries()];
+  await Promise.all(entries.map(async ([connId, ad]) => {
+    if (!ad) return;
+    const requestsSettled = typeof ad.cancelRequestsByPrefix !== 'function'
+      || await settleSuccessfulWithin(() => ad.cancelRequestsByPrefix(prefix), SHUTDOWN_TIMEOUTS.cancelMs);
+    const transactionsSettled = typeof ad.closeTransactionsByPrefix !== 'function'
+      || await settleSuccessfulWithin(() => ad.closeTransactionsByPrefix(prefix), SHUTDOWN_TIMEOUTS.transactionsMs);
+    // Never leave an ownerless transaction pinned indefinitely. If targeted
+    // request/transaction cleanup cannot finish, retire that connection entirely.
+    if ((!requestsSettled || !transactionsSettled) && openMap.get(connId) === ad) await close(connId);
+  }));
 }
 
 async function testConnection(cfg) {
@@ -99,4 +167,7 @@ async function testConnection(cfg) {
   }
 }
 
-module.exports = { open, get, isOpen, close, closeAll, testConnection, createAdapter };
+module.exports = {
+  open, get, isOpen, activity, close, closeAll, closeTransactionsByOwner,
+  testConnection, createAdapter, shutdownAdapter,
+};

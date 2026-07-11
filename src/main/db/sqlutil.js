@@ -7,12 +7,71 @@
  */
 // 过程体（BEGIN…END）感知：命中后只在语句以 END 结尾时才允许按分号拆分
 const ROUTINE_BODY_RE = /\bCREATE\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+\s+)?(TEMP(ORARY)?\s+)?(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i;
-const BODY_END_RE = /\bEND\s*$/i;
 
-function splitSql(sql, dialect) {
+const PROCEDURAL_CLOSE_WORDS = new Set(['IF', 'CASE', 'LOOP', 'WHILE', 'REPEAT', 'FOR']);
+
+function keywordBeforeStatementEnd(tokens, index, keyword) {
+  for (let i = index + 1; i < tokens.length && tokens[i].value !== ';'; i++) {
+    if (tokens[i].value === keyword) return true;
+  }
+  return false;
+}
+
+/**
+ * MySQL/MariaDB routines and SQLite triggers may contain nested compound
+ * statements. A plain "ends with END" check mistakes an inner END for the end
+ * of the CREATE statement, so keep a small procedural stack instead.
+ */
+function routineBodyComplete(sql, dialect) {
+  const tokens = structuralTokens(sql, dialect);
+  const routineKinds = new Set(['PROCEDURE', 'FUNCTION', 'TRIGGER', 'EVENT']);
+  const routineAt = tokens.findIndex((token) => routineKinds.has(token.value));
+  if (routineAt < 0) return true;
+  const bodyAt = tokens.findIndex((token, index) => index > routineAt && token.value === 'BEGIN');
+  // MySQL also permits a single-statement stored function body (RETURN expr).
+  if (bodyAt < 0) return true;
+
+  const stack = [];
+  for (let i = bodyAt; i < tokens.length; i++) {
+    const value = tokens[i].value;
+    if (value === 'BEGIN') {
+      stack.push(value);
+    } else if (value === 'CASE') {
+      stack.push(value);
+    } else if (value === 'IF' && keywordBeforeStatementEnd(tokens, i, 'THEN')) {
+      stack.push(value);
+    } else if (value === 'LOOP' || value === 'REPEAT') {
+      stack.push(value);
+    } else if ((value === 'WHILE' || value === 'FOR') && keywordBeforeStatementEnd(tokens, i, 'DO')) {
+      stack.push(value);
+    } else if (value === 'END') {
+      if (stack.length) stack.pop();
+      if (PROCEDURAL_CLOSE_WORDS.has(tokens[i + 1] && tokens[i + 1].value)) i++;
+    }
+  }
+  return stack.length === 0;
+}
+
+function pushSqlRange(out, text, segmentStart, segmentEnd) {
+  const first = text.search(/\S/);
+  if (first < 0) return;
+  let last = text.length;
+  while (last > first && /\s/.test(text[last - 1])) last--;
+  out.push({
+    sql: text.slice(first, last),
+    start: segmentStart + first,
+    end: segmentStart + last,
+    rangeStart: segmentStart,
+    rangeEnd: segmentEnd,
+  });
+}
+
+/** splitSql 的带原文位置版本，供编辑器定位光标所在语句。 */
+function splitSqlRanges(sql, dialect) {
   const out = [];
   let cur = '';
   let i = 0;
+  let segmentStart = 0;
   const n = sql.length;
   const isMysql = dialect === 'mysql';
   const isPg = dialect === 'postgres';
@@ -131,21 +190,204 @@ function splitSql(sql, dialect) {
       }
     }
     if (ch === ';') {
-      if (bodyAware && ROUTINE_BODY_RE.test(cur) && !BODY_END_RE.test(cur.trimEnd())) {
+      if (bodyAware && ROUTINE_BODY_RE.test(cur) && !routineBodyComplete(cur, dialect)) {
         cur += ch; // 仍在过程体内，分号属于语句体
         i++;
         continue;
       }
-      if (cur.trim()) out.push(cur.trim());
+      pushSqlRange(out, cur, segmentStart, i + 1);
       cur = '';
       i++;
+      segmentStart = i;
       continue;
     }
     cur += ch;
     i++;
   }
-  if (cur.trim()) out.push(cur.trim());
+  pushSqlRange(out, cur, segmentStart, n);
   return out;
+}
+
+function splitSql(sql, dialect) {
+  const text = String(sql || '');
+  if (dialect === 'mssql') return mssqlStatementRanges(text).map((item) => item.sql);
+  if (dialect === 'oracle' || dialect === 'oracle12') {
+    return oracleStatementRanges(text, dialect).map((item) => item.sql);
+  }
+  return splitSqlRanges(text, dialect).map((item) => item.sql);
+}
+
+function offsetSqlRanges(ranges, offset) {
+  return ranges.map((item) => ({
+    ...item,
+    start: item.start + offset,
+    end: item.end + offset,
+    rangeStart: item.rangeStart + offset,
+    rangeEnd: item.rangeEnd + offset,
+  }));
+}
+
+function pushWholeStatementRange(out, text, start, rangeEnd, preserveTerminator = false) {
+  const first = text.search(/\S/);
+  if (first < 0) return;
+  let last = text.length;
+  while (last > first && /\s/.test(text[last - 1])) last--;
+  const raw = text.slice(first, last);
+  const sql = preserveTerminator ? raw : raw.replace(/;\s*$/, '');
+  out.push({
+    sql,
+    start: start + first,
+    end: start + first + sql.length,
+    rangeStart: start,
+    rangeEnd,
+  });
+}
+
+function mssqlControlFlowBatch(batch) {
+  const tokens = structuralTokens(batch, 'mssql').filter((token) => token.depth === 0 && token.value !== ';');
+  if (!tokens.length) return false;
+  const controls = new Set(['BEGIN', 'IF', 'WHILE']);
+  if (controls.has(tokens[0].value)) return true;
+  // Variable setup commonly precedes IF/WHILE in the same executable batch.
+  return ['DECLARE', 'SET'].includes(tokens[0].value)
+    && tokens.some((token) => controls.has(token.value));
+}
+
+/** SQL Server 的 GO 是客户端批分隔符，必须先按整行切批。 */
+function mssqlStatementRanges(text) {
+  const out = [];
+  const separators = /^[\t ]*GO[\t ]*(?:--[^\r\n]*)?(?:\r?\n|$)/gim;
+  let start = 0;
+  const appendBatch = (end) => {
+    const batch = text.slice(start, end);
+    const routine = /^\s*CREATE\s+(?:(?:OR\s+ALTER|OR\s+REPLACE)\s+)?(PROC(?:EDURE)?|FUNCTION|TRIGGER)\b/i.test(batch);
+    if (routine || mssqlControlFlowBatch(batch)) {
+      pushWholeStatementRange(out, batch, start, end);
+    } else {
+      out.push(...offsetSqlRanges(splitSqlRanges(batch, 'mssql'), start));
+    }
+  };
+  let match;
+  while ((match = separators.exec(text))) {
+    appendBatch(match.index);
+    start = match.index + match[0].length;
+  }
+  appendBatch(text.length);
+  return out;
+}
+
+function oraclePlsqlStart(text, dialect) {
+  const tokens = structuralTokens(text, dialect).filter((token) => token.depth === 0 && token.value !== ';');
+  if (!tokens.length) return false;
+  if (tokens[0].value === 'DECLARE' || tokens[0].value === 'BEGIN') return true;
+  if (tokens[0].value !== 'CREATE') return false;
+  let i = 1;
+  if (tokens[i] && tokens[i].value === 'OR' && tokens[i + 1] && tokens[i + 1].value === 'REPLACE') i += 2;
+  while (tokens[i] && ['EDITIONABLE', 'NONEDITIONABLE', 'FORCE'].includes(tokens[i].value)) i++;
+  return !!tokens[i] && ['PROCEDURE', 'FUNCTION', 'TRIGGER', 'PACKAGE'].includes(tokens[i].value);
+}
+
+function endTerminatorOffset(tokens, endAt) {
+  let i = endAt + 1;
+  if (PROCEDURAL_CLOSE_WORDS.has(tokens[i] && tokens[i].value)) i++;
+  // The outer END may repeat the procedure/package/block label.
+  if (tokens[i] && /^[A-Z_][A-Z0-9_$#]*$/.test(tokens[i].value)) i++;
+  return tokens[i] && tokens[i].value === ';' ? tokens[i].end : -1;
+}
+
+/** Find the terminal END; of a PL/SQL unit without treating nested blocks as boundaries. */
+function oraclePlsqlEnd(text, dialect) {
+  const tokens = structuralTokens(text, dialect);
+  const first = tokens.findIndex((token) => token.value !== ';');
+  if (first < 0) return -1;
+  const root = { kind: 'UNIT', bodyStarted: tokens[first].value === 'BEGIN' };
+  const stack = [root];
+  let startAt = first + 1;
+  if (tokens[first].value === 'CREATE') {
+    const unitKinds = new Set(['PROCEDURE', 'FUNCTION', 'TRIGGER', 'PACKAGE']);
+    const kindAt = tokens.findIndex((token, index) => index > first && unitKinds.has(token.value));
+    if (kindAt >= 0) startAt = kindAt + 1;
+  }
+
+  for (let i = startAt; i < tokens.length; i++) {
+    const value = tokens[i].value;
+    if (value === 'BEGIN') {
+      const current = stack[stack.length - 1];
+      if (current && current.kind === 'UNIT' && !current.bodyStarted) current.bodyStarted = true;
+      else stack.push({ kind: 'BLOCK', bodyStarted: true });
+    } else if ((value === 'PROCEDURE' || value === 'FUNCTION')
+        && stack[stack.length - 1] && stack[stack.length - 1].kind === 'UNIT'
+        && !stack[stack.length - 1].bodyStarted
+        && (keywordBeforeStatementEnd(tokens, i, 'IS') || keywordBeforeStatementEnd(tokens, i, 'AS'))) {
+      // Local subprogram bodies have their own END; before the outer unit body.
+      stack.push({ kind: 'UNIT', bodyStarted: false });
+    } else if (value === 'CASE') {
+      stack.push({ kind: value, bodyStarted: true });
+    } else if (value === 'IF' && keywordBeforeStatementEnd(tokens, i, 'THEN')) {
+      stack.push({ kind: value, bodyStarted: true });
+    } else if (value === 'LOOP') {
+      stack.push({ kind: value, bodyStarted: true });
+    } else if (value === 'END') {
+      if (stack.length) stack.pop();
+      if (!stack.length) {
+        const end = endTerminatorOffset(tokens, i);
+        if (end >= 0) return end;
+      }
+      if (PROCEDURAL_CLOSE_WORDS.has(tokens[i + 1] && tokens[i + 1].value)) i++;
+    }
+  }
+  return -1;
+}
+
+function appendOracleSection(out, text, start, end, slashTerminated, dialect) {
+  let position = start;
+  while (position < end) {
+    const remaining = text.slice(position, end);
+    if (oraclePlsqlStart(remaining, dialect)) {
+      const found = slashTerminated ? remaining.length : oraclePlsqlEnd(remaining, dialect);
+      const length = found > 0 ? found : remaining.length;
+      // PL/SQL 的 END; 分号属于块语法；只有独立一行的 / 是客户端分隔符。
+      pushWholeStatementRange(out, remaining.slice(0, length), position, position + length, true);
+      position += length;
+      continue;
+    }
+    const first = splitSqlRanges(remaining, dialect)[0];
+    if (!first) break;
+    out.push(...offsetSqlRanges([first], position));
+    if (first.rangeEnd <= 0) break;
+    position += first.rangeEnd;
+  }
+}
+
+/** Oracle uses a slash on its own line as the client-side PL/SQL unit delimiter. */
+function oracleStatementRanges(text, dialect) {
+  const out = [];
+  const separators = /^[\t ]*\/[\t ]*(?:--[^\r\n]*)?(?:\r?\n|$)/gm;
+  let start = 0;
+  let match;
+  while ((match = separators.exec(text))) {
+    appendOracleSection(out, text, start, match.index, true, dialect);
+    start = match.index + match[0].length;
+  }
+  appendOracleSection(out, text, start, text.length, false, dialect);
+  return out;
+}
+
+/** 返回光标偏移所在的完整语句；分号后的空白归属于下一条语句。 */
+function statementAt(sql, dialect, cursor) {
+  const text = String(sql || '');
+  const offset = Math.max(0, Math.min(Number.isFinite(Number(cursor)) ? Number(cursor) : 0, text.length));
+  let ranges;
+  if (dialect === 'mssql') ranges = mssqlStatementRanges(text);
+  else if (dialect === 'oracle' || dialect === 'oracle12') ranges = oracleStatementRanges(text, dialect);
+  else ranges = splitSqlRanges(text, dialect);
+  if (!ranges.length) return null;
+  const exact = ranges.find((item) => offset >= item.rangeStart
+    && (offset < item.rangeEnd || (offset === text.length && item.rangeEnd === text.length)));
+  if (exact) return { sql: exact.sql, start: exact.start, end: exact.end };
+  const next = ranges.find((item) => item.start >= offset);
+  const picked = next || ranges[ranges.length - 1];
+  return { sql: picked.sql, start: picked.start, end: picked.end };
 }
 
 function pad(n, w) { return String(n).padStart(w || 2, '0'); }
@@ -368,6 +610,120 @@ function statementKind(sql, dialect) {
   const starters = new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE']);
   const main = top.find((t, i) => i > 0 && starters.has(t.value));
   return main ? main.value : 'WITH';
+}
+
+function topLevelStatementTokens(sql, dialect) {
+  const tokens = structuralTokens(String(sql || ''), dialect);
+  if (!tokens.complete) return [];
+  return tokens.filter((token) => token.depth === 0 && token.value !== ';');
+}
+
+function mssqlDefinitionBatch(top) {
+  if (!top.length) return false;
+  let index = 0;
+  if (top[index] && top[index].value === 'CREATE') {
+    index++;
+    if (top[index] && top[index].value === 'OR' && top[index + 1] && top[index + 1].value === 'ALTER') index += 2;
+  } else if (top[index] && top[index].value === 'ALTER') index++;
+  else return false;
+  return ['PROC', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'VIEW'].includes(top[index] && top[index].value);
+}
+
+function mssqlBatchTransactionControl(top) {
+  if (mssqlDefinitionBatch(top)) return null;
+  for (let i = 0; i < top.length; i++) {
+    const value = top[i].value;
+    const next = top[i + 1] && top[i + 1].value;
+    const after = top[i + 2] && top[i + 2].value;
+    if (value === 'BEGIN' && (next === 'TRAN' || next === 'TRANSACTION'
+        || (next === 'DISTRIBUTED' && (after === 'TRAN' || after === 'TRANSACTION')))) return 'BEGIN TRANSACTION';
+    if (value === 'SAVE' && (next === 'TRAN' || next === 'TRANSACTION')) return 'SAVE TRANSACTION';
+    if (value === 'SET' && next === 'IMPLICIT_TRANSACTIONS') return 'SET IMPLICIT_TRANSACTIONS';
+    if (value === 'COMMIT' || value === 'ROLLBACK') return value;
+  }
+  return null;
+}
+
+function mssqlBatchSessionMutation(top) {
+  if (mssqlDefinitionBatch(top)) return null;
+  for (let i = 0; i < top.length; i++) {
+    const value = top[i].value;
+    const next = top[i + 1] && top[i + 1].value;
+    if (value === 'SET') {
+      // Batch-local variable assignments disappear with request.batch(). An
+      // UPDATE/MERGE SET clause is data mutation, not session state. Every
+      // other SET form is rejected fail-closed so new/obscure driver options
+      // cannot leak through the pool (CONTEXT_INFO, FMTONLY, OFFSETS, ...).
+      if (next === '@') continue;
+      const hasDmlBefore = top.slice(Math.max(0, i - 24), i)
+        .some((token) => token.value === 'UPDATE' || token.value === 'MERGE');
+      const assignmentAhead = top.slice(i + 1, i + 9)
+        .some((token) => token.value === '=');
+      if (hasDmlBefore && assignmentAhead) continue;
+      return `SET ${next || ''}`.trim();
+    }
+    if (['USE', 'DBCC', 'REVERT'].includes(value)) return value;
+    if ((value === 'EXEC' || value === 'EXECUTE') && next === 'AS') return 'EXECUTE AS';
+    if ((value === 'EXEC' || value === 'EXECUTE')
+        && top.slice(i + 1, i + 8).some((token) => ['SP_SET_SESSION_CONTEXT', 'SP_SETAPPROLE'].includes(token.value))) {
+      return '会话上下文';
+    }
+    if (value === 'CREATE' && top[i + 1] && top[i + 1].value === 'TABLE'
+        && String(top[i + 2] && top[i + 2].value || '').startsWith('#')) return '临时对象';
+    if (value === 'SELECT' && top.slice(i + 1).some((token, offset) => token.value === 'INTO'
+        && String(top[i + offset + 2] && top[i + offset + 2].value || '').startsWith('#'))) return '临时对象';
+  }
+  return null;
+}
+
+/** Identify user-written transaction boundaries without confusing T-SQL/PLSQL BEGIN blocks. */
+function transactionControlKind(sql, dialect) {
+  const top = topLevelStatementTokens(sql, dialect);
+  if (!top.length) return null;
+  const first = top[0].value;
+  const second = top[1] && top[1].value;
+  const third = top[2] && top[2].value;
+  if (dialect === 'mssql') {
+    return mssqlBatchTransactionControl(top);
+  }
+  if (dialect === 'oracle' || dialect === 'oracle12') {
+    if (first === 'SET' && second === 'TRANSACTION') return 'SET TRANSACTION';
+    return ['COMMIT', 'ROLLBACK', 'SAVEPOINT'].includes(first) ? first : null;
+  }
+  if (dialect === 'mysql') {
+    if (first === 'START' && second !== 'TRANSACTION') return null;
+    if (first === 'RELEASE' && second !== 'SAVEPOINT') return null;
+    if (first === 'SET' && !top.some((token) => token.value === 'AUTOCOMMIT')) return null;
+    return ['BEGIN', 'START', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'RELEASE', 'SET'].includes(first) ? first : null;
+  }
+  if (dialect === 'postgres') {
+    if (first === 'START' && second !== 'TRANSACTION') return null;
+    if (first === 'RELEASE' && second !== 'SAVEPOINT') return null;
+    if (first === 'PREPARE' && second !== 'TRANSACTION') return null;
+    if (first === 'SET' && second !== 'TRANSACTION' && second !== 'CONSTRAINTS') return null;
+    return ['BEGIN', 'START', 'COMMIT', 'END', 'ROLLBACK', 'SAVEPOINT', 'RELEASE', 'PREPARE', 'SET'].includes(first) ? first : null;
+  }
+  if (dialect === 'sqlite') {
+    return ['BEGIN', 'COMMIT', 'END', 'ROLLBACK', 'SAVEPOINT', 'RELEASE'].includes(first) ? first : null;
+  }
+  return null;
+}
+
+/** Session mutations that cannot safely escape into a pooled/shared connection. */
+function unsafeSessionMutationKind(sql, dialect) {
+  const top = topLevelStatementTokens(sql, dialect);
+  if (!top.length) return null;
+  const first = top[0].value;
+  const second = top[1] && top[1].value;
+  const third = top[2] && top[2].value;
+  if (dialect === 'mssql') {
+    return mssqlBatchSessionMutation(top);
+  }
+  if (dialect === 'sqlite') {
+    if (first === 'CREATE' && (second === 'TEMP' || second === 'TEMPORARY')) return '临时对象';
+    if (first === 'PRAGMA' && (top.length > 2 || top.some((token) => token.value === '='))) return 'PRAGMA 设置';
+  }
+  return null;
 }
 
 function hasClickHouseFormatClause(sql) {
@@ -595,6 +951,7 @@ function limitQueryRows(sql, dialect, maxRows) {
 }
 
 module.exports = {
-  splitSql, sanitizeValue, sanitizeRows, formatDate, excerpt, csvCell, synthesizeDDL,
-  limitQueryRows, statementKind, hasClickHouseFormatClause, hasSQLiteExternalFileClause,
+  splitSql, splitSqlRanges, statementAt, sanitizeValue, sanitizeRows, formatDate, excerpt, csvCell, synthesizeDDL,
+  limitQueryRows, statementKind, transactionControlKind, unsafeSessionMutationKind,
+  hasClickHouseFormatClause, hasSQLiteExternalFileClause,
 };

@@ -17,6 +17,8 @@ for (const oid of [
   199, 3807, // json[] / jsonb[]
 ]) types.setTypeParser(oid, parseTextArray);
 
+const pgFlag = (value) => value === true || value === 't' || value === 1 || value === '1';
+
 class PostgresAdapter extends BaseAdapter {
   get dialect() { return 'postgres'; }
 
@@ -66,16 +68,68 @@ class PostgresAdapter extends BaseAdapter {
     );
     const handle = { client, released: false };
     this._trackRequestHandle(handle, requestId);
+    let sessionError = null;
+    let rejectSessionLost;
+    const sessionLost = new Promise((resolve, reject) => { rejectSessionLost = reject; });
+    const onSessionError = (error) => {
+      sessionError = error instanceof Error ? error : new Error(String(error || 'PostgreSQL 会话已断开'));
+      rejectSessionLost(sessionError);
+    };
+    client.on('error', onSessionError);
+    const run = (sql, runOpts) => {
+      if (sessionError) return Promise.reject(sessionError);
+      return this._run(client, sql, runOpts);
+    };
+    run.requestHandle = handle;
+    run.invalidate = (error) => {
+      if (handle.released) return;
+      handle.released = true;
+      client.release(error instanceof Error ? error : new Error('事务会话已失效'));
+    };
+    let result;
+    let failure = null;
     try {
       this._assertRequestActive(requestId);
-      return await fn((sql, opts) => this._run(client, sql, opts));
+      const selectedSchema = opts && opts.schema !== undefined && opts.schema !== null
+        ? String(opts.schema) : '';
+      if (selectedSchema) {
+        const found = await Promise.race([
+          client.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [selectedSchema]), sessionLost,
+        ]);
+        if (!found.rows || !found.rows.length) throw new Error(`PostgreSQL 模式不存在或不可访问：${selectedSchema}`);
+        await Promise.race([
+          // Keep pg_catalog first so an untrusted application schema cannot
+          // shadow built-in functions or operators; ordinary tables still
+          // resolve from the selected schema next.
+          client.query(`SET search_path TO pg_catalog, ${this.quoteIdent(selectedSchema)}`), sessionLost,
+        ]);
+      }
+      result = await Promise.race([Promise.resolve().then(() => fn(run)), sessionLost]);
+    } catch (error) {
+      failure = error;
     } finally {
       this._untrackRequestHandle(handle, requestId);
       if (!handle.released) {
         handle.released = true;
-        client.release();
+        let releaseError = sessionError;
+        if (!releaseError) {
+          try { await client.query('DISCARD ALL'); }
+          catch (error) { releaseError = error; }
+        }
+        client.release(releaseError || undefined);
+        if (releaseError && !failure) {
+          // The user operation may already have committed. Destroy the tainted
+          // client, but never turn a successful result into a retryable failure.
+          if (opts && typeof opts.onCleanupError === 'function') {
+            try { opts.onCleanupError(releaseError); } catch (e) { /* reporting must not replace success */ }
+          }
+          console.warn(`PostgreSQL 会话重置失败，已销毁该会话：${releaseError.message || releaseError}`);
+        }
       }
+      client.removeListener('error', onSessionError);
     }
+    if (failure) throw failure;
+    return result;
   }
 
   /** 销毁目标 PoolClient，避免 backend PID 被池内复用后误取消后续查询。 */
@@ -221,7 +275,16 @@ class PostgresAdapter extends BaseAdapter {
     const sch = schema || 'public';
     const rows = await this._q(db,
       `SELECT con.conname AS name, att.attname AS col,
-              nsp2.nspname AS refschema, cl2.relname AS reftab, att2.attname AS refcol, k.ord
+              nsp2.nspname AS refschema, cl2.relname AS reftab, att2.attname AS refcol, k.ord,
+              pg_get_constraintdef(con.oid, true) AS definition,
+              con.convalidated AS validated, con.condeferrable AS deferrable,
+              con.condeferred AS deferred, con.confmatchtype AS match_type,
+              con.conislocal AS is_local, con.coninhcount AS inherited_count,
+              COALESCE((row_to_json(con)->>'conparentid')::oid, 0::oid) AS parent_constraint_id,
+              CASE con.confupdtype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL'
+                WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION' END AS on_update,
+              CASE con.confdeltype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL'
+                WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION' END AS on_delete
        FROM pg_constraint con
        JOIN pg_class cl ON cl.oid = con.conrelid
        JOIN pg_namespace nsp ON nsp.oid = cl.relnamespace
@@ -234,10 +297,84 @@ class PostgresAdapter extends BaseAdapter {
        ORDER BY con.conname, k.ord`, [sch, table]);
     const map = new Map();
     for (const r of rows) {
-      if (!map.has(r.name)) map.set(r.name, { name: r.name, columns: [], refSchema: r.refschema === 'public' ? null : r.refschema, refTable: r.reftab, refColumns: [] });
+      const advanced = !pgFlag(r.validated) || pgFlag(r.deferrable) || pgFlag(r.deferred)
+        || !pgFlag(r.is_local) || Number(r.inherited_count || 0) > 0
+        || Number(r.parent_constraint_id || 0) > 0 || String(r.match_type || 's') !== 's'
+        || /\b(NOT\s+ENFORCED|PERIOD)\b|\bSET\s+(?:NULL|DEFAULT)\s*\(/i.test(r.definition || '');
+      if (!map.has(r.name)) map.set(r.name, {
+        name: r.name, columns: [], refSchema: r.refschema === sch ? null : r.refschema,
+        refTable: r.reftab, refColumns: [], onUpdate: r.on_update, onDelete: r.on_delete,
+        rebuildSafe: !advanced,
+      });
       const fk = map.get(r.name);
       fk.columns.push(r.col);
       fk.refColumns.push(r.refcol);
+    }
+    return [...map.values()];
+  }
+
+  async listReferencingForeignKeys(db, schema, table) {
+    const sch = schema || 'public';
+    const rows = await this._q(db,
+      `SELECT con.conname AS name, child_nsp.nspname AS child_schema,
+              child.relname AS child_table, child_att.attname AS col,
+              target_att.attname AS refcol, k.ord
+       FROM pg_constraint con
+       JOIN pg_class child ON child.oid = con.conrelid
+       JOIN pg_namespace child_nsp ON child_nsp.oid = child.relnamespace
+       JOIN pg_class target ON target.oid = con.confrelid
+       JOIN pg_namespace target_nsp ON target_nsp.oid = target.relnamespace
+       JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(att, fatt, ord) ON true
+       JOIN pg_attribute child_att ON child_att.attrelid = con.conrelid AND child_att.attnum = k.att
+       JOIN pg_attribute target_att ON target_att.attrelid = con.confrelid AND target_att.attnum = k.fatt
+       WHERE con.contype = 'f' AND target_nsp.nspname = $1 AND target.relname = $2
+         AND NOT (child_nsp.nspname = $1 AND child.relname = $2)
+       ORDER BY child_nsp.nspname, child.relname, con.conname, k.ord`, [sch, table]);
+    const map = new Map();
+    for (const row of rows) {
+      const key = `${row.child_schema}\0${row.child_table}\0${row.name}`;
+      if (!map.has(key)) map.set(key, {
+        name: row.name, schema: row.child_schema, table: row.child_table,
+        columns: [], refColumns: [],
+      });
+      const fk = map.get(key);
+      fk.columns.push(row.col);
+      fk.refColumns.push(row.refcol);
+    }
+    return [...map.values()];
+  }
+
+  async listConstraints(db, schema, table) {
+    const sch = schema || 'public';
+    const rows = await this._q(db,
+      `SELECT con.conname AS name, con.contype AS kind,
+              pg_get_expr(con.conbin, con.conrelid) AS expression,
+              pg_get_constraintdef(con.oid, true) AS definition,
+              con.convalidated AS validated, con.condeferrable AS deferrable,
+              con.condeferred AS deferred, con.connoinherit AS no_inherit,
+              con.conislocal AS is_local, con.coninhcount AS inherited_count,
+              COALESCE((row_to_json(con)->>'conparentid')::oid, 0::oid) AS parent_constraint_id,
+              att.attname AS col, k.ord, idx.relname AS index_name
+       FROM pg_constraint con
+       JOIN pg_class cl ON cl.oid = con.conrelid
+       JOIN pg_namespace nsp ON nsp.oid = cl.relnamespace
+       LEFT JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+       LEFT JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
+       LEFT JOIN pg_class idx ON idx.oid = con.conindid
+       WHERE con.contype IN ('u', 'c') AND nsp.nspname = $1 AND cl.relname = $2
+       ORDER BY con.conname, k.ord`, [sch, table]);
+    const map = new Map();
+    for (const row of rows) {
+      const advanced = !pgFlag(row.validated) || pgFlag(row.deferrable) || pgFlag(row.deferred)
+        || pgFlag(row.no_inherit) || !pgFlag(row.is_local) || Number(row.inherited_count || 0) > 0
+        || Number(row.parent_constraint_id || 0) > 0
+        || /\b(NOT\s+ENFORCED|NULLS\s+NOT\s+DISTINCT|WITHOUT\s+OVERLAPS|INCLUDE)\b|\bWITH\s*\(|\bUSING\s+INDEX\s+TABLESPACE\b/i.test(row.definition || '');
+      if (!map.has(row.name)) map.set(row.name, {
+        kind: row.kind === 'u' ? 'unique' : 'check', name: row.name,
+        columns: [], expression: row.expression || '', indexName: row.index_name || null,
+        rebuildSafe: !advanced,
+      });
+      if (row.kind === 'u' && row.col) map.get(row.name).columns.push(row.col);
     }
     return [...map.values()];
   }
@@ -326,8 +463,13 @@ class PostgresAdapter extends BaseAdapter {
     const cols = await this._q(db,
       `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type,
               NOT a.attnotnull AS nullable, pg_get_expr(d.adbin, d.adrelid) AS def,
-              col_description(a.attrelid, a.attnum) AS comment
+              col_description(a.attrelid, a.attnum) AS comment,
+              a.attstorage, t.typstorage,
+              COALESCE(row_to_json(a)->>'attidentity', '') AS identity_kind,
+              COALESCE(row_to_json(a)->>'attgenerated', '') AS generated_kind,
+              COALESCE(row_to_json(a)->>'attcompression', '') AS compression_kind
        FROM pg_attribute a
+       JOIN pg_type t ON t.oid = a.atttypid
        LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
        WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
        ORDER BY a.attnum`, [reg]);
@@ -337,18 +479,44 @@ class PostgresAdapter extends BaseAdapter {
        WHERE i.indrelid = $1::regclass AND i.indisprimary`, [reg]);
     const pk = pkRows.map((r) => r.attname);
     const idxRows = await this._q(db,
-      'SELECT indexname AS name, indexdef AS def FROM pg_indexes WHERE schemaname = $1 AND tablename = $2', [sch, table]);
-    const indexes = idxRows.map((r) => ({
-      name: r.name,
-      columns: [],
-      def: r.def,
-      unique: /\bUNIQUE\b/i.test(r.def),
-      primary: /_pkey$/.test(r.name),
-    }));
-    const columns = cols.map((c) => ({
-      name: c.name, type: c.type, nullable: c.nullable, def: c.def,
-      key: pk.includes(c.name) ? 'PRI' : '', extra: '', comment: c.comment || '',
-    }));
+      `SELECT idx.relname AS name, ix.indisunique, ix.indisprimary,
+              COALESCE((row_to_json(ix)->>'indnkeyatts')::int, ix.indnatts) AS indnkeyatts,
+              ix.indexprs IS NOT NULL AS has_expression,
+              ix.indpred IS NOT NULL AS has_predicate,
+              ix.indnatts > COALESCE((row_to_json(ix)->>'indnkeyatts')::int, ix.indnatts) AS has_include,
+              pg_get_indexdef(ix.indexrelid) AS def, att.attname AS col, k.ord
+       FROM pg_index ix
+       JOIN pg_class tbl ON tbl.oid = ix.indrelid
+       JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace
+       JOIN pg_class idx ON idx.oid = ix.indexrelid
+       LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+       LEFT JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = k.attnum
+       WHERE nsp.nspname = $1 AND tbl.relname = $2
+       ORDER BY idx.relname, k.ord`, [sch, table]);
+    const indexMap = new Map();
+    for (const row of idxRows) {
+      if (!indexMap.has(row.name)) indexMap.set(row.name, {
+        name: row.name, columns: [], def: row.def,
+        unique: !!row.indisunique, primary: !!row.indisprimary,
+        editable: !row.has_expression && !row.has_predicate && !row.has_include,
+      });
+      if (row.col && Number(row.ord) <= Number(row.indnkeyatts)) indexMap.get(row.name).columns.push(row.col);
+    }
+    const indexes = [...indexMap.values()];
+    const columns = cols.map((c) => {
+      const advanced = !!c.identity_kind || !!c.generated_kind
+        || !!c.compression_kind || c.attstorage !== c.typstorage;
+      const detail = [
+        c.identity_kind && 'IDENTITY', c.generated_kind && 'GENERATED',
+        c.compression_kind && 'COMPRESSION', c.attstorage !== c.typstorage && 'STORAGE',
+      ].filter(Boolean).join(' / ');
+      return {
+        name: c.name, type: c.type, nullable: c.nullable, def: c.def,
+        key: pk.includes(c.name) ? 'PRI' : '', extra: c.identity_kind ? 'identity' : '', comment: c.comment || '',
+        editSafe: !advanced,
+        editUnsafeReason: advanced ? `栏位含无法无损表示的 PostgreSQL ${detail} 属性` : '',
+      };
+    });
     const { synthesizeDDL } = require('./sqlutil');
     const ddl = synthesizeDDL(reg, columns, pk, indexes, (n) => this.quoteIdent(n));
     let tableComment = '';

@@ -30,7 +30,14 @@ const dbm = require('./db');
 
 let win = null;
 let allowClose = false;
+let closeRequestSeq = 0;
+let pendingClose = null;
 const WINDOW_TITLE = `DBPanda v${app.getVersion()}`;
+
+function clearPendingClose() {
+  if (pendingClose && pendingClose.timer) clearTimeout(pendingClose.timer);
+  pendingClose = null;
+}
 
 function createWindow(show) {
   win = new BrowserWindow({
@@ -63,22 +70,48 @@ function createWindow(show) {
       e.preventDefault();
     }
   });
+  win.webContents.on('render-process-gone', () => {
+    if (!pendingClose || !win || win.isDestroyed()) return;
+    clearPendingClose();
+    allowClose = true;
+    win.close();
+  });
 
   // 关闭前询问渲染进程（有未保存更改时由渲染进程弹确认框）
   win.on('close', (e) => {
     if (allowClose || isSmoke || isDemo) return;
     e.preventDefault();
-    win.webContents.send('app:close-request');
-    setTimeout(() => { // 渲染进程无响应时兜底强制关闭
-      if (!allowClose && win && !win.isDestroyed()) { allowClose = true; win.close(); }
+    if (pendingClose) return;
+    const id = `close-${++closeRequestSeq}`;
+    pendingClose = { id, acknowledged: false, timer: null };
+    win.webContents.send('app:close-request', id);
+    pendingClose.timer = setTimeout(() => { // 仅在渲染进程完全无响应时兜底
+      if (pendingClose && pendingClose.id === id && !pendingClose.acknowledged
+          && win && !win.isDestroyed()) {
+        clearPendingClose();
+        allowClose = true;
+        win.close();
+      }
     }, 3000);
   });
-  win.on('closed', () => { win = null; });
+  win.on('closed', () => { clearPendingClose(); win = null; });
   return win;
 }
 
 const { ipcMain } = require('electron');
-ipcMain.on('app:confirm-close', () => {
+ipcMain.on('app:close-ack', (event, id) => {
+  if (!pendingClose || pendingClose.id !== id || !win || event.sender !== win.webContents) return;
+  pendingClose.acknowledged = true;
+  if (pendingClose.timer) clearTimeout(pendingClose.timer);
+  pendingClose.timer = null;
+});
+ipcMain.on('app:cancel-close', (event, id) => {
+  if (!pendingClose || pendingClose.id !== id || !win || event.sender !== win.webContents) return;
+  clearPendingClose();
+});
+ipcMain.on('app:confirm-close', (event, id) => {
+  if (!pendingClose || pendingClose.id !== id || !win || event.sender !== win.webContents) return;
+  clearPendingClose();
   allowClose = true;
   if (win && !win.isDestroyed()) win.close();
 });
@@ -193,6 +226,17 @@ app.whenReady().then(async () => {
           return { textOnly, textInset, iconColumns, databaseIconsOk, formBalanced, formLeft, formRight, passwordOptionOk };
         })()`);
         const menuOk = menuLayout.textOnly && menuLayout.textInset === 12 && menuLayout.iconColumns;
+        const workspaceOk = await win.webContents.executeJavaScript(`(async () => {
+          const sql = 'x'.repeat(1200 * 1024);
+          const snapshot = { version: 1, savedAt: Date.now(), activeId: 'query-large', context: {}, tabs: [
+            { id: 'query-large', type: 'query', state: { sql } },
+          ] };
+          await window.api.workspace.write(snapshot);
+          const restored = await window.api.workspace.read();
+          await window.api.workspace.clear();
+          return !!(restored && restored.tabs && restored.tabs[0]
+            && restored.tabs[0].state.sql.length === sql.length);
+        })()`);
         await win.webContents.executeJavaScript(
           `window.__test.openConnection(${JSON.stringify(passwordPromptConnection.id)}).catch(() => {}); true`);
         await new Promise((r) => setTimeout(r, 100));
@@ -210,11 +254,11 @@ app.whenReady().then(async () => {
         const failedSessionRetryPrompt = await win.webContents.executeJavaScript(
           `!!document.querySelector('.password-prompt') && document.querySelector('.modal-head').textContent.includes('Smoke failed session password')`);
         await win.webContents.executeJavaScript('window.__test.closeMenus()');
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} passwordOption=${menuLayout.passwordOptionOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} passwordOption=${menuLayout.passwordOptionOk} workspace=${workspaceOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk
-          && passwordPromptOk && failedSessionRetryPrompt && errors.length === 0 ? 0 : 1);
+          && workspaceOk && passwordPromptOk && failedSessionRetryPrompt && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);
         app.exit(1);

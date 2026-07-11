@@ -12,6 +12,10 @@ const CANCEL_KILL_WAIT_MS = 1500;
 class ClickHouseAdapter extends BaseAdapter {
   get dialect() { return 'clickhouse'; }
 
+  get transactionSupport() {
+    return { supported: false, warning: 'ClickHouse 当前连接模式不支持跨语句显式事务，仅支持自动提交' };
+  }
+
   get readonlyReason() {
     return 'ClickHouse 表在网格中为只读（请用 SQL：INSERT / ALTER TABLE … UPDATE / DELETE）';
   }
@@ -276,18 +280,34 @@ class ClickHouseAdapter extends BaseAdapter {
 
   async tableInfo(db, _schema, table) {
     const L = (v) => this.literal(v);
-    const colRes = await this._run(null,
-      `SELECT name, type, default_expression, comment, is_in_primary_key, is_in_sorting_key
-       FROM system.columns WHERE database = ${L(db)} AND table = ${L(table)} ORDER BY position`);
-    const columns = colRes.rows.map((r) => ({
-      name: r[0],
-      type: r[1],
-      nullable: String(r[1]).startsWith('Nullable('),
-      def: r[2] || null,
-      key: r[4] ? 'PRI' : '',
-      extra: r[5] && !r[4] ? 'sorting key' : '',
-      comment: r[3] || '',
-    }));
+    let colRes;
+    let advancedMetadataKnown = true;
+    try {
+      colRes = await this._run(null,
+        `SELECT name, type, default_expression, comment, is_in_primary_key, is_in_sorting_key,
+                default_kind, codec_expression, ttl_expression
+         FROM system.columns WHERE database = ${L(db)} AND table = ${L(table)} ORDER BY position`);
+    } catch (e) {
+      advancedMetadataKnown = false;
+      colRes = await this._run(null,
+        `SELECT name, type, default_expression, comment, is_in_primary_key, is_in_sorting_key
+         FROM system.columns WHERE database = ${L(db)} AND table = ${L(table)} ORDER BY position`);
+    }
+    const columns = colRes.rows.map((r) => {
+      const defaultKind = String(r[6] || '').toUpperCase();
+      const advanced = !advancedMetadataKnown || (!!defaultKind && defaultKind !== 'DEFAULT') || !!r[7] || !!r[8];
+      return {
+        name: r[0],
+        type: r[1],
+        nullable: String(r[1]).startsWith('Nullable('),
+        def: r[2] || null,
+        key: r[4] ? 'PRI' : '',
+        extra: r[5] && !r[4] ? 'sorting key' : '',
+        comment: r[3] || '',
+        editSafe: !advanced,
+        editUnsafeReason: advanced ? 'ClickHouse MATERIALIZED/ALIAS、CODEC 或 TTL 栏位不能由设计器无损修改' : '',
+      };
+    });
 
     const indexes = [];
     try {

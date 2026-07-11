@@ -76,6 +76,7 @@ function reopen(it) {
 
 export function openHistoryTab() {
   const tab = addTab({ id: 'history', title: '历史', icon: 'history' });
+  tab.setRecovery('history', () => ({}));
   if (tab.pane.childElementCount) { refresh(); return tab; }
 
   const pane = tab.pane;

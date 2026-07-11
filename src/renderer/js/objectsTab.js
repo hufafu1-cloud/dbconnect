@@ -28,6 +28,7 @@ let current = null;      // {connId, db, schema}
 let currentKind = 'table';
 let items = [];
 let selected = null;
+let loadGeneration = 0;
 
 export function getObjectKind() { return currentKind; }
 
@@ -69,6 +70,15 @@ export function initObjectsTab() {
   renderPlaceholder('在左侧打开连接并选择数据库');
 
   on('target-selected', (t) => {
+    if (!t) {
+      loadGeneration++;
+      current = null;
+      items = [];
+      selected = null;
+      renderPlaceholder('在左侧打开连接并选择数据库');
+      if (pathEl) pathEl.textContent = '';
+      return;
+    }
     current = { connId: t.connId, db: t.db, schema: t.schema };
     load(false);
   });
@@ -78,6 +88,7 @@ export function initObjectsTab() {
   on('queries-changed', () => { if (currentKind === 'query') load(false); });
   on('conn-closed', (t) => {
     if (current && current.connId === t.connId) {
+      loadGeneration++;
       current = null;
       items = [];
       selected = null;
@@ -150,7 +161,9 @@ function renderToolbar() {
 }
 
 function targetOf(it) {
-  return { connId: current.connId, db: current.db, schema: it.schema || (current && current.schema), table: it.name };
+  const context = it && it._context || current;
+  if (!context) return null;
+  return { connId: context.connId, db: context.db, schema: it.schema || context.schema, table: it.name };
 }
 
 function renderPlaceholder(text) {
@@ -160,40 +173,55 @@ function renderPlaceholder(text) {
 
 // ---------------- 数据加载 ----------------
 async function load(force) {
-  const k = KINDS[currentKind];
+  const generation = ++loadGeneration;
+  // Context/kind 一旦变化，旧选择必须同步失效；不能等新请求返回后再清，
+  // 否则工具栏会把 A 库旧对象名和 B 库新 current 组合成危险目标。
+  selected = null;
+  items = [];
+  if (listEl) renderPlaceholder('正在加载…');
+  const kind = currentKind;
+  const k = KINDS[kind];
+  const context = current ? { ...current } : null;
   const cid = connIdNow();
   if (!cid) { renderPlaceholder('请先打开一个连接'); return; }
+  const stillCurrent = () => generation === loadGeneration && currentKind === kind
+    && JSON.stringify(current) === JSON.stringify(context);
 
   if (k.needDb) {
-    if (!current || current.connId !== cid || !current.db) {
+    if (!context || context.connId !== cid || !context.db) {
       renderPlaceholder(`在左侧选择数据库后查看${k.label}`);
       return;
     }
   }
   if (k.capsKey) {
     const caps = await getCaps(cid);
+    if (!stillCurrent()) return;
     if (!caps[k.capsKey]) {
       renderPlaceholder(`当前数据库类型不支持「${k.label}」`);
       pathEl.textContent = connLabel(cid);
       return;
     }
   }
+  if (!stillCurrent()) return;
   pathEl.textContent = k.needDb
-    ? `${connLabel(cid)} › ${current.db || ''}${current.schema ? ' › ' + current.schema : ''}`
+    ? `${connLabel(cid)} › ${context.db || ''}${context.schema ? ' › ' + context.schema : ''}`
     : connLabel(cid);
 
   try {
-    items = await fetchItems(currentKind, cid, force);
-    selected = null;
+    const loaded = await fetchItems(kind, cid, context, force);
+    if (!stillCurrent()) return;
+    const itemContext = { connId: cid, db: context && context.db, schema: context && context.schema };
+    items = loaded.map((item) => ({ ...item, _context: itemContext }));
     renderList();
   } catch (e) {
+    if (!stillCurrent()) return;
     renderPlaceholder('加载失败: ' + e.message);
   }
 }
 
-async function fetchItems(kind, cid, force) {
-  const db = current && current.db;
-  const schema = current && current.schema;
+async function fetchItems(kind, cid, context, force) {
+  const db = context && context.db;
+  const schema = context && context.schema;
   if (kind === 'table' || kind === 'view') {
     const oc = state.open.get(cid);
     const key = objectsCacheKey(db, schema);
@@ -217,7 +245,9 @@ async function fetchItems(kind, cid, force) {
 
 // ---------------- 行为 ----------------
 async function openDef(it) {
-  const cid = connIdNow();
+  const context = it._context || current;
+  const cid = context && context.connId;
+  if (!cid) return;
   const { openDefTab } = await import('./defTab.js');
   const kindMap = {
     routine: it.type === 'PROCEDURE' ? 'PROCEDURE' : 'FUNCTION',
@@ -225,8 +255,8 @@ async function openDef(it) {
   };
   openDefTab({
     connId: cid,
-    db: KINDS[it.kind].needDb ? current.db : null,
-    schema: it.schema || (current && current.schema),
+    db: KINDS[it.kind].needDb ? context.db : null,
+    schema: it.schema || context.schema,
     kind: kindMap[it.kind],
     name: it.name,
     extra: it.kind === 'user' ? it.host : it.extra,
@@ -234,9 +264,11 @@ async function openDef(it) {
 }
 
 async function openSavedQuery(it) {
-  const cid = connIdNow();
+  const context = it._context || current;
+  const cid = context && context.connId;
+  if (!cid) return;
   const { openQueryTab } = await import('./queryTab.js');
-  openQueryTab({ connId: cid, db: current && current.db }, it.sql, { saved: { id: it.id, name: it.name } });
+  openQueryTab({ connId: cid, db: context.db }, it.sql, { saved: { id: it.id, name: it.name } });
 }
 
 async function deleteSavedQuery(it) {
@@ -244,14 +276,16 @@ async function deleteSavedQuery(it) {
   if (!ok) return;
   try {
     await window.api.queries.remove(it.id);
-    emit('queries-changed', { connId: connIdNow() });
+    emit('queries-changed', { connId: it._context && it._context.connId || connIdNow() });
     toast.success('查询已删除');
     load(false);
   } catch (e) { toast.error(e.message); }
 }
 
 async function deleteGeneric(it) {
-  const cid = connIdNow();
+  const context = it._context || current;
+  const cid = context && context.connId;
+  if (!cid) return;
   const k = it.kind;
   const label = KINDS[k].label;
   const actionMap = {
@@ -264,8 +298,8 @@ async function deleteGeneric(it) {
   try {
     const payload = {
       connId: cid,
-      db: KINDS[k].needDb ? current.db : null,
-      schema: it.schema || (current && current.schema),
+      db: KINDS[k].needDb ? context.db : null,
+      schema: it.schema || context.schema,
       ...actionMap[k],
     };
     const approved = await authorizeOperation('db.action', payload, {

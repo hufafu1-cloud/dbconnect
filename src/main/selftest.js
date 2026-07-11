@@ -3,8 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const {
-  splitSql, sanitizeValue, limitQueryRows, statementKind, hasClickHouseFormatClause,
-  hasSQLiteExternalFileClause,
+  splitSql, statementAt, sanitizeValue, limitQueryRows, statementKind, hasClickHouseFormatClause,
+  hasSQLiteExternalFileClause, transactionControlKind, unsafeSessionMutationKind,
 } = require('./db/sqlutil');
 const { SQLiteAdapter } = require('./db/sqlite');
 const { MySQLAdapter } = require('./db/mysql');
@@ -111,6 +111,83 @@ async function runSelfTest() {
   check('split pg 嵌套块注释', splitSql('/* outer /* inner */ ; still outer */ SELECT 1; SELECT 2', 'postgres').length === 2);
   check('split oracle q 引用', splitSql("SELECT q'[It's; fine]' FROM dual; SELECT 2 FROM dual", 'oracle').length === 2);
   check('split 尾部无分号', splitSql('SELECT 1', 'sqlite').length === 1);
+  const cursorSql = "SELECT ';' AS a;\n-- next\nSELECT 2;\nSELECT 3";
+  const cursorSecond = statementAt(cursorSql, 'sqlite', cursorSql.indexOf('SELECT 2') + 3);
+  const cursorThird = statementAt(cursorSql, 'sqlite', cursorSql.indexOf('SELECT 3') + 3);
+  check('光标语句忽略字符串内分号', cursorSecond && /SELECT 2/.test(cursorSecond.sql)
+    && !/SELECT 3/.test(cursorSecond.sql), cursorSecond);
+  check('光标语句定位末尾语句', cursorThird && cursorThird.sql === 'SELECT 3', cursorThird);
+  const routineCursor = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET x = ';'; UPDATE t SET x = '2'; END; SELECT 9";
+  const cursorRoutine = statementAt(routineCursor, 'sqlite', routineCursor.indexOf("x = '2'"));
+  check('光标语句保留触发器过程体', cursorRoutine && /^CREATE TRIGGER/.test(cursorRoutine.sql)
+    && /UPDATE t SET x = '2'/.test(cursorRoutine.sql), cursorRoutine);
+  const mssqlGoSql = 'SELECT 1 AS a\nGO\nSELECT 2 AS b\nGO -- next batch\nSELECT 3 AS c';
+  const mssqlGoCurrent = statementAt(mssqlGoSql, 'mssql', mssqlGoSql.indexOf('SELECT 2') + 4);
+  check('光标语句识别 SQL Server GO 批分隔', mssqlGoCurrent
+    && /SELECT 2 AS b/.test(mssqlGoCurrent.sql)
+    && !/SELECT 1|SELECT 3/.test(mssqlGoCurrent.sql), mssqlGoCurrent);
+  const mssqlProcSql = 'CREATE PROCEDURE p AS\nBEGIN\n SELECT 1;\n SELECT 2;\nEND\nGO\nSELECT 9';
+  const mssqlProcCurrent = statementAt(mssqlProcSql, 'mssql', mssqlProcSql.indexOf('SELECT 2') + 3);
+  check('光标语句保留 SQL Server 过程批', mssqlProcCurrent
+    && /^CREATE PROCEDURE/.test(mssqlProcCurrent.sql)
+    && /SELECT 1;[\s\S]*SELECT 2;/.test(mssqlProcCurrent.sql), mssqlProcCurrent);
+  const mysqlNestedRoutineSql = 'CREATE PROCEDURE nested_p()\nBEGIN\n BEGIN\n  SELECT 1;\n END;\n SELECT 2;\nEND;\nSELECT 3';
+  const mysqlNestedParts = splitSql(mysqlNestedRoutineSql, 'mysql');
+  const mysqlNestedCurrent = statementAt(mysqlNestedRoutineSql, 'mysql', mysqlNestedRoutineSql.indexOf('SELECT 2') + 3);
+  const mysqlAfterRoutine = statementAt(mysqlNestedRoutineSql, 'mysql', mysqlNestedRoutineSql.indexOf('SELECT 3') + 3);
+  check('MySQL 嵌套 BEGIN END 不提前截断过程体', mysqlNestedParts.length === 2
+    && mysqlNestedCurrent && /^CREATE PROCEDURE/.test(mysqlNestedCurrent.sql)
+    && /SELECT 1;[\s\S]*SELECT 2;/.test(mysqlNestedCurrent.sql), { mysqlNestedParts, mysqlNestedCurrent });
+  check('MySQL 过程后的普通语句独立定位', mysqlAfterRoutine && mysqlAfterRoutine.sql === 'SELECT 3', mysqlAfterRoutine);
+
+  const oracleProcAndSql = 'CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n IF 1 = 1 THEN\n  NULL;\n END IF;\nEND;\nSELECT 9 FROM dual';
+  const oracleProcCurrent = statementAt(oracleProcAndSql, 'oracle', oracleProcAndSql.indexOf('NULL') + 2);
+  const oracleAfterProc = statementAt(oracleProcAndSql, 'oracle', oracleProcAndSql.indexOf('SELECT 9') + 3);
+  check('Oracle PL/SQL 内层分号保留完整块', oracleProcCurrent
+    && /^CREATE OR REPLACE PROCEDURE/.test(oracleProcCurrent.sql)
+    && /NULL;[\s\S]*END IF;[\s\S]*END;$/.test(oracleProcCurrent.sql), oracleProcCurrent);
+  check('Oracle PL/SQL 后续 SQL 独立定位', oracleAfterProc
+    && /^SELECT 9 FROM dual$/.test(oracleAfterProc.sql)
+    && !/PROCEDURE/.test(oracleAfterProc.sql), oracleAfterProc);
+  const oracleSlashSql = 'BEGIN\n NULL;\nEND;\n/\nSELECT 10 FROM dual';
+  const oracleSlashAfter = statementAt(oracleSlashSql, 'oracle12', oracleSlashSql.indexOf('SELECT 10') + 3);
+  check('Oracle 斜杠块分隔符不并入后续 SQL', oracleSlashAfter
+    && oracleSlashAfter.sql === 'SELECT 10 FROM dual', oracleSlashAfter);
+  const oracleRunAll = splitSql(oracleSlashSql, 'oracle12');
+  check('Oracle 运行全部拆分 PL/SQL 与后续 SQL', oracleRunAll.length === 2
+    && /^BEGIN/.test(oracleRunAll[0]) && oracleRunAll[1] === 'SELECT 10 FROM dual', oracleRunAll);
+  check('Oracle PL/SQL 运行时保留 END 分号', /END;$/.test(oracleRunAll[0]), oracleRunAll[0]);
+
+  const mssqlFlowSql = 'IF 1 = 1\nBEGIN\n SELECT 1;\n SELECT 2;\nEND\nGO\nSELECT 9';
+  const mssqlFlowCurrent = statementAt(mssqlFlowSql, 'mssql', mssqlFlowSql.indexOf('SELECT 2') + 3);
+  const mssqlAfterFlow = statementAt(mssqlFlowSql, 'mssql', mssqlFlowSql.indexOf('SELECT 9') + 3);
+  check('SQL Server 控制流保留完整 GO 批', mssqlFlowCurrent
+    && /^IF 1 = 1/.test(mssqlFlowCurrent.sql)
+    && /SELECT 1;[\s\S]*SELECT 2;[\s\S]*END$/.test(mssqlFlowCurrent.sql), mssqlFlowCurrent);
+  check('SQL Server 控制流后的 GO 批独立定位', mssqlAfterFlow
+    && mssqlAfterFlow.sql === 'SELECT 9', mssqlAfterFlow);
+  const mssqlRunAll = splitSql(mssqlGoSql, 'mssql');
+  check('SQL Server 运行全部按 GO 拆批', mssqlRunAll.length === 3
+    && /SELECT 1/.test(mssqlRunAll[0]) && /SELECT 3/.test(mssqlRunAll[2]), mssqlRunAll);
+  check('事务边界识别不误伤 T-SQL/PLSQL BEGIN 块', !transactionControlKind('BEGIN SELECT 1; END', 'mssql')
+    && transactionControlKind('BEGIN TRANSACTION', 'mssql') === 'BEGIN TRANSACTION'
+    && transactionControlKind('SELECT 1; BEGIN TRAN; UPDATE t SET x = 1', 'mssql') === 'BEGIN TRANSACTION'
+    && !transactionControlKind('CREATE PROCEDURE p AS BEGIN TRAN; ROLLBACK; RETURN;', 'mssql')
+    && !transactionControlKind('BEGIN NULL; END;', 'oracle')
+    && transactionControlKind('BEGIN', 'mysql') === 'BEGIN');
+  check('MSSQL/SQLite 会话污染语句识别', unsafeSessionMutationKind('SET NOCOUNT ON', 'mssql') === 'SET NOCOUNT'
+    && unsafeSessionMutationKind('SELECT 1; SET NOCOUNT ON', 'mssql') === 'SET NOCOUNT'
+    && unsafeSessionMutationKind('DECLARE @x int; SET XACT_ABORT ON', 'mssql') === 'SET XACT_ABORT'
+    && unsafeSessionMutationKind('SELECT 1; SET CONTEXT_INFO 0x01', 'mssql') === 'SET CONTEXT_INFO'
+    && unsafeSessionMutationKind('SET FMTONLY ON', 'mssql') === 'SET FMTONLY'
+    && unsafeSessionMutationKind('SET OFFSETS SELECT ON', 'mssql') === 'SET OFFSETS'
+    && !unsafeSessionMutationKind('DECLARE @x int; SET @x = 1; SELECT @x', 'mssql')
+    && !unsafeSessionMutationKind('UPDATE t SET x = 1 WHERE id = 2', 'mssql')
+    && unsafeSessionMutationKind('CREATE TABLE #tmp(id int)', 'mssql') === '临时对象'
+    && unsafeSessionMutationKind('PRAGMA foreign_keys = OFF', 'sqlite') === 'PRAGMA 设置');
+  const mysqlRunAll = splitSql(mysqlNestedRoutineSql, 'mysql');
+  check('MySQL 运行全部拆分过程与后续 SQL', mysqlRunAll.length === 2
+    && /^CREATE PROCEDURE/.test(mysqlRunAll[0]) && mysqlRunAll[1] === 'SELECT 3', mysqlRunAll);
 
   // ---- 查询结果上限下推 ----
   const limSqlite = limitQueryRows('SELECT * FROM t ORDER BY id; -- tail', 'sqlite', 2);
@@ -201,6 +278,57 @@ async function runSelfTest() {
   const my = new MySQLAdapter({});
   check('mysql quoteIdent', my.quoteIdent('a`b') === '`a``b`');
   check('mysql literal', my.literal("a'b\\c") === "'a''b\\\\c'");
+  check('mysql 连接归池前启用 COM_RESET_CONNECTION', /resetOnRelease:\s*true/.test(
+    fs.readFileSync(path.join(__dirname, 'db', 'mysql.js'), 'utf8')));
+  let mysqlImplicitCommitDenied = false;
+  try { my._assertTransactionSql(['LOCK TABLES t WRITE']); } catch (e) { mysqlImplicitCommitDenied = /隐式提交/.test(e.message); }
+  check('mysql 手动事务拒绝隐式提交管理语句', mysqlImplicitCommitDenied);
+  const mysqlUnsafeTransactionSql = [
+    '/*!40101 SET autocommit=1 */',
+    '/*! COMMIT */',
+    '/*M!100100 ALTER TABLE t ADD COLUMN x INT */',
+    'RESET MASTER',
+    'STOP REPLICA',
+    'CHANGE REPLICATION SOURCE TO SOURCE_HOST = \'127.0.0.1\'',
+    'FLUSH TABLES',
+    'CACHE INDEX t IN cache1',
+    'LOAD INDEX INTO CACHE t',
+    'CHECK TABLE t',
+    "SET PASSWORD = 'secret'",
+  ];
+  check('mysql 手动事务拒绝可执行注释和隐式提交管理语句', mysqlUnsafeTransactionSql.every((sql) => {
+    try { my._assertTransactionSql([sql]); return false; } catch (e) { return /可执行注释|隐式提交/.test(e.message); }
+  }), mysqlUnsafeTransactionSql);
+  let autoTransactionBoundaryDenied = false;
+  try { my._assertQueryPageSql(['BEGIN']); }
+  catch (e) { autoTransactionBoundaryDenied = /手写事务边界|开始 \/ 提交 \/ 回滚/.test(e.message); }
+  check('自动提交模式同样拒绝手写事务边界', autoTransactionBoundaryDenied);
+  const { MSSQLAdapter: MSSQLGuardAdapter } = require('./db/mssql');
+  const mssqlGuard = new MSSQLGuardAdapter({});
+  let mssqlBlockAllowed = true;
+  try { mssqlGuard._assertTransactionSql(['BEGIN\n SELECT 1;\nEND']); } catch (e) { mssqlBlockAllowed = false; }
+  let mssqlBeginTransactionDenied = false;
+  try { mssqlGuard._assertTransactionSql(['BEGIN TRANSACTION']); }
+  catch (e) { mssqlBeginTransactionDenied = /手写事务边界/.test(e.message); }
+  check('MSSQL 手动事务允许 BEGIN 控制块但拒绝 BEGIN TRAN', mssqlBlockAllowed && mssqlBeginTransactionDenied);
+  const mysqlAdvancedColumnMeta = new MySQLAdapter({});
+  mysqlAdvancedColumnMeta._q = async (sql) => {
+    if (/SHOW FULL COLUMNS/i.test(sql)) return [{
+      Field: 'updated_at', Type: 'timestamp', Collation: null, Null: 'NO', Key: '', Default: 'CURRENT_TIMESTAMP',
+      Extra: 'DEFAULT_GENERATED on update CURRENT_TIMESTAMP', Comment: '',
+    }, {
+      Field: 'name', Type: 'varchar(40)', Collation: 'utf8mb4_bin', Null: 'YES', Key: '', Default: null,
+      Extra: '', Comment: '',
+    }];
+    if (/SHOW INDEX/i.test(sql)) return [];
+    if (/SHOW CREATE TABLE/i.test(sql)) return [{ 'Create Table': 'CREATE TABLE `t` (...)' }];
+    if (/information_schema\.TABLES/i.test(sql)) return [{ tc: '' }];
+    return [];
+  };
+  const mysqlAdvancedColumns = await mysqlAdvancedColumnMeta.tableInfo('db1', null, 't');
+  check('MySQL ON UPDATE 等高级栏位只读且保留字符集元数据', mysqlAdvancedColumns.columns[0].editSafe === false
+    && mysqlAdvancedColumns.columns[1].charset === 'utf8mb4'
+    && mysqlAdvancedColumns.columns[1].collation === 'utf8mb4_bin', mysqlAdvancedColumns.columns);
 
   // ---- ClickHouse ----
   const ch = new ClickHouseAdapter({});
@@ -231,10 +359,21 @@ async function runSelfTest() {
 
   // ---- OceanBase（MySQL 兼容模式，继承 MySQL 适配器） ----
   const { OceanBaseAdapter } = require('./db/oceanbase');
-  const { createAdapter } = require('./db');
+  const { createAdapter, shutdownAdapter } = require('./db');
   const ob = new OceanBaseAdapter({ host: 'x', user: 'root@sys' });
   check('ob 注册', createAdapter({ type: 'oceanbase', host: 'x' }) instanceof OceanBaseAdapter);
   check('ob 方言继承', ob.dialect === 'mysql');
+
+  const shutdownOrder = [];
+  const neverSettles = new Promise(() => {});
+  const shutdownStarted = Date.now();
+  await shutdownAdapter({
+    cancel: async () => { shutdownOrder.push('cancel'); },
+    closeTransactions: async () => { shutdownOrder.push('transactions'); return neverSettles; },
+    close: async () => { shutdownOrder.push('close'); return neverSettles; },
+  }, { cancelMs: 10, transactionsMs: 20, closeMs: 20 });
+  check('连接关闭先取消活动查询且等待有界', shutdownOrder.join(',') === 'cancel,transactions,close'
+    && Date.now() - shutdownStarted < 1000, { shutdownOrder, ms: Date.now() - shutdownStarted });
   check('ob 转义继承', ob.quoteIdent('a`b') === '`a``b`' && ob.literal("a'b") === "'a''b'");
   check('ob 限定名', ob.qualify('db1', null, 't1') === '`db1`.`t1`');
   check('ob 网格可编辑', ob.readonlyReason === null);
@@ -268,6 +407,118 @@ async function runSelfTest() {
     && exactNumericArray[1] === '-0.000000000000000001', exactNumericArray);
   const exactTimestampArray = pgTypes.getTypeParser(1115, 'text')('{"2024-01-02 03:04:05.123456"}');
   check('PG timestamp[] parser 不转换 Date', exactTimestampArray[0] === '2024-01-02 03:04:05.123456', exactTimestampArray);
+  const pgMetadata = new PostgresAdapter({});
+  pgMetadata._q = async (_db, sql) => {
+    if (sql.includes("con.contype = 'f'")) return [{
+      name: 'fk_unvalidated', col: 'parent_id', refschema: 'public', reftab: 'parent', refcol: 'id', ord: 1,
+      definition: 'FOREIGN KEY (parent_id) REFERENCES parent(id) NOT VALID',
+      validated: false, deferrable: false, deferred: false, match_type: 's', is_local: true,
+      inherited_count: 0, parent_constraint_id: 0, on_update: 'NO ACTION', on_delete: 'NO ACTION',
+    }];
+    return [{
+      name: 'uq_deferred', kind: 'u', expression: '', definition: 'UNIQUE (id) DEFERRABLE',
+      validated: true, deferrable: true, deferred: false, no_inherit: false, is_local: true,
+      inherited_count: 0, parent_constraint_id: 0, col: 'id', ord: 1, index_name: 'uq_deferred',
+    }];
+  };
+  const pgUnsafeFk = await pgMetadata.listForeignKeys('db1', 'public', 'child');
+  const pgUnsafeConstraint = await pgMetadata.listConstraints('db1', 'public', 'child');
+  check('PG 未验证/可延迟约束禁止无损重建', pgUnsafeFk[0].rebuildSafe === false
+    && pgUnsafeConstraint[0].rebuildSafe === false, { pgUnsafeFk, pgUnsafeConstraint });
+  const pgCatalogQueries = [];
+  pgMetadata._q = async (_db, sql) => {
+    pgCatalogQueries.push(sql);
+    return [];
+  };
+  await pgMetadata.tableInfo('db1', 'public', 't1');
+  const pgIndexCatalogSql = pgCatalogQueries.find((sql) => sql.includes('FROM pg_index ix')) || '';
+  check('PG 旧版本目录不直接引用 PG11 indnkeyatts 栏位', pgIndexCatalogSql.includes("row_to_json(ix)->>'indnkeyatts'")
+    && !/\bix\.indnkeyatts\b/.test(pgIndexCatalogSql), pgIndexCatalogSql);
+  const { EventEmitter } = require('events');
+  const pgSessionAdapter = new PostgresAdapter({});
+  const pgSessionClient = new EventEmitter();
+  const pgSessionQueries = [];
+  let pgReleasedWith = null;
+  pgSessionClient.query = async (sql) => { pgSessionQueries.push(typeof sql === 'string' ? sql : sql.text); return { rows: [] }; };
+  pgSessionClient.release = (error) => { pgReleasedWith = error || false; };
+  pgSessionAdapter._getPool = () => ({ connect: async () => pgSessionClient });
+  await pgSessionAdapter.withSession('db1', async () => true);
+  check('PG 普通会话归池前执行 DISCARD ALL', pgSessionQueries.includes('DISCARD ALL') && pgReleasedWith === false,
+    { pgSessionQueries, pgReleasedWith });
+  const pgSchemaAdapter = new PostgresAdapter({});
+  const pgSchemaClient = new EventEmitter();
+  const pgSchemaQueries = [];
+  pgSchemaClient.query = async (sql, params) => {
+    const text = typeof sql === 'string' ? sql : sql.text;
+    pgSchemaQueries.push({ text, params });
+    if (text.includes('FROM pg_namespace')) return { rows: [{ ok: 1 }] };
+    return { rows: [], fields: [], rowCount: 0, command: 'OK' };
+  };
+  pgSchemaClient.release = () => {};
+  pgSchemaAdapter._getPool = () => ({ connect: async () => pgSchemaClient });
+  await pgSchemaAdapter.withSession('db1', async () => true, { schema: 'tenant "one' });
+  check('PG 查询执行会话应用并转义选中的 search_path', pgSchemaQueries.some((item) =>
+    item.text === 'SET search_path TO pg_catalog, "tenant ""one"')
+    && pgSchemaQueries.some((item) => item.text.includes('FROM pg_namespace')
+      && item.params && item.params[0] === 'tenant "one'), pgSchemaQueries);
+  const pgCleanupAdapter = new PostgresAdapter({});
+  const pgCleanupClient = new EventEmitter();
+  let pgCleanupReleasedWith = null;
+  let pgCleanupReported = null;
+  pgCleanupClient.query = async (sql) => {
+    const text = typeof sql === 'string' ? sql : sql.text;
+    if (text === 'DISCARD ALL') throw new Error('discard failed');
+    return { rows: [], fields: [], rowCount: 0, command: String(text).split(/\s+/)[0] || 'OK' };
+  };
+  pgCleanupClient.release = (error) => { pgCleanupReleasedWith = error || false; };
+  pgCleanupAdapter._getPool = () => ({ connect: async () => pgCleanupClient });
+  const oldWarn = console.warn;
+  console.warn = () => {};
+  let pgCleanupResult;
+  try {
+    await pgCleanupAdapter.beginTransaction('pg-cleanup', 'db1');
+    pgCleanupResult = await pgCleanupAdapter.commitTransaction('pg-cleanup');
+    await pgCleanupAdapter.withSession('db1', async () => 'query-succeeded', {
+      onCleanupError: (error) => { pgCleanupReported = error; },
+    });
+  } finally {
+    console.warn = oldWarn;
+  }
+  check('PG COMMIT 成功后 DISCARD 失败不伪报事务失败', pgCleanupResult
+    && /事务已提交/.test(pgCleanupResult.warning || '')
+    && pgCleanupReleasedWith && pgCleanupReported && /discard failed/.test(pgCleanupReported.message),
+  { pgCleanupResult, pgCleanupReleasedWith: pgCleanupReleasedWith && pgCleanupReleasedWith.message });
+  const pgLostAdapter = new PostgresAdapter({});
+  const pgLostClient = new EventEmitter();
+  let pgLostReleaseError = null;
+  pgLostClient.query = async () => ({ rows: [] });
+  pgLostClient.release = (error) => { pgLostReleaseError = error; };
+  pgLostAdapter._getPool = () => ({ connect: async () => pgLostClient });
+  const pgLostPromise = pgLostAdapter.withSession('db1', async () => new Promise(() => {}));
+  setImmediate(() => pgLostClient.emit('error', new Error('socket lost')));
+  let pgLostCaught = false;
+  try { await pgLostPromise; } catch (e) { pgLostCaught = /socket lost/.test(e.message); }
+  check('PG 固定会话断线不会触发未监听 error 且会销毁会话', pgLostCaught
+    && pgLostReleaseError && pgLostClient.listenerCount('error') === 0, pgLostReleaseError && pgLostReleaseError.message);
+  const { MSSQLAdapter } = require('./db/mssql');
+  const mssqlMetadata = new MSSQLAdapter({});
+  mssqlMetadata._q = async (_db, sql) => (sql.includes('sys.key_constraints') ? [{
+    name: 'uq_t_id', index_name: 'uq_t_id', col: 'id', ord: 1,
+    type_desc: 'NONCLUSTERED', has_filter: false, fill_factor: 0, is_disabled: false,
+  }] : []);
+  const mssqlUnique = await mssqlMetadata.listConstraints('db1', 'dbo', 't1');
+  check('SQL Server 既有 UNIQUE 因物理属性未知而只读', mssqlUnique[0].rebuildSafe === false, mssqlUnique);
+
+  const strictMysqlMeta = new MySQLAdapter({});
+  strictMysqlMeta.serverVersion = 'MySQL 8.0.36';
+  strictMysqlMeta._q = async (sql) => {
+    if (sql.includes("CONSTRAINT_TYPE = 'UNIQUE'")) return [];
+    throw new Error('catalog denied');
+  };
+  let mysqlConstraintMetadataBlocked = false;
+  try { await strictMysqlMeta.listConstraints('db1', null, 't1'); }
+  catch (e) { mysqlConstraintMetadataBlocked = /禁止.*设计器|读取 CHECK 约束失败/.test(e.message); }
+  check('MySQL 约束元数据不完整时 fail closed', mysqlConstraintMetadataBlocked);
   const model1 = {
     table: 't1', comment: '测试表', options: '',
     columns: [
@@ -304,6 +555,276 @@ async function runSelfTest() {
   const a2 = ddl.buildAlterTable(pgA, 'db1', 'public', orig, mod);
   check('ddl pg rename+type', a2.sqls.some((s) => s.includes('RENAME COLUMN "name" TO "full_name"'))
     && a2.sqls.some((s) => s.includes('ALTER COLUMN "amount" TYPE decimal(12,2)')), a2.sqls);
+  check('ddl PG 删除索引使用目标 Schema 限定名', a2.sqls.some((s) => s === 'DROP INDEX "public"."idx_name"'), a2.sqls);
+
+  const mysqlRenameOriginal = JSON.parse(JSON.stringify(orig));
+  mysqlRenameOriginal.indexes.forEach((index) => { index.origName = index.name; });
+  const mysqlRenameOnly = JSON.parse(JSON.stringify(mysqlRenameOriginal));
+  mysqlRenameOnly.table = 't1_renamed';
+  const mysqlRenameSql = ddl.buildAlterTable(my, 'db1', null, mysqlRenameOriginal, mysqlRenameOnly);
+  check('ddl MySQL 纯表重命名可执行且完整限定目标', mysqlRenameSql.sqls.length === 1
+    && mysqlRenameSql.sqls[0] === 'RENAME TABLE `db1`.`t1` TO `db1`.`t1_renamed`', mysqlRenameSql.sqls);
+  const mysqlRenameMixed = JSON.parse(JSON.stringify(mysqlRenameOnly));
+  mysqlRenameMixed.columns.find((column) => column.name === 'amount').length = '18';
+  let mysqlRenameMixedBlocked = false;
+  try { ddl.buildAlterTable(my, 'db1', null, mysqlRenameOriginal, mysqlRenameMixed); }
+  catch (e) { mysqlRenameMixedBlocked = /表重命名请单独保存/.test(e.message); }
+  check('ddl MySQL 表重命名与结构变更必须分两次保存', mysqlRenameMixedBlocked);
+
+  const advancedColumnOrig = JSON.parse(JSON.stringify(orig));
+  advancedColumnOrig.columns[1].editSafe = false;
+  advancedColumnOrig.columns[1].editUnsafeReason = 'ON UPDATE / GENERATED';
+  const advancedColumnChanged = JSON.parse(JSON.stringify(advancedColumnOrig));
+  advancedColumnChanged.columns[1].comment = 'changed';
+  let advancedColumnEditBlocked = false;
+  try { ddl.buildAlterTable(my, 'db1', null, advancedColumnOrig, advancedColumnChanged); }
+  catch (e) { advancedColumnEditBlocked = /无法无损保留|当前为只读/.test(e.message); }
+  const advancedColumnDeleted = JSON.parse(JSON.stringify(advancedColumnOrig));
+  advancedColumnDeleted.columns.splice(1, 1);
+  let advancedColumnDeleteBlocked = false;
+  try { ddl.buildAlterTable(my, 'db1', null, advancedColumnOrig, advancedColumnDeleted); }
+  catch (e) { advancedColumnDeleteBlocked = /不能在设计器中删除/.test(e.message); }
+  check('ddl 高级栏位属性在编辑和删除时均 fail closed', advancedColumnEditBlocked && advancedColumnDeleteBlocked);
+
+  const collatedOrig = JSON.parse(JSON.stringify(orig));
+  const collatedName = collatedOrig.columns.find((column) => column.name === 'name');
+  collatedName.charset = 'utf8mb4';
+  collatedName.collation = 'utf8mb4_bin';
+  const collatedMod = JSON.parse(JSON.stringify(collatedOrig));
+  collatedMod.columns.find((column) => column.name === 'name').comment = '保留排序规则';
+  const collatedAlter = ddl.buildAlterTable(my, 'db1', null, collatedOrig, collatedMod);
+  check('ddl MySQL CHANGE 栏位保留字符集与排序规则', collatedAlter.sqls.some((sql) => (
+    sql.includes('CHARACTER SET utf8mb4 COLLATE utf8mb4_bin') && sql.includes("COMMENT '保留排序规则'")
+  )), collatedAlter.sqls);
+
+  const constrainedCreate = JSON.parse(JSON.stringify(model1));
+  constrainedCreate.foreignKeys = [{
+    name: 'fk_t1_owner', origName: null, columns: ['id'], refSchema: '', refTable: 'owners', refColumns: ['id'],
+    onUpdate: 'CASCADE', onDelete: 'SET NULL',
+  }];
+  constrainedCreate.constraints = [
+    { kind: 'unique', name: 'uq_t1_name', origName: null, columns: ['name'], expression: '' },
+    { kind: 'check', name: 'ck_t1_amount', origName: null, columns: [], expression: 'amount >= 0' },
+  ];
+  const constrainedMysql = ddl.buildCreateTable(my, 'db1', null, constrainedCreate);
+  check('ddl mysql 创建外键动作', constrainedMysql.sqls[0].includes('CONSTRAINT `fk_t1_owner` FOREIGN KEY (`id`)')
+    && constrainedMysql.sqls[0].includes('ON DELETE SET NULL ON UPDATE CASCADE'), constrainedMysql.sqls[0]);
+  check('ddl mysql 创建 UNIQUE/CHECK 约束', constrainedMysql.sqls[0].includes('CONSTRAINT `uq_t1_name` UNIQUE (`name`)')
+    && constrainedMysql.sqls[0].includes('CONSTRAINT `ck_t1_amount` CHECK (amount >= 0)'), constrainedMysql.sqls[0]);
+
+  const constrainedOrig = JSON.parse(JSON.stringify(constrainedCreate));
+  constrainedOrig.columns.forEach((c) => { c.origName = c.name; });
+  constrainedOrig.indexes.forEach((ix) => { ix.origName = ix.name; });
+  constrainedOrig.foreignKeys.forEach((fk) => { fk.origName = fk.name; });
+  constrainedOrig.constraints.forEach((item) => { item.origName = item.name; });
+  const inboundOrig = JSON.parse(JSON.stringify(constrainedOrig));
+  inboundOrig._referencedBy = [{
+    name: 'fk_external_t1', schema: 'sales', table: 'orders', columns: ['t1_id'], refColumns: ['id'],
+  }];
+  const inboundTypeChange = JSON.parse(JSON.stringify(inboundOrig));
+  inboundTypeChange.columns.find((column) => column.name === 'id').type = 'bigint';
+  const inboundRename = JSON.parse(JSON.stringify(inboundOrig));
+  inboundRename.columns.find((column) => column.name === 'id').name = 'new_id';
+  const inboundDelete = JSON.parse(JSON.stringify(inboundOrig));
+  inboundDelete.columns = inboundDelete.columns.filter((column) => column.name !== 'id');
+  const inboundErrors = [inboundTypeChange, inboundRename, inboundDelete].map((next) => {
+    try { ddl.buildAlterTable(my, 'db1', null, inboundOrig, next); return ''; }
+    catch (e) { return e.message; }
+  });
+  check('ddl 入站外键阻止被引用栏位改类型/改名/删除', inboundErrors.every((message) => /外部表|入站外键/.test(message)), inboundErrors);
+  const inboundPkChange = JSON.parse(JSON.stringify(inboundOrig));
+  inboundPkChange.columns.find((column) => column.name === 'id').pk = false;
+  let inboundPkBlocked = false;
+  try { ddl.buildAlterTable(my, 'db1', null, inboundOrig, inboundPkChange); }
+  catch (e) { inboundPkBlocked = /主键正被其他表外键引用/.test(e.message); }
+  check('ddl 入站外键阻止删除被引用主键', inboundPkBlocked);
+  const constrainedMod = JSON.parse(JSON.stringify(constrainedOrig));
+  constrainedMod.foreignKeys[0].onDelete = 'CASCADE';
+  constrainedMod.constraints = [
+    { ...constrainedMod.constraints[1], expression: 'amount >= 1' },
+    { kind: 'unique', name: 'uq_t1_amount', origName: null, columns: ['amount'], expression: '' },
+  ];
+  const constrainedAlter = ddl.buildAlterTable(my, 'db1', null, constrainedOrig, constrainedMod);
+  check('ddl mysql 修改外键使用先删后建', constrainedAlter.sqls[0].includes('DROP FOREIGN KEY `fk_t1_owner`')
+    && constrainedAlter.sqls.some((s) => s.includes('ADD CONSTRAINT `fk_t1_owner`') && s.includes('ON DELETE CASCADE')), constrainedAlter.sqls);
+  check('ddl mysql 删除/修改 UNIQUE CHECK', constrainedAlter.sqls.some((s) => s.includes('DROP INDEX `uq_t1_name`'))
+    && constrainedAlter.sqls.some((s) => s.includes('DROP CHECK `ck_t1_amount`'))
+    && constrainedAlter.sqls.some((s) => s.includes('ADD CONSTRAINT `ck_t1_amount` CHECK (amount >= 1)'))
+    && constrainedAlter.sqls.some((s) => s.includes('ADD CONSTRAINT `uq_t1_amount` UNIQUE (`amount`)')), constrainedAlter.sqls);
+  my.serverVersion = 'MySQL 10.11.0-MariaDB';
+  const constrainedMaria = ddl.buildAlterTable(my, 'db1', null, constrainedOrig, constrainedMod);
+  check('ddl mariadb 删除 CHECK 使用 DROP CONSTRAINT', constrainedMaria.sqls.some((s) => s.includes('DROP CONSTRAINT `ck_t1_amount`')),
+    constrainedMaria.sqls);
+  my.serverVersion = '';
+
+  // 未显式编辑约束时，受约束栏位改类型也必须先拆约束再修改栏位，最后只重建一次。
+  const dependencyMod = JSON.parse(JSON.stringify(constrainedOrig));
+  dependencyMod.columns.find((c) => c.name === 'id').type = 'bigint';
+  dependencyMod.columns.find((c) => c.name === 'name').length = '160';
+  dependencyMod.columns.find((c) => c.name === 'amount').length = '14';
+  const mysqlDependency = ddl.buildAlterTable(my, 'db1', null, constrainedOrig, dependencyMod);
+  const mysqlFkDrops = mysqlDependency.sqls.filter((s) => s.includes('DROP FOREIGN KEY `fk_t1_owner`'));
+  const mysqlFkAdds = mysqlDependency.sqls.filter((s) => s.includes('ADD CONSTRAINT `fk_t1_owner`'));
+  const mysqlUniqueDrops = mysqlDependency.sqls.filter((s) => s.includes('DROP INDEX `uq_t1_name`'));
+  const mysqlUniqueAdds = mysqlDependency.sqls.filter((s) => s.includes('ADD CONSTRAINT `uq_t1_name`'));
+  const mysqlCheckDrops = mysqlDependency.sqls.filter((s) => /DROP (?:CHECK|CONSTRAINT) `ck_t1_amount`/.test(s));
+  const mysqlCheckAdds = mysqlDependency.sqls.filter((s) => s.includes('ADD CONSTRAINT `ck_t1_amount`'));
+  const mysqlDependencySql = mysqlDependency.sqls.join('\n');
+  check('ddl mysql 类型变更自动拆建依赖约束且不重复',
+    mysqlFkDrops.length === 1 && mysqlFkAdds.length === 1
+      && mysqlUniqueDrops.length === 1 && mysqlUniqueAdds.length === 1
+      && mysqlCheckDrops.length === 1 && mysqlCheckAdds.length === 1,
+    mysqlDependency.sqls);
+  check('ddl mysql 依赖约束顺序包围类型变更且合并为单条 ALTER',
+    mysqlDependency.sqls.length === 1
+      && mysqlDependencySql.indexOf('DROP FOREIGN KEY `fk_t1_owner`') < mysqlDependencySql.indexOf('CHANGE COLUMN `id`')
+      && mysqlDependencySql.indexOf('DROP INDEX `uq_t1_name`') < mysqlDependencySql.indexOf('CHANGE COLUMN `name`')
+      && mysqlDependencySql.indexOf('DROP CHECK `ck_t1_amount`') < mysqlDependencySql.indexOf('CHANGE COLUMN `amount`')
+      && mysqlDependencySql.indexOf('ADD CONSTRAINT `fk_t1_owner`') > mysqlDependencySql.lastIndexOf('CHANGE COLUMN')
+      && mysqlDependencySql.indexOf('ADD CONSTRAINT `uq_t1_name`') > mysqlDependencySql.lastIndexOf('CHANGE COLUMN')
+      && mysqlDependencySql.indexOf('ADD CONSTRAINT `ck_t1_amount`') > mysqlDependencySql.lastIndexOf('CHANGE COLUMN'),
+    mysqlDependency.sqls);
+
+  // CHECK 中函数名可能与栏位名同名。MySQL 重命名不会自动改写 CHECK，
+  // 因此未手动更新表达式时必须阻止；更新后不能误改函数名。
+  const lowerCheckOrig = JSON.parse(JSON.stringify(constrainedOrig));
+  lowerCheckOrig.indexes = [];
+  lowerCheckOrig.foreignKeys = [];
+  lowerCheckOrig.columns.push({
+    name: 'lower', origName: 'lower', type: 'varchar', length: '100', scale: '',
+    notNull: false, pk: false, autoInc: false, def: '', comment: '',
+  });
+  lowerCheckOrig.constraints = [{
+    kind: 'check', name: 'ck_t1_lower', origName: 'ck_t1_lower', columns: [],
+    expression: "lower(`lower`) <> ''", rebuildSafe: true,
+  }];
+  const lowerCheckRenamed = JSON.parse(JSON.stringify(lowerCheckOrig));
+  lowerCheckRenamed.columns.find((c) => c.origName === 'lower').name = 'normalized';
+  let lowerRenameBlocked = false;
+  try { ddl.buildAlterTable(my, 'db1', null, lowerCheckOrig, lowerCheckRenamed); }
+  catch (e) { lowerRenameBlocked = /检查约束 ck_t1_lower.*手动更新 CHECK 表达式/.test(e.message); }
+  check('ddl mysql CHECK 函数名与栏位名冲突时拒绝静默重命名', lowerRenameBlocked);
+  lowerCheckRenamed.constraints[0].expression = "lower(`normalized`) <> ''";
+  const lowerCheckAlter = ddl.buildAlterTable(my, 'db1', null, lowerCheckOrig, lowerCheckRenamed);
+  check('ddl mysql 手改 CHECK 后保留 lower 函数名', lowerCheckAlter.sqls.some((s) => (
+    s.includes("ADD CONSTRAINT `ck_t1_lower` CHECK (lower(`normalized`) <> '')")
+  )) && !lowerCheckAlter.sqls.some((s) => /CHECK \(normalized\s*\(/i.test(s)), lowerCheckAlter.sqls);
+
+  const unsafeConstraintOriginal = (kind) => {
+    const source = JSON.parse(JSON.stringify(constrainedOrig));
+    source.indexes = [];
+    source.foreignKeys = kind === 'fk'
+      ? [{ ...source.foreignKeys[0], rebuildSafe: false }]
+      : [];
+    source.constraints = kind === 'unique'
+      ? [{ ...source.constraints.find((item) => item.kind === 'unique'), rebuildSafe: false }]
+      : (kind === 'check'
+        ? [{ ...source.constraints.find((item) => item.kind === 'check'), rebuildSafe: false }]
+        : []);
+    return source;
+  };
+  const unsafeEditedErrors = ['fk', 'unique', 'check'].map((kind) => {
+    const source = unsafeConstraintOriginal(kind);
+    const changed = JSON.parse(JSON.stringify(source));
+    if (kind === 'fk') changed.foreignKeys[0].onDelete = 'CASCADE';
+    else if (kind === 'unique') changed.constraints[0].columns = ['amount'];
+    else changed.constraints[0].expression = 'amount >= 1';
+    try { ddl.buildAlterTable(my, 'db1', null, source, changed); return ''; }
+    catch (e) { return e.message; }
+  });
+  check('ddl rebuildSafe=false 阻止编辑 FK/UNIQUE/CHECK', unsafeEditedErrors.every((message) => /无法无损保留/.test(message)),
+    unsafeEditedErrors);
+  const unsafeDependencyErrors = ['fk', 'unique', 'check'].map((kind) => {
+    const source = unsafeConstraintOriginal(kind);
+    const changed = JSON.parse(JSON.stringify(source));
+    if (kind === 'fk') changed.columns.find((c) => c.name === 'id').type = 'bigint';
+    else if (kind === 'unique') changed.columns.find((c) => c.name === 'name').length = '160';
+    else changed.columns.find((c) => c.name === 'amount').length = '14';
+    try { ddl.buildAlterTable(my, 'db1', null, source, changed); return ''; }
+    catch (e) { return e.message; }
+  });
+  check('ddl rebuildSafe=false 阻止因类型变化重建 FK/UNIQUE/CHECK', unsafeDependencyErrors.every((message) => /无法无损保留/.test(message)),
+    unsafeDependencyErrors);
+
+  const renameOnlyOrig = JSON.parse(JSON.stringify(constrainedOrig));
+  renameOnlyOrig.indexes = [];
+  renameOnlyOrig.constraints = renameOnlyOrig.constraints.filter((item) => item.kind === 'unique');
+  const renameOnlyStale = JSON.parse(JSON.stringify(renameOnlyOrig));
+  renameOnlyStale.columns.find((c) => c.origName === 'id').name = 'owner_id';
+  renameOnlyStale.columns.find((c) => c.origName === 'name').name = 'full_name';
+  const renameOnlySynced = JSON.parse(JSON.stringify(renameOnlyStale));
+  renameOnlySynced.foreignKeys[0].columns = ['owner_id'];
+  renameOnlySynced.constraints[0].columns = ['full_name'];
+  const renameOnlyResults = [renameOnlyStale, renameOnlySynced]
+    .map((next) => ddl.buildAlterTable(my, 'db1', null, renameOnlyOrig, next));
+  const rebuildSql = /DROP FOREIGN KEY|DROP INDEX `uq_t1_name`|ADD CONSTRAINT `(?:fk_t1_owner|uq_t1_name)`/;
+  check('ddl 仅重命名栏位不重建未编辑 FK/UNIQUE', renameOnlyResults.every((result) => (
+    result.sqls.some((s) => s.includes('CHANGE COLUMN `id` `owner_id`'))
+      && result.sqls.some((s) => s.includes('CHANGE COLUMN `name` `full_name`'))
+      && !result.sqls.some((s) => rebuildSql.test(s))
+  )), renameOnlyResults.map((result) => result.sqls));
+
+  const pgDependency = ddl.buildAlterTable(pgA, 'db1', 'public', constrainedOrig, dependencyMod);
+  const pgConstraintSql = (verb, name) => pgDependency.sqls.filter((s) => s.includes(`${verb} CONSTRAINT "${name}"`));
+  const pgDrops = ['fk_t1_owner', 'uq_t1_name', 'ck_t1_amount'].flatMap((name) => pgConstraintSql('DROP', name));
+  const pgAdds = ['fk_t1_owner', 'uq_t1_name', 'ck_t1_amount'].flatMap((name) => pgConstraintSql('ADD', name));
+  const pgFirstType = pgDependency.sqls.findIndex((s) => s.includes(' ALTER COLUMN ') && s.includes(' TYPE '));
+  const pgLastType = pgDependency.sqls.reduce((last, s, i) => s.includes(' ALTER COLUMN ') && s.includes(' TYPE ') ? i : last, -1);
+  check('ddl postgres 类型变更自动拆建依赖约束且不重复', pgDrops.length === 3 && pgAdds.length === 3
+    && new Set(pgDrops).size === 3 && new Set(pgAdds).size === 3, pgDependency.sqls);
+  check('ddl postgres 依赖约束顺序包围类型变更', pgDrops.every((s) => pgDependency.sqls.indexOf(s) < pgFirstType)
+    && pgAdds.every((s) => pgDependency.sqls.indexOf(s) > pgLastType), pgDependency.sqls);
+
+  const constrainedPg = ddl.buildCreateTable(pgA, 'db1', 'public', {
+    ...constrainedCreate,
+    foreignKeys: [{ ...constrainedCreate.foreignKeys[0], onUpdate: 'SET DEFAULT', onDelete: 'RESTRICT' }],
+  });
+  check('ddl postgres 外键动作', constrainedPg.sqls[0].includes('ON DELETE RESTRICT ON UPDATE SET DEFAULT'), constrainedPg.sqls[0]);
+  const constrainedOracle = ddl.buildCreateTable(obo, 'SCOTT', null, constrainedCreate);
+  check('ddl oracle 明确降级 ON UPDATE', constrainedOracle.warnings.some((w) => /不支持 ON UPDATE CASCADE/.test(w))
+    && !constrainedOracle.sqls[0].includes('ON UPDATE'), constrainedOracle);
+  const sqliteConstraintAlter = ddl.buildAlterTable(new SQLiteAdapter({}), 'main', null, constrainedOrig, constrainedMod);
+  check('ddl sqlite 既有外键约束明确降级', sqliteConstraintAlter.sqls.length === 0
+    && sqliteConstraintAlter.warnings.some((w) => /需要重建表/.test(w)), sqliteConstraintAlter);
+  const clickhouseConstraints = ddl.buildCreateTable(ch, 'default', null, constrainedCreate);
+  check('ddl clickhouse 不伪装支持外键约束', !/FOREIGN KEY|CONSTRAINT/.test(clickhouseConstraints.sqls[0])
+    && clickhouseConstraints.warnings.length >= 3, clickhouseConstraints);
+
+  const constraintModel = ddl.infoToModel({
+    columns: [{ name: 'id', type: 'int', nullable: false, key: '', extra: '', def: null }], pk: [],
+    indexes: [{ name: 'uq_t_id_idx', columns: ['id'], unique: true, primary: false }],
+    foreignKeys: [], constraints: [{ kind: 'unique', name: 'uq_t_id', indexName: 'uq_t_id_idx', columns: ['id'] }],
+  }, 't', 'postgres');
+  check('ddl 约束背后的唯一索引不重复展示', constraintModel.constraints.length === 1 && constraintModel.indexes.length === 0, constraintModel);
+  const unsafeConstraintModel = ddl.infoToModel({
+    columns: [{
+      name: 'id', type: 'int', nullable: false, key: '', extra: '', def: null,
+      editSafe: false, editUnsafeReason: 'generated', charset: 'utf8mb4', collation: 'utf8mb4_bin',
+    }], pk: [], indexes: [],
+    foreignKeys: [{
+      name: 'fk_t_parent', columns: ['id'], refSchema: '', refTable: 'parent', refColumns: ['id'],
+      onUpdate: 'NO ACTION', onDelete: 'NO ACTION', rebuildSafe: false,
+    }],
+    constraints: [
+      { kind: 'unique', name: 'uq_t_id', columns: ['id'], rebuildSafe: false },
+      { kind: 'check', name: 'ck_t_id', expression: 'id > 0', rebuildSafe: false },
+    ],
+  }, 't', 'mysql');
+  check('ddl infoToModel 传播 rebuildSafe=false', unsafeConstraintModel.foreignKeys[0].rebuildSafe === false
+    && unsafeConstraintModel.constraints.every((item) => item.rebuildSafe === false)
+    && unsafeConstraintModel.columns[0].editSafe === false
+    && unsafeConstraintModel.columns[0].charset === 'utf8mb4'
+    && unsafeConstraintModel.columns[0].collation === 'utf8mb4_bin', unsafeConstraintModel);
+  const safeIndexModel = ddl.infoToModel({
+    columns: [{ name: 'id', type: 'int', nullable: false, key: '', extra: '', def: null }], pk: [],
+    indexes: [
+      { name: 'idx_plain', columns: ['id'], unique: false, primary: false, editable: true },
+      { name: 'idx_expression', columns: ['id'], unique: false, primary: false, editable: false },
+    ],
+    foreignKeys: [], constraints: [],
+  }, 't', 'postgres');
+  check('ddl 不可无损编辑的高级索引不进入设计模型', safeIndexModel.indexes.length === 1
+    && safeIndexModel.indexes[0].name === 'idx_plain', safeIndexModel);
 
   // ---- CSV 解析 ----
   const { parseCsv } = require('./importer');
@@ -316,6 +837,37 @@ async function runSelfTest() {
   const file2 = path.join(os.tmpdir(), `dbconnect-design-${Date.now()}.db`);
   const ad2 = new SQLiteAdapter({ id: 'd', type: 'sqlite', file: file2 });
   await ad2.connect();
+  await ad2.exec('main', 'CREATE TABLE owner (id INTEGER PRIMARY KEY)');
+  const sqliteConstraintModel = {
+    table: 'child_constraints', comment: '', options: '', indexes: [],
+    columns: [
+      { name: 'id', origName: null, type: 'INTEGER', length: '', scale: '', notNull: true, pk: true, autoInc: false, def: '', comment: '' },
+      { name: 'owner_id', origName: null, type: 'INTEGER', length: '', scale: '', notNull: false, pk: false, autoInc: false, def: '', comment: '' },
+      { name: 'code', origName: null, type: 'TEXT', length: '', scale: '', notNull: false, pk: false, autoInc: false, def: '', comment: '' },
+    ],
+    foreignKeys: [{
+      name: 'fk_child_owner', origName: null, columns: ['owner_id'], refSchema: '', refTable: 'owner', refColumns: ['id'],
+      onUpdate: 'CASCADE', onDelete: 'SET NULL',
+    }],
+    constraints: [
+      { kind: 'unique', name: 'uq_child_code', origName: null, columns: ['code'], expression: '' },
+      { kind: 'check', name: 'ck_child_code', origName: null, columns: [], expression: "length(code) >= 2" },
+    ],
+  };
+  const sqliteConstraintBuilt = ddl.buildCreateTable(ad2, 'main', null, sqliteConstraintModel);
+  await ad2.execSequential('main', sqliteConstraintBuilt.sqls);
+  const sqliteDesignedFks = await ad2.listForeignKeys('main', null, 'child_constraints');
+  const sqliteDesignedConstraints = await ad2.listConstraints('main', null, 'child_constraints');
+  check('设计器 SQLite 外键动作回读', sqliteDesignedFks.length === 1
+    && sqliteDesignedFks[0].columns[0] === 'owner_id' && sqliteDesignedFks[0].refTable === 'owner'
+    && sqliteDesignedFks[0].onUpdate === 'CASCADE' && sqliteDesignedFks[0].onDelete === 'SET NULL', sqliteDesignedFks);
+  check('设计器 SQLite UNIQUE/CHECK 回读', sqliteDesignedConstraints.some((item) => item.kind === 'unique' && item.columns[0] === 'code')
+    && sqliteDesignedConstraints.some((item) => item.kind === 'check' && item.name === 'ck_child_code'
+      && item.expression === 'length(code) >= 2'), sqliteDesignedConstraints);
+  await ad2.exec('main', "CREATE TABLE check_literal (note TEXT DEFAULT 'CHECK(fake)', amount INTEGER CONSTRAINT ck_amount CHECK(amount >= 0))");
+  const literalChecks = await ad2.listConstraints('main', null, 'check_literal');
+  check('SQLite CHECK 回读忽略字符串中的 CHECK 文本', literalChecks.filter((item) => item.kind === 'check').length === 1
+    && literalChecks.some((item) => item.name === 'ck_amount'), literalChecks);
   const sModel = {
     table: 'imp_test', comment: '', options: '',
     columns: [
@@ -552,7 +1104,40 @@ async function runSelfTest() {
   const file = path.join(os.tmpdir(), `dbconnect-selftest-${Date.now()}.db`);
   const ad = new SQLiteAdapter({ id: 't', type: 'sqlite', file });
   await ad.connect();
+  check('适配器初始活动查询/事务摘要为空', ad.connectionActivity().requests === 0
+    && ad.connectionActivity().transactions === 0, ad.connectionActivity());
   console.log('  · SQLite 模式:', ad.mode, ad.serverVersion);
+
+  await ad.runScript('main', `
+    CREATE TABLE fk_parent (id INTEGER PRIMARY KEY);
+    CREATE TABLE fk_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES fk_parent(id));
+    CREATE TABLE fk_child_implicit (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES fk_parent);
+  `);
+  const sqliteOrphan = await ad.runScript('main', 'INSERT INTO fk_child(id, parent_id) VALUES (1, 999)');
+  check('SQLite 连接强制启用外键约束', sqliteOrphan.some((item) => /FOREIGN KEY constraint failed/i.test(item.error || '')), sqliteOrphan);
+  const sqliteImplicitRefs = await ad.listReferencingForeignKeys('main', null, 'fk_parent');
+  check('SQLite 省略父栏位的入站外键补齐目标主键', sqliteImplicitRefs.some((item) => (
+    item.table === 'fk_child_implicit' && item.refColumns.length === 1 && item.refColumns[0] === 'id'
+  )), sqliteImplicitRefs);
+  await ad.runScript('main', 'DROP TABLE fk_child_implicit; DROP TABLE fk_child; DROP TABLE fk_parent;');
+  await ad.runScript('main', `
+    CREATE TABLE idx_advanced (name TEXT, amount INTEGER);
+    CREATE INDEX idx_simple ON idx_advanced(name);
+    CREATE INDEX idx_partial ON idx_advanced(amount) WHERE amount > 0;
+    CREATE INDEX idx_expression ON idx_advanced(lower(name));
+    CREATE INDEX idx_desc ON idx_advanced(amount DESC);
+  `);
+  const sqliteAdvancedInfo = await ad.tableInfo('main', null, 'idx_advanced');
+  const sqliteIndexSafety = new Map(sqliteAdvancedInfo.indexes.map((item) => [item.name, item.editable]));
+  check('SQLite 高级索引只读且基础索引可编辑', sqliteIndexSafety.get('idx_simple') === true
+    && sqliteIndexSafety.get('idx_partial') === false
+    && sqliteIndexSafety.get('idx_expression') === false
+    && sqliteIndexSafety.get('idx_desc') === false, sqliteAdvancedInfo.indexes);
+  await ad.runScript('main', 'DROP TABLE idx_advanced;');
+  const sqliteReconnect = new SQLiteAdapter({ type: 'sqlite', file: ':memory:' });
+  await sqliteReconnect.connect();
+  check('SQLite 每次新连接都会重新启用外键约束', Number(sqliteReconnect._execRaw('PRAGMA foreign_keys').rows[0][0]) === 1);
+  await sqliteReconnect.close();
 
   const r1 = await ad.runScript('main', `
     CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, age INT, note TEXT);
@@ -572,6 +1157,167 @@ async function runSelfTest() {
   check('查询返回行', sel && sel.rowCount === 2);
   check('查询返回中文', sel && sel.rows[0][1] === '张三');
   check('NULL 透传', sel && sel.rows[0][3] === null);
+
+  // 查询标签显式事务：同一固定会话中执行，提交/回滚后释放。
+  const txId = 'selftest-explicit-tx';
+  await ad.beginTransaction(txId, 'main');
+  check('显式事务状态 active', ad.transactionStatus(txId).state === 'active', ad.transactionStatus(txId));
+  const txUpdate = await ad.runTransactionScript(txId, 'main', 'UPDATE users SET age = 77 WHERE id = 1', { requestId: 'tx-update' });
+  check('显式事务内语句成功', txUpdate.length === 1 && !txUpdate[0].error, txUpdate);
+  let sqliteOutsideBlocked = false;
+  try { await ad.runScript('main', 'SELECT age FROM users WHERE id = 1'); }
+  catch (e) { sqliteOutsideBlocked = /显式事务/.test(e.message); }
+  check('SQLite 显式事务期间阻止其他会话混入', sqliteOutsideBlocked);
+  await ad.rollbackTransaction(txId);
+  const rolledBackAge = await ad.runScript('main', 'SELECT age FROM users WHERE id = 1');
+  check('显式事务回滚恢复数据', Number(rolledBackAge[0].rows[0][0]) === 30, rolledBackAge);
+
+  await ad.beginTransaction(txId, 'main');
+  await ad.runTransactionScript(txId, 'main', "INSERT INTO users (name, age) VALUES ('事务提交', 44)", { requestId: 'tx-insert' });
+  await ad.commitTransaction(txId);
+  const committedRow = await ad.runScript('main', "SELECT age FROM users WHERE name = '事务提交'");
+  check('显式事务提交持久化数据', Number(committedRow[0].rows[0][0]) === 44, committedRow);
+
+  await ad.beginTransaction(txId, 'main');
+  const txBad = await ad.runTransactionScript(txId, 'main', 'SELECT * FROM table_does_not_exist', { requestId: 'tx-bad' });
+  check('事务语句失败进入 failed 状态', txBad.some((item) => item.error)
+    && ad.transactionStatus(txId).state === 'failed', { txBad, status: ad.transactionStatus(txId) });
+  let failedCommitDenied = false;
+  try { await ad.commitTransaction(txId); } catch (e) { failedCommitDenied = /只能回滚/.test(e.message); }
+  check('失败事务禁止提交', failedCommitDenied);
+  await ad.rollbackTransaction(txId);
+  const clickhouseTx = new ClickHouseAdapter({ type: 'clickhouse' });
+  check('ClickHouse 显式事务安全降级', clickhouseTx.transactionStatus('tx-check').supported === false,
+    clickhouseTx.transactionStatus('tx-check'));
+
+  const { BaseAdapter } = require('./db/base');
+  class FakeTransactionAdapter extends BaseAdapter {
+    constructor(options = {}) {
+      super({});
+      this.options = options;
+      this.log = [];
+      this.invalidated = 0;
+    }
+    get dialect() { return 'postgres'; }
+    async withSession(_db, fn) {
+      const run = async (sql) => {
+        this.log.push(sql);
+        if (this.options.failTerminal === sql) throw new Error(`terminal failed: ${sql}`);
+        if (this.options.failCleanup && sql === 'SESSION CLEANUP') throw new Error('cleanup failed');
+        return { affected: 0 };
+      };
+      run.invalidate = () => { this.invalidated++; };
+      return fn(run);
+    }
+    _transactionCleanupSqls() { return this.options.cleanup ? ['SESSION CLEANUP'] : []; }
+  }
+
+  const commitFirst = new FakeTransactionAdapter();
+  await commitFirst.beginTransaction('race-commit-first', 'db');
+  const commitFirstResults = await Promise.allSettled([
+    commitFirst.commitTransaction('race-commit-first'),
+    commitFirst.rollbackTransaction('race-commit-first'),
+  ]);
+  check('并发提交/回滚只允许首个终态成功', commitFirstResults.filter((r) => r.status === 'fulfilled').length === 1
+    && commitFirstResults.filter((r) => r.status === 'rejected').length === 1
+    && commitFirst.log.filter((sql) => sql === 'COMMIT' || sql === 'ROLLBACK').join(',') === 'COMMIT',
+  { results: commitFirstResults.map((r) => r.status), log: commitFirst.log });
+
+  const rollbackFirst = new FakeTransactionAdapter();
+  await rollbackFirst.beginTransaction('race-rollback-first', 'db');
+  const rollbackFirstResults = await Promise.allSettled([
+    rollbackFirst.rollbackTransaction('race-rollback-first'),
+    rollbackFirst.commitTransaction('race-rollback-first'),
+  ]);
+  check('并发回滚/提交不会伪报第二次成功', rollbackFirstResults.filter((r) => r.status === 'fulfilled').length === 1
+    && rollbackFirstResults.filter((r) => r.status === 'rejected').length === 1
+    && rollbackFirst.log.filter((sql) => sql === 'COMMIT' || sql === 'ROLLBACK').join(',') === 'ROLLBACK',
+  { results: rollbackFirstResults.map((r) => r.status), log: rollbackFirst.log });
+
+  const taintedTx = new FakeTransactionAdapter({ failTerminal: 'COMMIT' });
+  await taintedTx.beginTransaction('tainted', 'db');
+  let taintedError = null;
+  try { await taintedTx.commitTransaction('tainted'); } catch (e) { taintedError = e; }
+  check('终态失败销毁而非复用事务会话', !!taintedError && taintedTx.invalidated > 0,
+    { error: taintedError && taintedError.message, invalidated: taintedTx.invalidated, log: taintedTx.log });
+  check('提交确认丢失明确提示结果未知', taintedError
+    && taintedError.code === 'TRANSACTION_COMMIT_OUTCOME_UNKNOWN'
+    && /可能已经提交|重新查询/.test(taintedError.message), taintedError && taintedError.message);
+
+  const rollbackUnknown = new FakeTransactionAdapter({ failTerminal: 'ROLLBACK' });
+  await rollbackUnknown.beginTransaction('rollback-unknown', 'db');
+  let rollbackUnknownError = null;
+  try { await rollbackUnknown.rollbackTransaction('rollback-unknown'); } catch (e) { rollbackUnknownError = e; }
+  check('回滚确认丢失提示会话隔离并要求核对', rollbackUnknownError
+    && rollbackUnknownError.code === 'TRANSACTION_ROLLBACK_UNCONFIRMED'
+    && /回滚结果未确认|重新查询/.test(rollbackUnknownError.message)
+    && rollbackUnknown.invalidated > 0, rollbackUnknownError && rollbackUnknownError.message);
+
+  const ddlCommitUnknown = new FakeTransactionAdapter({ failTerminal: 'COMMIT' });
+  let ddlCommitUnknownError = null;
+  try { await ddlCommitUnknown.execTxn('db', ['ALTER TABLE t ADD x int']); }
+  catch (e) { ddlCommitUnknownError = e; }
+  check('设计器事务 COMMIT 断线明确提示 DDL 结果未知', ddlCommitUnknownError
+    && ddlCommitUnknownError.code === 'TRANSACTION_COMMIT_OUTCOME_UNKNOWN'
+    && ddlCommitUnknown.invalidated > 0, ddlCommitUnknownError && ddlCommitUnknownError.message);
+
+  const mssqlDdlUnknown = new MSSQLGuardAdapter({});
+  let mssqlPoolClosed = false;
+  mssqlDdlUnknown.pool = {
+    request: () => ({ batch: async () => { const error = new Error('socket lost'); error.code = 'ESOCKET'; throw error; } }),
+    close: async () => { mssqlPoolClosed = true; },
+  };
+  let mssqlDdlUnknownError = null;
+  try { await mssqlDdlUnknown.execTxn('db', ['ALTER TABLE t ADD x int']); }
+  catch (e) { mssqlDdlUnknownError = e; }
+  await new Promise((resolve) => setImmediate(resolve));
+  check('SQL Server 设计器网络错误提示提交结果未知并退役连接池', mssqlDdlUnknownError
+    && mssqlDdlUnknownError.code === 'TRANSACTION_COMMIT_OUTCOME_UNKNOWN'
+    && mssqlDdlUnknown.pool === null && mssqlPoolClosed, mssqlDdlUnknownError && mssqlDdlUnknownError.message);
+
+  const cleanupTx = new FakeTransactionAdapter({ cleanup: true, failCleanup: true });
+  await cleanupTx.beginTransaction('cleanup-fails', 'db');
+  const cleanupCommit = await cleanupTx.commitTransaction('cleanup-fails');
+  check('提交成功但会话清理失败时保留已提交结果并隔离会话', cleanupCommit.action === 'committed'
+    && /事务已提交/.test(cleanupCommit.warning || '') && cleanupTx.invalidated > 0, cleanupCommit);
+
+  const ownerTx = new FakeTransactionAdapter();
+  await ownerTx.beginTransaction('wc-7:owned-a', 'db');
+  await ownerTx.beginTransaction('wc-8:other-a', 'db');
+  await ownerTx.closeTransactionsByPrefix('wc-7:');
+  check('渲染进程事务清理只回滚所属事务', ownerTx.transactionStatus('wc-7:owned-a').state === 'idle'
+    && ownerTx.transactionStatus('wc-8:other-a').state === 'active', ownerTx.log);
+  await ownerTx.rollbackTransaction('wc-8:other-a');
+
+  class OwnerRequestAdapter extends FakeTransactionAdapter {
+    async cancel(requestId) { this.log.push(`cancel:${requestId}`); this._markRequestCancelled(requestId); }
+  }
+  const ownerRequests = new OwnerRequestAdapter();
+  ownerRequests._beginRequest({ requestId: 'wc-7:req-a' });
+  ownerRequests._beginRequest({ requestId: 'wc-8:req-b' });
+  await ownerRequests.cancelRequestsByPrefix('wc-7:');
+  check('渲染进程清理同时取消所属普通查询且不影响其他 owner', ownerRequests._isRequestCancelled('wc-7:req-a')
+    && !ownerRequests._isRequestCancelled('wc-8:req-b')
+    && ownerRequests.log.includes('cancel:wc-7:req-a') && !ownerRequests.log.includes('cancel:wc-8:req-b'), ownerRequests.log);
+  ownerRequests._endRequest('wc-7:req-a');
+  ownerRequests._endRequest('wc-8:req-b');
+
+  class CancelRaceAdapter extends BaseAdapter {
+    get dialect() { return 'postgres'; }
+    async withSession(_db, fn) {
+      return fn(async () => {
+        this._markRequestCancelled('cancel-race');
+        return { affected: 1 };
+      });
+    }
+  }
+  const cancelRace = new CancelRaceAdapter({});
+  const cancelRaceResult = await cancelRace.runScript('db', 'UPDATE t SET x = 1', { requestId: 'cancel-race' });
+  check('取消与成功返回竞态明确显示结果未知', cancelRaceResult.length === 1
+    && /QUERY_OUTCOME_UNKNOWN/.test(cancelRaceResult[0].error || '')
+    && /结果未知|可能已经生效/.test(cancelRaceResult[0].error || ''), cancelRaceResult);
+
+  await ad.runScript('main', "DELETE FROM users WHERE name = '事务提交'");
 
   const objs = await ad.listObjects('main');
   check('listObjects', objs.tables.length === 1 && objs.tables[0].name === 'users' && Number(objs.tables[0].rows) === 2);
@@ -915,6 +1661,11 @@ async function runSelfTest() {
     fileAccess.grant(path.join(require('electron').app.getPath('userData'), 'connections.json'), 'rw');
   } catch (e) { appConfigDenied = /内部配置文件/.test(e.message); }
   check('file capability 拒绝 Renderer 授权应用内部配置', appConfigDenied);
+  let workspaceFileDenied = false;
+  try {
+    fileAccess.grant(path.join(require('electron').app.getPath('userData'), 'workspace-v1.json'), 'rw');
+  } catch (e) { workspaceFileDenied = /内部配置文件/.test(e.message); }
+  check('file capability 拒绝 Renderer 授权工作区恢复文件', workspaceFileDenied);
   const stableDigest = require('crypto').createHash('sha256').update('ok').digest('hex');
   const fileSnapshot = await fileAccess.snapshot(capabilityFile, stableDigest);
   fs.writeFileSync(capabilityFile, 'changed-after-snapshot', 'utf8');
@@ -1213,6 +1964,10 @@ async function runSelfTest() {
   fakeMy.withSession = async (_db, fn) => fn(async (s) => { (capturedStmts = capturedStmts || []).push(s); return { affected: 0 }; });
   await fakeMy.runScript('d1', procSql);
   check('mysql 过程整段执行', capturedStmts && capturedStmts.length === 1 && capturedStmts[0].includes('SELECT x + 1'), capturedStmts && capturedStmts.length);
+  capturedStmts = null;
+  await fakeMy.runScript('d1', `${procSql};\nSELECT 9`);
+  check('mysql 过程后续语句继续执行', capturedStmts && capturedStmts.length === 2
+    && /CREATE PROCEDURE/.test(capturedStmts[0]) && capturedStmts[1] === 'SELECT 9', capturedStmts);
   capturedStmts = null;
   await fakeMy.runScript('d1', 'SELECT 1; SELECT 2');
   check('mysql 普通语句仍拆分', capturedStmts && capturedStmts.length === 2);

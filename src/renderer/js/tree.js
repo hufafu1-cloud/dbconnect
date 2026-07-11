@@ -1,6 +1,6 @@
 // 左侧连接树
 import { $, el, iconEl } from './util.js';
-import { state, emit, on, objectsCacheKey } from './state.js';
+import { state, emit, on, objectsCacheKey, setActiveTarget } from './state.js';
 import { toast, promptDialog, confirmDialog, passwordDialog } from './toast.js';
 import { showMenu } from './contextmenu.js';
 import * as actions from './actions.js';
@@ -60,7 +60,7 @@ function renderConnNode(conn) {
     cls: conn.color ? 'conn-colored' : '',
     twisty: true,
     onToggle: () => toggle(),
-    onSelect: () => { state.activeTarget = { connId: conn.id }; },
+    onSelect: () => { setActiveTarget({ connId: conn.id }, 'tree-connection'); },
     onDblClick: () => toggle(),
     onMenu: (e) => connMenu(e, conn, isOpenNow(), toggle),
   });
@@ -103,6 +103,7 @@ function renderConnNode(conn) {
         r = await window.api.db.open(c.id, password);
       }
       state.open.set(c.id, { version: r.version, databases: [], objectsCache: new Map() });
+      setActiveTarget({ connId: c.id }, 'connection-opened');
       c.hasSessionPassword = false;
       container.classList.remove('conn-closed');
       container.classList.add('conn-open');
@@ -143,8 +144,10 @@ function renderConnNode(conn) {
   }
 
   async function closeConnection() {
-    await window.api.db.close(conn.id);
+    const result = await window.api.db.close(conn.id);
+    if (result && result.cancelled) return;
     state.open.delete(conn.id);
+    if (state.activeTarget && state.activeTarget.connId === conn.id) setActiveTarget(null, 'connection-closed');
     container.classList.add('conn-closed');
     container.classList.remove('conn-open');
     children.innerHTML = '';
@@ -217,8 +220,7 @@ function renderDbNode(conn, db) {
     onToggle: () => toggle(),
     onDblClick: () => toggle(),
     onSelect: () => {
-      state.activeTarget = { connId: conn.id, db };
-      emit('target-selected', state.activeTarget);
+      setActiveTarget({ connId: conn.id, db }, 'tree-database');
     },
     onMenu: (e) => {
       showMenu(e.clientX, e.clientY, [
@@ -291,7 +293,13 @@ function renderDbNode(conn, db) {
 
   container.append(row, children);
   container.dataset.reloadKey = `${conn.id}|${db}`;
+  container.dataset.connId = conn.id;
+  container.dataset.db = db;
   container._reload = reload;
+  container._openBranch = async () => {
+    if (!loaded) await load();
+    setOpen(tw, children, true);
+  };
   return container;
 }
 
@@ -310,8 +318,7 @@ function renderSchemaNode(conn, db, schema) {
     onToggle: () => toggle(),
     onDblClick: () => toggle(),
     onSelect: () => {
-      state.activeTarget = { connId: conn.id, db, schema };
-      emit('target-selected', state.activeTarget);
+      setActiveTarget({ connId: conn.id, db, schema }, 'tree-schema');
     },
     onMenu: (e) => {
       showMenu(e.clientX, e.clientY, [
@@ -360,7 +367,14 @@ function renderSchemaNode(conn, db, schema) {
 
   container.append(row, children);
   container.dataset.reloadKey = `${conn.id}|${db}|${schema}`;
+  container.dataset.connId = conn.id;
+  container.dataset.db = db;
+  container.dataset.schema = schema;
   container._reload = reload;
+  container._openBranch = async () => {
+    if (!loaded) await load();
+    setOpen(tw, children, true);
+  };
   return container;
 }
 
@@ -726,8 +740,7 @@ function renderFolder(conn, db, schema, title, icon, items, depth, isView) {
     onToggle: () => toggleNow(),
     onDblClick: () => toggleNow(),
     onSelect: () => {
-      state.activeTarget = { connId: conn.id, db, schema };
-      emit('target-selected', state.activeTarget);
+      setActiveTarget({ connId: conn.id, db, schema }, 'tree-object-group');
     },
     onMenu: (e) => {
       showMenu(e.clientX, e.clientY, [
@@ -761,14 +774,20 @@ function renderLeaf(conn, db, schema, item, depth, isView) {
     meta: item.rows !== null && item.rows !== undefined ? String(item.rows) : '',
     twisty: false,
     onSelect: () => {
-      state.activeTarget = { connId: conn.id, db, schema: target.schema };
-      emit('target-selected', state.activeTarget);
+      setActiveTarget({ connId: conn.id, db, schema: target.schema, table: target.table }, 'tree-object');
     },
     onDblClick: () => actions.openTable(target),
     onMenu: (e) => leafMenu(e, target, isView),
   });
   row.dataset.leaf = label.toLowerCase();
-  return el('div', { class: 'tree-node', 'data-leaf-node': '1' }, row);
+  return el('div', {
+    class: 'tree-node',
+    'data-leaf-node': '1',
+    'data-conn-id': conn.id,
+    'data-db': db,
+    'data-schema': target.schema || '',
+    'data-table': target.table,
+  }, row);
 }
 
 function leafMenu(e, target, isView) {
@@ -912,6 +931,37 @@ export function openConnectionById(connId) {
   const rec = connNodes.get(connId);
   if (rec) return rec.open();
   throw new Error('连接不存在: ' + connId);
+}
+
+/** 展开并选中工作区中保存的连接 / 数据库 / 模式 / 表上下文。 */
+export async function revealTarget(target) {
+  if (!target || !target.connId || !state.open.has(target.connId)) return false;
+  const nodes = [...treeRoot.querySelectorAll('.tree-node')];
+  let selectedNode = nodes.find((n) => n.dataset.conn === target.connId) || null;
+  if (target.db) {
+    const dbNode = nodes.find((n) => n.dataset.connId === target.connId && n.dataset.db === target.db && !n.dataset.schema && !n.dataset.table);
+    if (!dbNode) return false;
+    if (dbNode._openBranch && (target.schema || target.table)) await dbNode._openBranch();
+    selectedNode = dbNode;
+  }
+  if (target.schema) {
+    const schemaNode = [...treeRoot.querySelectorAll('.tree-node')]
+      .find((n) => n.dataset.connId === target.connId && n.dataset.db === target.db && n.dataset.schema === target.schema && !n.dataset.table);
+    if (schemaNode) {
+      if (schemaNode._openBranch && target.table) await schemaNode._openBranch();
+      selectedNode = schemaNode;
+    }
+  }
+  if (target.table) {
+    const leaf = [...treeRoot.querySelectorAll('[data-leaf-node]')]
+      .find((n) => n.dataset.connId === target.connId && n.dataset.db === target.db
+        && (n.dataset.schema || '') === (target.schema || '') && n.dataset.table === target.table);
+    if (leaf) selectedNode = leaf;
+  }
+  const row = selectedNode && selectedNode.querySelector(':scope > .tree-row');
+  if (row) selectRow(row);
+  setActiveTarget(target, 'workspace-restore');
+  return !!row;
 }
 
 export function setupTreeFilter() {

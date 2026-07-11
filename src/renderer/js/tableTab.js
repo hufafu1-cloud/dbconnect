@@ -1,6 +1,6 @@
 // 表数据标签页：分页浏览 + 筛选 + 排序 + 行内编辑
 import { el, iconEl, fmtCount } from './util.js';
-import { connLabel, connColor, state } from './state.js';
+import { connLabel, connColor, state, setActiveTarget } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
 import { toast, confirmDialog } from './toast.js';
@@ -10,7 +10,9 @@ import { authorizeOperation } from './danger.js';
 const PAGE_SIZES = [100, 500, 1000];
 
 export function openTableTab(target, openOpts) {
-  const tabId = `table:${target.connId}|${target.db}|${target.schema || ''}|${target.table}`;
+  setActiveTarget(target, 'table-tab');
+  const restored = openOpts && openOpts.restoreState;
+  const tabId = (openOpts && openOpts.restoreId) || `table:${target.connId}|${target.db}|${target.schema || ''}|${target.table}`;
   const tab = addTab({ id: tabId, title: target.table, icon: 'table', color: connColor(target.connId), tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}` });
   if (tab.pane.childElementCount) {
     // 已存在：若带新筛选条件则套用并重载
@@ -18,16 +20,17 @@ export function openTableTab(target, openOpts) {
     return tab;
   }
 
-  let page = 1;
-  let pageSize = 500;
+  let page = restored && Number.isSafeInteger(Number(restored.page)) ? Math.max(1, Number(restored.page)) : 1;
+  let pageSize = restored && PAGE_SIZES.includes(Number(restored.pageSize)) ? Number(restored.pageSize) : 500;
   let total = null;
-  let where = (openOpts && openOpts.initialWhere) || '';
-  let orderBy = null, orderDir = null;
+  let where = (openOpts && openOpts.initialWhere) || (restored && typeof restored.where === 'string' ? restored.where : '');
+  let orderBy = restored && typeof restored.orderBy === 'string' ? restored.orderBy : null;
+  let orderDir = restored && ['asc', 'desc'].includes(restored.orderDir) ? restored.orderDir : null;
   let readonly = true;
   let loading = false;
-  let viewMode = 'grid'; // grid | form
+  let viewMode = restored && restored.viewMode === 'form' ? 'form' : 'grid'; // grid | form
 
-  const pageInput = el('input', { type: 'text', value: '1', style: { width: '44px', textAlign: 'center' } });
+  const pageInput = el('input', { type: 'text', value: String(page), style: { width: '44px', textAlign: 'center' } });
   const pageLabel = el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '');
   const whereInput = el('input', { type: 'text', value: where, placeholder: 'WHERE 条件，如: id > 100 AND name LIKE \'%张%\'', style: { width: '300px', fontFamily: 'var(--mono)' } });
   const roBadge = el('span', { class: 'readonly-badge', style: { display: 'none' } }, '只读（无主键）');
@@ -210,6 +213,7 @@ export function openTableTab(target, openOpts) {
       btnView.classList.remove('active');
       grid.render(); // 同步表单中所做的编辑
     }
+    if (tab.touchRecovery) tab.touchRecovery();
   }
 
   // FK 跳转用的列映射 + 重载筛选
@@ -260,8 +264,20 @@ export function openTableTab(target, openOpts) {
   });
 
   tab.pane.append(toolbar, builderPanel, gridHost, formHost, pager);
+  tab.setRecovery('table', () => (grid.isDirty() ? null : {
+    target: { ...target },
+    where,
+    orderBy,
+    orderDir,
+    page,
+    pageSize,
+    viewMode,
+  }));
   tab.setIsDirty(() => grid.isDirty());
-  tab.setOnShow(() => statusbar.setLeft(`${connLabel(target.connId)} › ${target.db || ''} › ${target.table}`));
+  tab.setOnShow(() => {
+    setActiveTarget(target, 'table-tab');
+    statusbar.setLeft(`${connLabel(target.connId)} › ${target.db || ''} › ${target.table}`);
+  });
 
   function pageCount() {
     return total === null ? null : Math.max(1, Math.ceil(total / pageSize));
@@ -300,6 +316,7 @@ export function openTableTab(target, openOpts) {
       statusbar.setRight(`${fmtCount(total)} 行 · ${r.ms} ms`);
       if (viewMode === 'form' && formView) formView.setIndex(0);
       updateDirty();
+      if (tab.touchRecovery) tab.touchRecovery();
     } catch (e) {
       infoEl.textContent = '';
       toast.error('加载失败: ' + e.message);
@@ -342,5 +359,10 @@ export function openTableTab(target, openOpts) {
 
   load();
   loadFkMap();
+  if (viewMode === 'form') {
+    // toggleView expects the current mode to be grid before switching.
+    viewMode = 'grid';
+    toggleView();
+  }
   return tab;
 }

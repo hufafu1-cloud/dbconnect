@@ -1,5 +1,8 @@
 // 适配器基类：定义统一接口与通用实现（分页查询、脚本执行、应用编辑等）
-const { splitSql, sanitizeRows, sanitizeValue, excerpt, limitQueryRows } = require('./sqlutil');
+const {
+  splitSql, sanitizeRows, sanitizeValue, excerpt, limitQueryRows, statementKind,
+  transactionControlKind, unsafeSessionMutationKind,
+} = require('./sqlutil');
 
 class BaseAdapter {
   constructor(cfg) {
@@ -10,6 +13,8 @@ class BaseAdapter {
     this._requestStates = new Map();
     this._activeRequestHandles = new Set();
     this._requestHandles = new Map();
+    // 显式事务按查询标签生成的 transactionId 隔离；每项独占一个驱动会话。
+    this._transactions = new Map();
   }
 
   get dialect() { return 'sql'; }
@@ -30,8 +35,14 @@ class BaseAdapter {
   /** 整库列清单 {表名: [列名...]}，供编辑器补全；默认空 */
   async listAllColumns(_db, _schema) { return {}; }
 
-  /** 外键清单 [{name, columns:[], refSchema, refTable, refColumns:[]}]；默认空 */
+  /** 外键清单 [{name, columns:[], refSchema, refTable, refColumns:[], onUpdate, onDelete}]；默认空 */
   async listForeignKeys(_db, _schema, _table) { return []; }
+
+  /** 其他表指向目标表的外键 [{name, schema, table, columns:[], refColumns:[]}]；默认空 */
+  async listReferencingForeignKeys(_db, _schema, _table) { return []; }
+
+  /** 表约束 [{kind:'unique'|'check', name, columns:[], expression?, indexName?}]；默认空 */
+  async listConstraints(_db, _schema, _table) { return []; }
 
   /** 读取单个单元格的完整 BLOB（按主键定位），返回 Buffer 或 null */
   async cellBlob(db, args) {
@@ -116,6 +127,14 @@ class BaseAdapter {
   /** 取消正在执行的查询；默认不支持 */
   async cancel(_requestId) { throw new Error('该数据库类型不支持取消查询'); }
 
+  /** Read-only summary used before an interactive connection close. */
+  connectionActivity() {
+    return {
+      requests: [...this._requestStates.values()].filter((state) => state && state.refs > 0).length,
+      transactions: this._transactions.size,
+    };
+  }
+
   quoteIdent(name) { return '"' + String(name).replace(/"/g, '""') + '"'; }
 
   literal(v) {
@@ -196,6 +215,24 @@ class BaseAdapter {
     throw err;
   }
 
+  _isRequestCancelled(requestId) {
+    const id = this._requestId(requestId);
+    const state = id && this._requestStates.get(id);
+    return !!(state && state.cancelled);
+  }
+
+  /**
+   * A successful driver response racing with Cancel is not proof that the
+   * database stopped the statement. Report the ambiguity instead of claiming
+   * either success or cancellation; writes may already have committed.
+   */
+  _assertRequestOutcomeKnown(requestId) {
+    if (!this._isRequestCancelled(requestId)) return;
+    const err = new Error('取消请求与数据库返回同时发生，执行结果未知；语句可能已经生效，请重新查询确认');
+    err.code = 'QUERY_OUTCOME_UNKNOWN';
+    throw err;
+  }
+
   /**
    * 可取消的连接池获取。取消先赢时立即让当前请求返回；晚到的连接会自动释放，
    * 不会泄漏或继续执行 SQL。
@@ -246,6 +283,19 @@ class BaseAdapter {
       : [...this._activeRequestHandles];
   }
 
+  async cancelRequestsByPrefix(prefix) {
+    const safePrefix = String(prefix || '');
+    if (!safePrefix) return 0;
+    const ids = [...this._requestStates.keys()].filter((id) => id.startsWith(safePrefix));
+    const outcomes = await Promise.allSettled(ids.map(async (id) => {
+      this._markRequestCancelled(id);
+      await this.cancel(id);
+    }));
+    const failed = outcomes.find((item) => item.status === 'rejected');
+    if (failed) throw failed.reason;
+    return ids.length;
+  }
+
   /** 规范查询页的行数上限；给 maxRows + 1 探针预留一个安全整数。 */
   _scriptMaxRows(opts) {
     const n = Number(opts && opts.maxRows);
@@ -259,43 +309,372 @@ class BaseAdapter {
     return limitQueryRows(sql, this.dialect, opts.maxRows);
   }
 
+  _scriptStatements(sql) {
+    // splitSql 与编辑器“当前语句”共用方言边界：MySQL 过程体、
+    // Oracle PL/SQL + 独立 / 分隔符、SQL Server GO 批次都能继续拆后续语句。
+    return splitSql(sql, this.dialect);
+  }
+
+  async _runScriptStatements(run, stmts, maxRows, requestId) {
+    const out = [];
+    for (const s of stmts) {
+      const t0 = Date.now();
+      try {
+        this._assertRequestActive(requestId);
+        // 执行层据此对安全的 SELECT/CTE 下推 maxRows + 1 探针，避免先完整物化再 slice。
+        const r = await run(s, { maxRows, requestId });
+        this._assertRequestOutcomeKnown(requestId);
+        const results = r && r.multi ? r.multi : [r];
+        for (const one of results) {
+          out.push(this._normalizeResult(s, one, maxRows, Date.now() - t0));
+        }
+      } catch (err) {
+        out.push({ sql: excerpt(s), ms: Date.now() - t0, error: this._errMsg(err) });
+        break; // 出错即停止
+      }
+    }
+    return out;
+  }
+
   /** 执行 SQL 脚本（多语句），返回每条语句的结果 */
   async runScript(db, sql, opts) {
     const maxRows = this._scriptMaxRows(opts);
-    // 存储过程/触发器等过程体内含分号：整段作为单条语句执行（MySQL 系 / Oracle 方言）
-    const ROUTINE_START = {
-      mysql: /^\s*CREATE\s+(DEFINER\s*=\s*\S+\s+)?(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i,
-      oracle: /^\s*(CREATE\s+(OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION|TRIGGER|PACKAGE)\b|DECLARE\b|BEGIN\b)/i,
-    };
-    const re = ROUTINE_START[this.dialect];
-    const stmts = re && re.test(sql)
-      ? [sql.trim().replace(/;\s*$/, '')]
-      : splitSql(sql, this.dialect);
+    const stmts = this._scriptStatements(sql);
     if (!stmts.length) return [];
-    const out = [];
+    this._assertQueryPageSql(stmts);
     const requestId = this._beginRequest(opts);
     try {
-      await this.withSession(db, async (run) => {
-        for (const s of stmts) {
-          const t0 = Date.now();
-          try {
-            this._assertRequestActive(requestId);
-            // 执行层据此对安全的 SELECT/CTE 下推 maxRows + 1 探针，避免先完整物化再 slice。
-            const r = await run(s, { maxRows, requestId });
-            const results = r && r.multi ? r.multi : [r];
-            for (const one of results) {
-              out.push(this._normalizeResult(s, one, maxRows, Date.now() - t0));
-            }
-          } catch (err) {
-            out.push({ sql: excerpt(s), ms: Date.now() - t0, error: this._errMsg(err) });
-            return; // 出错即停止
-          }
-        }
-      }, { requestId });
-      return out;
+      return await this.withSession(db,
+        (run) => this._runScriptStatements(run, stmts, maxRows, requestId),
+        { requestId, schema: opts && opts.schema });
     } finally {
       this._endRequest(requestId);
     }
+  }
+
+  // ---- 查询页显式事务 ---------------------------------------------------
+
+  get transactionSupport() {
+    const implicitCommit = this.dialect === 'mysql' || this.dialect === 'oracle';
+    return {
+      supported: true,
+      warning: implicitCommit ? '该数据库的 DDL 可能隐式提交；手动提交模式下已禁止执行 DDL' : '',
+    };
+  }
+
+  _normalizeTransactionId(value) {
+    const id = String(value || '');
+    if (!id || id.length > 160 || !/^[A-Za-z0-9._:-]+$/.test(id)) throw new Error('事务 ID 无效');
+    return id;
+  }
+
+  transactionStatus(transactionId) {
+    const support = this.transactionSupport || { supported: false };
+    if (!support.supported) return { supported: false, state: 'unsupported', warning: support.warning || '' };
+    const id = this._normalizeTransactionId(transactionId);
+    const state = this._transactions.get(id);
+    return {
+      supported: true,
+      state: state ? state.status : 'idle',
+      db: state ? state.db : null,
+      schema: state ? state.schema : null,
+      warning: support.warning || '',
+    };
+  }
+
+  _transactionBeginSqls() { return [this.beginSql()]; }
+
+  _transactionEndSqls(action) { return [action === 'commit' ? 'COMMIT' : 'ROLLBACK']; }
+
+  /** Session cleanup that runs only after COMMIT/ROLLBACK has succeeded. */
+  _transactionCleanupSqls() { return []; }
+
+  _transactionTerminalError(action, error) {
+    const reason = (error && error.message) || String(error || '未知错误');
+    const committing = action === 'commit';
+    const wrapped = new Error(committing
+      ? `提交结果未知：数据库可能已经提交，但客户端未收到确认。请重新查询数据后再决定是否重试。原始错误：${reason}`
+      : `回滚结果未确认：事务会话已隔离且不会复用。请重新查询数据确认最终状态。原始错误：${reason}`);
+    wrapped.code = committing ? 'TRANSACTION_COMMIT_OUTCOME_UNKNOWN' : 'TRANSACTION_ROLLBACK_UNCONFIRMED';
+    wrapped.cause = error;
+    return wrapped;
+  }
+
+  async _quarantineTransactionSession(runner, error) {
+    if (runner && typeof runner.invalidate === 'function') {
+      try { await runner.invalidate(error); } catch (e) { /* already unusable */ }
+    }
+  }
+
+  /**
+   * 默认实现借助 withSession 长期占用一个物理会话。MSSQL 等不能由
+   * withSession 保证会话固定的驱动会覆盖此方法。
+   */
+  async _openExplicitTransaction(db, sessionOpts = {}) {
+    let releaseHold;
+    const hold = new Promise((resolve) => { releaseHold = resolve; });
+    let resolveReady;
+    let rejectReady;
+    let readySettled = false;
+    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    let runner = null;
+    let sessionCleanupError = null;
+    const upstreamCleanupReporter = sessionOpts && sessionOpts.onCleanupError;
+    const task = Promise.resolve().then(() => this.withSession(db, async (run) => {
+      runner = run;
+      try {
+        for (const sql of this._transactionBeginSqls()) await run(sql);
+        readySettled = true;
+        resolveReady();
+        await hold;
+      } catch (err) {
+        await this._quarantineTransactionSession(run, err);
+        if (!readySettled) {
+          readySettled = true;
+          rejectReady(err);
+        }
+        throw err;
+      }
+    }, {
+      explicitTransaction: true,
+      ...sessionOpts,
+      onCleanupError: (error) => {
+        sessionCleanupError = error;
+        if (typeof upstreamCleanupReporter === 'function') upstreamCleanupReporter(error);
+      },
+    })).then(
+      () => ({ ok: true }),
+      (error) => {
+        if (!readySettled) {
+          readySettled = true;
+          rejectReady(error);
+        }
+        return { ok: false, error };
+      },
+    );
+    try {
+      await ready;
+    } catch (err) {
+      releaseHold();
+      await task;
+      throw err;
+    }
+    let finished = false;
+    return {
+      run: runner,
+      requestHandle: runner && runner.requestHandle,
+      finish: async (action) => {
+        if (finished) throw new Error('事务已经结束');
+        finished = true;
+        let primaryError = null;
+        let cleanupError = null;
+        let decisiveFinished = false;
+        try {
+          for (const sql of this._transactionEndSqls(action)) await runner(sql);
+          decisiveFinished = true;
+        } catch (err) {
+          primaryError = err;
+          if (action === 'commit') {
+            try {
+              for (const sql of this._transactionEndSqls('rollback')) await runner(sql);
+            } catch (e) { /* 连接可能已断开，释放会话仍由 finally 完成 */ }
+          }
+          await this._quarantineTransactionSession(runner, primaryError);
+        }
+        if (!primaryError) {
+          try {
+            for (const sql of this._transactionCleanupSqls(action)) await runner(sql);
+          } catch (err) {
+            cleanupError = err;
+            await this._quarantineTransactionSession(runner, err);
+          }
+        }
+        try {
+          releaseHold();
+        } catch (e) { /* hold is released at most once */ }
+        const settled = await task;
+        if (primaryError) throw primaryError;
+        if (!settled.ok) {
+          await this._quarantineTransactionSession(runner, settled.error);
+          if (!decisiveFinished) throw settled.error;
+          cleanupError = cleanupError || settled.error;
+        }
+        cleanupError = cleanupError || sessionCleanupError;
+        return cleanupError ? {
+          warning: `${action === 'commit' ? '事务已提交' : '事务已回滚'}，但会话清理失败，已销毁该会话：${(cleanupError && cleanupError.message) || cleanupError}`,
+        } : null;
+      },
+    };
+  }
+
+  _enqueueTransaction(state, task) {
+    const pending = state.queue.then(task);
+    state.queue = pending.catch(() => {});
+    return pending;
+  }
+
+  _assertQueryPageSql(stmts) {
+    for (const sql of stmts) {
+      const control = transactionControlKind(sql, this.dialect);
+      if (control) {
+        throw new Error(`查询页不支持在 SQL 中手写事务边界（${control}）；请使用“自动提交”和“开始 / 提交 / 回滚”按钮`);
+      }
+      const mutation = unsafeSessionMutationKind(sql, this.dialect);
+      if (mutation) {
+        throw new Error(`当前驱动不能安全保留或重置该会话状态（${mutation}）；请改为单个完整批次，或使用专用管理功能`);
+      }
+    }
+  }
+
+  _assertTransactionSql(stmts) {
+    this._assertQueryPageSql(stmts);
+    for (const sql of stmts) {
+      if (this.dialect === 'mysql' && /\/\*(?:!|M!)/i.test(sql)) {
+        throw new Error('手动提交模式下禁止执行 MySQL/MariaDB 可执行注释，请展开为普通 SQL 后单独执行');
+      }
+      const kind = statementKind(sql, this.dialect);
+      const implicitCommitKinds = this.dialect === 'mysql'
+        ? ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'GRANT', 'REVOKE', 'ANALYZE', 'CHECK', 'OPTIMIZE', 'REPAIR', 'CACHE', 'FLUSH', 'LOAD', 'RESET', 'STOP', 'CHANGE', 'LOCK', 'UNLOCK', 'INSTALL', 'UNINSTALL']
+        : ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'GRANT', 'REVOKE', 'COMMENT', 'AUDIT', 'NOAUDIT'];
+      if ((this.dialect === 'mysql' || this.dialect === 'oracle') && implicitCommitKinds.includes(kind)) {
+        throw new Error('该数据库的 DDL 或管理语句会隐式提交，请开启自动提交后单独执行此语句');
+      }
+      if (this.dialect === 'mysql' && kind === 'SET' && /\bPASSWORD\b/i.test(sql)) {
+        throw new Error('该数据库的账户管理语句会隐式提交，请开启自动提交后单独执行此语句');
+      }
+    }
+  }
+
+  async beginTransaction(transactionId, db, sessionOpts = {}) {
+    const support = this.transactionSupport || { supported: false };
+    if (!support.supported) throw new Error(support.warning || '当前数据库不支持显式事务');
+    const id = this._normalizeTransactionId(transactionId);
+    if (this._transactions.has(id)) throw new Error('该查询标签已有活动事务');
+    if (this._transactions.size >= 32) throw new Error('活动事务过多，请先提交或回滚已有事务');
+    const state = {
+      id,
+      db: db === undefined || db === null ? '' : String(db),
+      schema: sessionOpts.schema === undefined || sessionOpts.schema === null ? '' : String(sessionOpts.schema),
+      status: 'starting',
+      queue: Promise.resolve(),
+      session: null,
+      opening: null,
+      activeRequestIds: new Set(),
+    };
+    this._transactions.set(id, state);
+    state.opening = this._openExplicitTransaction(db, { schema: state.schema || null });
+    try {
+      state.session = await state.opening;
+      state.status = 'active';
+      return this.transactionStatus(id);
+    } catch (err) {
+      this._transactions.delete(id);
+      throw err;
+    }
+  }
+
+  async runTransactionScript(transactionId, db, sql, opts) {
+    const id = this._normalizeTransactionId(transactionId);
+    const state = this._transactions.get(id);
+    if (!state) throw new Error('事务不存在或已结束，请重新开始事务');
+    if (state.status === 'starting') state.session = await state.opening;
+    if (state.status === 'failed') throw new Error('事务已发生错误，请先回滚');
+    if (state.status !== 'active') throw new Error('事务当前不可执行查询');
+    const selectedDb = db === undefined || db === null ? '' : String(db);
+    if (selectedDb !== state.db) throw new Error('活动事务期间不能切换数据库');
+    const selectedSchema = opts && opts.schema !== undefined && opts.schema !== null ? String(opts.schema) : '';
+    if (selectedSchema !== state.schema) throw new Error('活动事务期间不能切换模式（Schema）');
+    const stmts = this._scriptStatements(sql);
+    if (!stmts.length) return [];
+    this._assertTransactionSql(stmts);
+    return this._enqueueTransaction(state, async () => {
+      if (state.status !== 'active') throw new Error(state.status === 'failed'
+        ? '事务已发生错误，请先回滚' : '事务状态已改变，无法继续执行查询');
+      const maxRows = this._scriptMaxRows(opts);
+      const requestId = this._beginRequest(opts);
+      if (requestId) state.activeRequestIds.add(requestId);
+      const handle = state.session.requestHandle;
+      if (handle) this._trackRequestHandle(handle, requestId);
+      try {
+        const results = await this._runScriptStatements(state.session.run, stmts, maxRows, requestId);
+        if (results.some((item) => item.error)) state.status = 'failed';
+        return results;
+      } finally {
+        if (handle) this._untrackRequestHandle(handle, requestId);
+        if (requestId) state.activeRequestIds.delete(requestId);
+        this._endRequest(requestId);
+      }
+    });
+  }
+
+  async commitTransaction(transactionId) {
+    const id = this._normalizeTransactionId(transactionId);
+    const state = this._transactions.get(id);
+    if (!state) throw new Error('事务不存在或已结束');
+    if (state.status === 'starting') state.session = await state.opening;
+    if (state.status === 'failed') throw new Error('事务已发生错误，只能回滚');
+    if (state.status !== 'active') throw new Error(`事务正在${state.status === 'committing' ? '提交' : '回滚'}，不能重复结束`);
+    state.status = 'committing';
+    let finishResult = null;
+    try {
+      await this._enqueueTransaction(state, async () => {
+        if (state.status === 'failed') {
+          await state.session.finish('rollback');
+          throw new Error('事务执行期间发生错误，已自动回滚，不能提交');
+        }
+        try {
+          finishResult = await state.session.finish('commit');
+        } catch (error) {
+          throw this._transactionTerminalError('commit', error);
+        }
+      });
+    } finally {
+      this._transactions.delete(id);
+    }
+    return { supported: true, state: 'idle', action: 'committed', ...(finishResult || {}) };
+  }
+
+  async rollbackTransaction(transactionId) {
+    const id = this._normalizeTransactionId(transactionId);
+    const state = this._transactions.get(id);
+    if (!state) return { supported: true, state: 'idle', action: 'none' };
+    if (state.status === 'starting') state.session = await state.opening;
+    if (state.status !== 'active' && state.status !== 'failed') {
+      throw new Error(`事务正在${state.status === 'committing' ? '提交' : '回滚'}，不能重复结束`);
+    }
+    state.status = 'rolling-back';
+    let finishResult = null;
+    try {
+      await this._enqueueTransaction(state, async () => {
+        try {
+          finishResult = await state.session.finish('rollback');
+        } catch (error) {
+          throw this._transactionTerminalError('rollback', error);
+        }
+      });
+    } finally {
+      this._transactions.delete(id);
+    }
+    return { supported: true, state: 'idle', action: 'rolled-back', ...(finishResult || {}) };
+  }
+
+  async closeTransactionsByPrefix(prefix) {
+    const safePrefix = String(prefix || '');
+    if (!safePrefix) return;
+    const entries = [...this._transactions.entries()].filter(([id]) => id.startsWith(safePrefix));
+    const requestIds = new Set();
+    for (const [, state] of entries) {
+      for (const requestId of state.activeRequestIds || []) requestIds.add(requestId);
+    }
+    const cancellations = await Promise.allSettled([...requestIds].map((requestId) => this.cancel(requestId)));
+    const rollbacks = await Promise.allSettled(entries.map(([id]) => this.rollbackTransaction(id)));
+    const failed = [...cancellations, ...rollbacks].find((item) => item.status === 'rejected');
+    if (failed) throw failed.reason;
+  }
+
+  async closeTransactions() {
+    const ids = [...this._transactions.keys()];
+    await Promise.all(ids.map((id) => this.rollbackTransaction(id).catch(() => {})));
   }
 
   _normalizeResult(s, r, maxRows, ms) {
@@ -423,14 +802,28 @@ class BaseAdapter {
   /** 默认事务实现：单会话 BEGIN/COMMIT */
   async execTxn(db, sqls) {
     await this.withSession(db, async (run) => {
-      await run(this.beginSql());
+      try {
+        await run(this.beginSql());
+      } catch (error) {
+        await this._quarantineTransactionSession(run, error);
+        throw new Error(`无法开始数据库事务，已销毁该会话：${this._errMsg(error)}`);
+      }
       let idx = 0;
       try {
         for (const s of sqls) { idx++; await run(s); }
-        await run('COMMIT');
       } catch (err) {
-        try { await run('ROLLBACK'); } catch (e) { /* ignore */ }
-        throw new Error(`第 ${idx} 条语句失败: ${this._errMsg(err)}\nSQL: ${sqls[idx - 1]}`);
+        let rollbackError = null;
+        try { await run('ROLLBACK'); } catch (error) { rollbackError = error; }
+        if (rollbackError) await this._quarantineTransactionSession(run, rollbackError);
+        throw new Error(`第 ${idx} 条语句失败: ${this._errMsg(err)}\nSQL: ${sqls[idx - 1]}`
+          + (rollbackError ? `\n回滚结果未确认，事务会话已销毁：${this._errMsg(rollbackError)}` : ''));
+      }
+      try {
+        await run('COMMIT');
+      } catch (error) {
+        try { await run('ROLLBACK'); } catch (e) { /* COMMIT 可能已生效 */ }
+        await this._quarantineTransactionSession(run, error);
+        throw this._transactionTerminalError('commit', error);
       }
     });
   }

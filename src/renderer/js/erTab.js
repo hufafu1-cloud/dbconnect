@@ -1,6 +1,6 @@
 // ER 关系图：SVG 渲染表盒 + 外键连线，支持拖拽 / 平移 / 缩放 / 导出 PNG
 import { el, iconEl } from './util.js';
-import { connLabel, connColor } from './state.js';
+import { connLabel, connColor, setActiveTarget } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { toast } from './toast.js';
 
@@ -40,6 +40,7 @@ function edgePoint(box, tx, ty) {
 }
 
 export function openErTab(target) {
+  setActiveTarget(target, 'er-tab');
   const tabId = `er:${target.connId}|${target.db}|${target.schema || ''}`;
   const tab = addTab({ id: tabId, title: `ER - ${target.db || target.schema || ''}`, icon: 'er', color: connColor(target.connId), tooltip: `${connLabel(target.connId)} ER 关系图` });
   if (tab.pane.childElementCount) return tab;
@@ -298,7 +299,7 @@ export function openErTab(target) {
     }
   }
 
-  tab.setOnShow(() => { if (model) render(); });
+  tab.setOnShow(() => { setActiveTarget(target, 'er-tab'); if (model) render(); });
   setTimeout(load, 30);
   return tab;
 }

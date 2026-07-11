@@ -1,6 +1,6 @@
 // 对象定义查看页（存储过程 / 函数 / 触发器 / 事件 / 序列 / 用户）
 import { el, iconEl } from './util.js';
-import { connLabel, connColor } from './state.js';
+import { connLabel, connColor, setActiveTarget } from './state.js';
 import { addTab } from './tabs.js';
 import { toast } from './toast.js';
 
@@ -13,6 +13,7 @@ const KIND_LABELS = {
  * target: {connId, db, schema, kind, name, extra}
  */
 export function openDefTab(target) {
+  setActiveTarget(target, 'definition-tab');
   const tabId = `def:${target.connId}|${target.db || ''}|${target.kind}|${target.name}|${target.extra || ''}`;
   const tab = addTab({
     id: tabId,
@@ -21,6 +22,7 @@ export function openDefTab(target) {
     color: connColor(target.connId),
     tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.name}`,
   });
+  tab.setOnShow(() => setActiveTarget(target, 'definition-tab'));
   if (tab.pane.childElementCount) return tab;
 
   let ddlText = '';

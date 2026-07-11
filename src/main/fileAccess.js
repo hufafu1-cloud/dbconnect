@@ -30,7 +30,7 @@ function assertNotAppOwned(p) {
   catch (e) { return; }
   const protectedNames = [
     'connections.json', 'ai-config.json', 'ssh-known-hosts.json',
-    'groups.json', 'history.json', 'queries.json',
+    'groups.json', 'history.json', 'queries.json', 'workspace-v1.json',
   ];
   const key = normalize(p);
   const protectedPaths = new Set(protectedNames.map((name) => normalize(path.join(userData, name))));

@@ -86,6 +86,7 @@ body {
   font-weight: 500;
 }
 #app { display: flex; flex-direction: column; height: 100vh; }
+#app.workspace-loading { pointer-events: none; cursor: wait; }
 
 /* ---------- 自绘菜单栏 ---------- */
 #menubar {
@@ -503,6 +504,11 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .design-table tbody tr:hover { background: var(--hover-row); }
 .design-table tbody tr.selected { background: var(--selected); }
 .design-table input[type="text"] { font-family: inherit; color: var(--text); }
+.design-table select {
+  width: 100%; border: none; outline: none; background: transparent;
+  color: var(--text); font: inherit; padding: 2px;
+}
+.design-table input:disabled, .design-table select:disabled { opacity: 0.7; cursor: not-allowed; }
 .design-footer {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; border-top: 1px solid var(--border-light);

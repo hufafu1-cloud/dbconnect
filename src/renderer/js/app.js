@@ -1,11 +1,15 @@
 // 渲染进程入口：装配工具栏、树、标签页、快捷键与自动化测试钩子
 import { $, el, iconEl } from './util.js';
-import { state, reloadConnections, on, emit } from './state.js';
+import { state, reloadConnections, on, emit, getActiveTarget, setActiveTarget } from './state.js';
 import { toast, openModal, confirmDialog } from './toast.js';
 import { showMenu } from './contextmenu.js';
-import { renderTree, setupTreeFilter, openConnectionById } from './tree.js';
+import { renderTree, setupTreeFilter, openConnectionById, revealTarget } from './tree.js';
 import { initObjectsTab } from './objectsTab.js';
-import { addTab, closeActive, anyDirty, getActiveTab } from './tabs.js';
+import {
+  addTab, closeActive, anyDirty, getActiveTab,
+  getStoredWorkspace, restoreWorkspaceTabs, retryDeferredWorkspaceTabs,
+  setWorkspaceContextProvider, touchWorkspacePersistence, persistWorkspaceNow,
+} from './tabs.js';
 import { openConnDialog } from './connDialog.js';
 import * as actions from './actions.js';
 import { openQueryTab } from './queryTab.js';
@@ -14,19 +18,14 @@ import { statusbar } from './statusbar.js';
 
 // ---------------- 工具栏（Navicat 风格大图标） ----------------
 function newQueryFromToolbar() {
-  let t = state.activeTarget;
-  if (!t || !state.open.has(t.connId)) {
-    const first = [...state.open.keys()][0];
-    if (!first) { toast.info('请先打开一个连接'); return; }
-    const oc = state.open.get(first);
-    t = { connId: first, db: (oc.databases && oc.databases[0]) || null };
-  }
+  const t = firstOpenTarget(true);
+  if (!t) return;
   actions.newQuery(t);
 }
 
 async function openHistory() {
   const { openHistoryTab } = await import('./historyTab.js');
-  openHistoryTab();
+  return openHistoryTab();
 }
 
 async function openAiPanelFromToolbar() {
@@ -135,7 +134,7 @@ async function showAbout() {
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
         `Electron ${info.electron} · Node ${info.node} · Chromium ${info.chrome}`),
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
-        '快捷键: F5/Ctrl+Enter 运行查询 · Ctrl+S 保存 SQL · Ctrl+W 关闭标签 · F12 开发者工具')),
+        '快捷键: F5/Ctrl+Enter 运行当前语句 · Ctrl+S 保存 SQL · Ctrl+W 关闭标签 · F12 开发者工具')),
     buttons: [{ label: '确定', primary: true }],
   });
 }
@@ -144,6 +143,10 @@ async function showAbout() {
 function setupSplitter() {
   const splitter = $('#splitter-v');
   const sidebar = $('#sidebar');
+  try {
+    const savedWidth = Number(localStorage.getItem('dbpanda-sidebar-width'));
+    if (Number.isFinite(savedWidth) && savedWidth >= 170 && savedWidth <= 560) sidebar.style.width = `${savedWidth}px`;
+  } catch (e) { /* localStorage may be unavailable */ }
   splitter.addEventListener('mousedown', (e) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -154,6 +157,7 @@ function setupSplitter() {
     const up = () => {
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
+      try { localStorage.setItem('dbpanda-sidebar-width', String(Math.round(sidebar.getBoundingClientRect().width))); } catch (e) { /* ignore */ }
     };
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
@@ -163,6 +167,7 @@ function setupSplitter() {
 // ---------------- 快捷键 ----------------
 function setupShortcuts() {
   document.addEventListener('keydown', (e) => {
+    if (window.__APP_READY !== true) return;
     if (!e.ctrlKey || e.shiftKey || e.altKey) return;
     const k = e.key.toLowerCase();
     if (k === 'w') { e.preventDefault(); closeActive(); }
@@ -174,18 +179,32 @@ function setupShortcuts() {
 }
 
 // ---------------- 原生菜单动作 ----------------
-function firstOpenTarget() {
-  let t = state.activeTarget;
-  if (t && state.open.has(t.connId)) return t;
-  const first = [...state.open.keys()][0];
-  if (!first) return null;
-  const oc = state.open.get(first);
-  return { connId: first, db: (oc.databases && oc.databases[0]) || null };
+function firstOpenTarget(notify = false) {
+  const active = getActiveTarget({ requireOpen: true });
+  if (active) return active;
+  const ids = [...state.open.keys()];
+  if (!ids.length) {
+    if (notify) toast.info('请先打开一个连接');
+    return null;
+  }
+  if (ids.length > 1) {
+    if (notify) toast.info('请先在左侧选择要使用的连接或数据库');
+    return null;
+  }
+  const connId = ids[0];
+  const oc = state.open.get(connId);
+  const target = { connId, db: (oc.databases && oc.databases[0]) || null };
+  setActiveTarget(target, 'single-open-connection');
+  return target;
 }
 
 export async function runMenuAction(id) {
   const t = firstOpenTarget();
-  const needConn = () => { if (!t) toast.info('请先打开一个连接'); return !!t; };
+  const needConn = () => {
+    if (t) return true;
+    firstOpenTarget(true);
+    return false;
+  };
   switch (id) {
       case 'new-conn': openConnDialog(); break;
       case 'import-navicat': (await import('./navicatImport.js')).openNavicatImport(); break;
@@ -223,10 +242,33 @@ export async function runMenuAction(id) {
 
 // ---------------- 退出确认 ----------------
 function setupCloseGuard() {
-  window.api.app.onCloseRequest(async () => {
-    if (!anyDirty()) { window.api.app.confirmClose(); return; }
-    const ok = await confirmDialog('退出 DBPanda', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
-    if (ok) window.api.app.confirmClose();
+  window.api.app.onCloseRequest(async (requestId) => {
+    // Acknowledge before showing a modal: users may legitimately spend longer
+    // than the main-process no-response timeout reading the warning.
+    window.api.app.ackClose(requestId);
+    try {
+      if (anyDirty()) {
+        const ok = await confirmDialog('退出 DBPanda', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
+        if (!ok) { window.api.app.cancelClose(requestId); return; }
+      }
+      let timer = null;
+      const saved = await Promise.race([
+        persistWorkspaceNow(),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), 5000); }),
+      ]).finally(() => { if (timer) clearTimeout(timer); });
+      if (!saved) {
+        const exitAnyway = await confirmDialog(
+          '工作区草稿未保存',
+          '恢复快照写入失败或超时。现在退出可能丢失未保存的 SQL 或设计草稿，是否仍要退出？',
+          { danger: true, okLabel: '仍然退出' },
+        );
+        if (!exitAnyway) { window.api.app.cancelClose(requestId); return; }
+      }
+      window.api.app.confirmClose(requestId);
+    } catch (error) {
+      window.api.app.cancelClose(requestId);
+      toast.error('退出检查失败，已取消关闭：' + (error && error.message ? error.message : error));
+    }
   });
 }
 
@@ -347,7 +389,13 @@ function setupTestHooks() {
 }
 
 // ---------------- 启动 ----------------
+let workspaceEntryRestorer = null;
+let workspaceBooted = false;
+const pendingRestoreConnectionIds = new Set();
+
 async function boot() {
+  window.__APP_READY = false;
+  $('#app').classList.add('workspace-loading');
   try { applyTheme(localStorage.getItem('dbc-theme') || 'light'); } catch (e) { /* ignore */ }
   const { buildMenuBar } = await import('./menubar.js');
   buildMenuBar(runMenuAction);
@@ -364,12 +412,88 @@ async function boot() {
   setupTestHooks();
   await reloadConnections();
   setupTreeFilter();
-  statusbar.setLeft('就绪 — 新建或打开一个连接开始使用');
+  const savedWorkspace = await getStoredWorkspace();
+  const knownIds = new Set(state.connections.map((c) => c.id));
+  const restoreIds = Array.isArray(savedWorkspace.context && savedWorkspace.context.openConnectionIds)
+    ? [...new Set(savedWorkspace.context.openConnectionIds.filter((id) => typeof id === 'string' && knownIds.has(id)))]
+    : [];
+  for (const id of restoreIds) pendingRestoreConnectionIds.add(id);
+  setWorkspaceContextProvider(() => ({
+    openConnectionIds: [...new Set([
+      ...state.open.keys(),
+      ...[...pendingRestoreConnectionIds].filter((id) => state.connections.some((c) => c.id === id)),
+    ])],
+    activeTarget: state.activeTarget ? { ...state.activeTarget } : null,
+  }));
+
+  if (restoreIds.length) statusbar.setLeft(`正在恢复工作区连接（0/${restoreIds.length}）…`);
+  for (let i = 0; i < restoreIds.length; i++) {
+    try { await openConnectionById(restoreIds[i]); } catch (e) { /* 单个连接失败不阻止草稿恢复 */ }
+    if (state.open.has(restoreIds[i])) pendingRestoreConnectionIds.delete(restoreIds[i]);
+    statusbar.setLeft(`正在恢复工作区连接（${i + 1}/${restoreIds.length}）…`);
+  }
+
+  workspaceEntryRestorer = async (entry) => {
+    const s = entry && entry.state;
+    if (!s || typeof s !== 'object') return false;
+    if (entry.type === 'query') return openQueryTab(s.target || null, s.sql || '', { restoreId: entry.id, restoreState: s });
+    if (entry.type === 'table') {
+      if (!s.target || !knownIds.has(s.target.connId)) return false;
+      if (!state.open.has(s.target.connId)) return null;
+      return openTableTab(s.target, { restoreId: entry.id, restoreState: s });
+    }
+    if (entry.type === 'history') return openHistory();
+    if (entry.type === 'design') {
+      if (!s.target) return false;
+      if (!knownIds.has(s.target.connId)) {
+        // New/dirty designs are self-contained user drafts. Keep them orphaned
+        // until the connection is recreated or the user explicitly discards
+        // them; a missing connection record must not silently erase work.
+        const recoverableDraft = s.model && typeof s.model === 'object'
+          && (s.dirty === true || !s.target.table);
+        return recoverableDraft ? null : false;
+      }
+      if (!state.open.has(s.target.connId)) return null;
+      const { openDesignTab } = await import('./designTab.js');
+      const handle = openDesignTab(s.target, { restoreId: entry.id, restoreState: s });
+      if (handle.workspaceReady && !(await handle.workspaceReady)) {
+        await handle.close(true);
+        return null;
+      }
+      return handle;
+    }
+    return false;
+  };
+  const recovery = await restoreWorkspaceTabs(workspaceEntryRestorer);
+  workspaceBooted = true;
+  const savedTarget = savedWorkspace.context && savedWorkspace.context.activeTarget;
+  if (savedTarget && state.open.has(savedTarget.connId)) await revealTarget(savedTarget).catch(() => {});
+  statusbar.setLeft(recovery.restored || state.open.size
+    ? `工作区已恢复 · ${state.open.size} 个连接 · ${recovery.restored} 个标签${recovery.deferred ? ` · ${recovery.deferred} 个待连接后恢复` : ''}`
+    : '就绪 — 新建或打开一个连接开始使用');
+  $('#app').classList.remove('workspace-loading');
   window.__APP_READY = true;
 }
 
-on('conn-opened', () => {});
+on('conn-opened', async ({ connId } = {}) => {
+  if (connId) pendingRestoreConnectionIds.delete(connId);
+  touchWorkspacePersistence();
+  if (workspaceBooted && workspaceEntryRestorer && connId) {
+    const retried = await retryDeferredWorkspaceTabs(
+      workspaceEntryRestorer,
+      (entry) => entry && entry.state && entry.state.target && entry.state.target.connId === connId,
+    );
+    if (retried.restored) toast.success(`已继续恢复 ${retried.restored} 个工作标签`);
+  }
+});
+on('conn-closed', touchWorkspacePersistence);
+on('target-selected', touchWorkspacePersistence);
 boot().catch((e) => {
+  $('#app').classList.remove('workspace-loading');
+  if (e && e.code === 'WORKSPACE_READ_FAILED') {
+    window.__APP_READY = true;
+    statusbar.setLeft('工作区自动恢复/保存已停用，本次可继续手动使用');
+  }
   console.error(e);
-  toast.error('初始化失败: ' + e.message);
+  toast.error((e && e.code === 'WORKSPACE_READ_FAILED' ? '工作区恢复失败: ' : '初始化失败: ') + e.message, 15000);
 });
