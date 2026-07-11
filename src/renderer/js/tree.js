@@ -1,7 +1,7 @@
 // 左侧连接树
 import { $, el, iconEl } from './util.js';
 import { state, emit, on, objectsCacheKey } from './state.js';
-import { toast, promptDialog, confirmDialog } from './toast.js';
+import { toast, promptDialog, confirmDialog, passwordDialog } from './toast.js';
 import { showMenu } from './contextmenu.js';
 import * as actions from './actions.js';
 import { openConnDialog } from './connDialog.js';
@@ -89,8 +89,21 @@ function renderConnNode(conn) {
     row.style.opacity = '0.6';
     statusbar.setLeft(`正在连接 ${c.name} …`);
     try {
-      const r = await window.api.db.open(c.id);
+      let r = await window.api.db.open(c.id);
+      if (r && r.needsPassword) {
+        const password = await passwordDialog(
+          `输入数据库密码 — ${c.name}`,
+          '该连接未将数据库密码保存到本地。密码仅用于本次连接，关闭后需重新输入。',
+        );
+        if (password === null) {
+          statusbar.setLeft('已取消连接');
+          return;
+        }
+        statusbar.setLeft(`正在连接 ${c.name} …`);
+        r = await window.api.db.open(c.id, password);
+      }
       state.open.set(c.id, { version: r.version, databases: [], objectsCache: new Map() });
+      c.hasSessionPassword = false;
       container.classList.remove('conn-closed');
       container.classList.add('conn-open');
       toast.success(`已连接：${c.name}\n${r.version}`);

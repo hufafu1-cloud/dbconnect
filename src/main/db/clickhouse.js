@@ -35,7 +35,7 @@ class ClickHouseAdapter extends BaseAdapter {
         password: c.password || '',
         database: key,
         request_timeout: 120000,
-        application: 'Datavia',
+        application: 'DBPanda',
       };
       // 某些只读账号无权启用进度响应头；仅在连接配置明确要求时开启。
       if (opts.progressHeaders === true) {
@@ -89,7 +89,7 @@ class ClickHouseAdapter extends BaseAdapter {
     const limited = this._prepareScriptQuery(sql, opts);
     const client = this._getClient(db);
     const ac = new AbortController();
-    const queryId = `datavia:${requestId || 'internal'}:${crypto.randomUUID()}`;
+    const queryId = `dbpanda:${requestId || 'internal'}:${crypto.randomUUID()}`;
     const handle = { controller: ac, client, queryId };
     this._trackRequestHandle(handle, requestId);
     try {
@@ -147,7 +147,7 @@ class ClickHouseAdapter extends BaseAdapter {
       try {
         await handle.client.command({
           query: `KILL QUERY WHERE query_id = ${this.literal(handle.queryId)} SYNC`,
-          query_id: `datavia-cancel:${crypto.randomUUID()}`,
+          query_id: `dbpanda-cancel:${crypto.randomUUID()}`,
           abort_signal: killAbort.signal,
         });
       } catch (e) { /* query may already be gone or KILL permission may be absent */ }

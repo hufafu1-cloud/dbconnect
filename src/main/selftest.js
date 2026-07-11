@@ -726,6 +726,86 @@ async function runSelfTest() {
   check('store 密码往返', got.password === 'p@ss中文');
   const publicConn = store.listPublic().find((c) => c.id === saved.id);
   check('store 公共列表不暴露密码', publicConn && publicConn.hasPassword === true && !Object.prototype.hasOwnProperty.call(publicConn, 'password'));
+  check('store 旧连接默认将密码保存在本地', publicConn && publicConn.savePassword === true);
+
+  const sessionOnly = store.save({
+    name: '会话密码自检', type: 'mysql', host: 'session.example', port: 3306,
+    user: 'reader', password: ' session-only-secret ', savePassword: false,
+    ssh: { enabled: true, host: 'jump.session.example', port: 22, user: 'ops', authType: 'password', password: 'ssh-stays-saved' },
+  });
+  let sessionPublic = store.listPublic().find((c) => c.id === sessionOnly.id);
+  let sessionRaw = JSON.parse(fs.readFileSync(connectionFile, 'utf8')).find((c) => c.id === sessionOnly.id);
+  check('store 会话密码不落盘', sessionRaw && sessionRaw.savePassword === false
+    && sessionRaw.password.enc === 'none'
+    && !fs.readFileSync(connectionFile, 'utf8').includes('session-only-secret'));
+  check('store 会话密码公共状态脱敏', sessionPublic && !sessionPublic.hasPassword
+    && sessionPublic.hasSessionPassword && sessionPublic.savePassword === false
+    && !Object.prototype.hasOwnProperty.call(sessionPublic, 'password'));
+  check('store 会话密码首次连接前可用', store.getById(sessionOnly.id).password === ' session-only-secret '
+    && !store.needsSessionPassword(sessionOnly.id));
+  check('store 数据库密码开关不影响 SSH 凭据', sessionPublic.ssh.hasPassword
+    && store.getById(sessionOnly.id).ssh.password === 'ssh-stays-saved');
+  let sessionScopeDenied = false;
+  try { store.save({ ...sessionPublic, host: 'other-session.example' }); }
+  catch (e) { sessionScopeDenied = /重新输入数据库密码/.test(e.message); }
+  check('store 会话密码同样绑定连接作用域', sessionScopeDenied);
+
+  store.clearSessionPasswords();
+  sessionPublic = store.listPublic().find((c) => c.id === sessionOnly.id);
+  check('store 模拟重启后要求补输会话密码', store.needsSessionPassword(sessionOnly.id)
+    && !sessionPublic.hasSessionPassword && store.getById(sessionOnly.id).password === '');
+  let promoteWithoutPasswordDenied = false;
+  try { store.save({ ...sessionPublic, savePassword: true }); }
+  catch (e) { promoteWithoutPasswordDenied = /重新输入.*数据库密码/.test(e.message); }
+  check('store 会话密码丢失后不能静默提升为空密码', promoteWithoutPasswordDenied);
+
+  store.setSessionPassword(sessionOnly.id, ' reentered-secret ');
+  check('store 补输密码保留首尾空格', store.getById(sessionOnly.id).password === ' reentered-secret ');
+  sessionPublic = store.listPublic().find((c) => c.id === sessionOnly.id);
+  store.save({ ...sessionPublic, savePassword: true });
+  sessionPublic = store.listPublic().find((c) => c.id === sessionOnly.id);
+  check('store 会话密码可提升为本地安全保存', sessionPublic.hasPassword && sessionPublic.savePassword
+    && !sessionPublic.hasSessionPassword && store.getById(sessionOnly.id).password === ' reentered-secret ');
+  store.save({ ...sessionPublic, savePassword: false });
+  sessionRaw = JSON.parse(fs.readFileSync(connectionFile, 'utf8')).find((c) => c.id === sessionOnly.id);
+  check('store 已保存密码可降级为仅当前会话', sessionRaw.password.enc === 'none'
+    && store.getById(sessionOnly.id).password === ' reentered-secret ');
+  const sessionImportPreview = store.previewImportConnections([{
+    name: '会话密码自检', type: 'mysql', host: 'session.example', port: 3306,
+    user: 'reader', password: 'must-not-return-to-disk',
+    ssh: { enabled: true, host: 'jump.session.example', port: 22, user: 'ops', authType: 'password' },
+  }]);
+  const sessionImportResult = store.importConnections([{
+    name: '会话密码自检', type: 'mysql', host: 'session.example', port: 3306,
+    user: 'reader', password: 'must-not-return-to-disk',
+    ssh: { enabled: true, host: 'jump.session.example', port: 22, user: 'ops', authType: 'password' },
+  }]);
+  sessionRaw = JSON.parse(fs.readFileSync(connectionFile, 'utf8')).find((c) => c.id === sessionOnly.id);
+  check('store 重导入不会绕过禁止本地保存选项', sessionImportPreview[0].duplicate
+    && sessionImportResult.skipped === 1 && sessionRaw.password.enc === 'none'
+    && !fs.readFileSync(connectionFile, 'utf8').includes('must-not-return-to-disk'));
+  store.remove(sessionOnly.id);
+  check('store 删除连接同时清理会话密码', !store.needsSessionPassword(sessionOnly.id)
+    && store.listPublic().every((c) => c.id !== sessionOnly.id));
+
+  const blankSession = store.save({ name: '空密码会话自检', type: 'mysql', host: 'blank.example', user: 'root', password: '' });
+  store.save({ ...store.listPublic().find((c) => c.id === blankSession.id), savePassword: false });
+  check('store 空密码取消本地保存后首次连接仍可用', !store.needsSessionPassword(blankSession.id)
+    && store.listPublic().find((c) => c.id === blankSession.id).hasSessionPassword);
+  store.remove(blankSession.id);
+
+  const brokenSaved = store.save({ name: '损坏凭据替换', type: 'mysql', host: '127.0.0.2', user: 'root', password: 'old-secret' });
+  const brokenConnectionFile = path.join(require('electron').app.getPath('userData'), 'connections.json');
+  const brokenRaw = JSON.parse(fs.readFileSync(brokenConnectionFile, 'utf8'));
+  brokenRaw.find((item) => item.id === brokenSaved.id).password = { enc: 'safe', v: 'invalid-safe-storage-payload' };
+  fs.writeFileSync(brokenConnectionFile, JSON.stringify(brokenRaw, null, 2), 'utf8');
+  const brokenPublic = store.listPublic().find((c) => c.id === brokenSaved.id);
+  let replacementHydrated = null;
+  try { replacementHydrated = store.hydrateConfig({ ...brokenPublic, password: 'new-secret' }); } catch (e) { /* checked below */ }
+  check('store 损坏旧凭据不阻止显式新密码测试', replacementHydrated && replacementHydrated.password === 'new-secret');
+  store.save({ ...brokenPublic, password: 'new-secret' });
+  check('store 显式新密码可覆盖损坏旧凭据', store.getById(brokenSaved.id).password === 'new-secret');
+  store.remove(brokenSaved.id);
   store.save({ ...publicConn, name: '自检-保留密钥' });
   check('store 脱敏编辑保留密码', store.getById(saved.id).password === 'p@ss中文');
   check('store 测试配置恢复密码', store.hydrateConfig(publicConn).password === 'p@ss中文');
@@ -801,7 +881,7 @@ async function runSelfTest() {
 
   // Renderer 文件能力：未经过原生对话框授权的路径不得由 IPC 层读写。
   const fileAccess = require('./fileAccess');
-  const capabilityFile = path.join(os.tmpdir(), `datavia-file-cap-${Date.now()}.txt`);
+  const capabilityFile = path.join(os.tmpdir(), `dbpanda-file-cap-${Date.now()}.txt`);
   fs.writeFileSync(capabilityFile, 'ok', 'utf8');
   fileAccess.clear();
   let denied = false;
@@ -862,7 +942,7 @@ async function runSelfTest() {
   check('safety 拒绝 MariaDB 可执行注释绕过', safety.describe('db.query', { ...prodPayload, sql: '/*M! DROP TABLE users */' }).required === true);
   check('safety 拒绝 SQL Server 控制流绕过', safety.describe('db.query', { ...prodPayload, sql: 'IF 1=1 DROP TABLE users' }).required === true);
   check('safety 不把 MySQL 双减号误作注释', safety.describe('db.query', {
-    ...prodPayload, sql: "SELECT 1--1 INTO OUTFILE '/tmp/datavia-test'",
+    ...prodPayload, sql: "SELECT 1--1 INTO OUTFILE '/tmp/dbpanda-test'",
   }).required === true);
   check('safety 生产查询中的副作用函数必须审批', safety.describe('db.query', {
     ...prodPayload, sql: "SELECT setval('important_seq', 1)",
@@ -929,7 +1009,7 @@ async function runSelfTest() {
   try { safety.issue(sender, 'db.query', prodPayload, '生产自检', dialogFingerprint); }
   catch (e) { approvalWindowSwapDenied = /审批期间.*已改变/.test(e.message); }
   check('safety 原生确认窗口期间配置变化不会签发新目标令牌', approvalWindowSwapDenied);
-  const approvedInput = path.join(os.tmpdir(), `datavia-approved-input-${Date.now()}.csv`);
+  const approvedInput = path.join(os.tmpdir(), `dbpanda-approved-input-${Date.now()}.csv`);
   fs.writeFileSync(approvedInput, 'id,name\n1,AAAA\n', 'utf8');
   const approvedStat = fs.statSync(approvedInput);
   const importPayload = {

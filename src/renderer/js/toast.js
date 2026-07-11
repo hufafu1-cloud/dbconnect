@@ -87,6 +87,32 @@ export function promptDialog(title, label, initial = '') {
   });
 }
 
+/** 密码补输框：保留首尾空格，resolve(string|null)，明文只通过本次 IPC 提交。 */
+export function passwordDialog(title, message) {
+  return new Promise((resolve) => {
+    let done = false;
+    const input = el('input', { type: 'password', spellcheck: false, autocomplete: 'off' });
+    const show = el('button', {
+      class: 'btn', tabIndex: -1,
+      onClick: () => { input.type = input.type === 'password' ? 'text' : 'password'; return false; },
+    }, '👁');
+    const submit = () => { done = true; resolve(input.value); m.close(); };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    const m = openModal({
+      title,
+      body: el('div', { class: 'password-prompt' },
+        el('div', { class: 'password-prompt-message' }, message),
+        el('div', { class: 'row-flex' }, input, show)),
+      buttons: [
+        { label: '取消', onClick: () => { done = true; resolve(null); } },
+        { label: '连接', primary: true, onClick: () => { done = true; resolve(input.value); } },
+      ],
+      onClose: () => { if (!done) resolve(null); },
+    });
+    setTimeout(() => input.focus(), 30);
+  });
+}
+
 /** 单元格查看器 */
 function imageMime(buf) {
   if (buf.length < 4) return null;

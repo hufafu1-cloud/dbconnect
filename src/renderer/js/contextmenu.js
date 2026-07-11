@@ -22,7 +22,8 @@ function onKey(e) {
  */
 export function showMenu(x, y, items) {
   closeMenu();
-  const menu = el('div', { class: 'ctx-menu' });
+  const hasIcons = items.some((it) => it && !it.sep && it.icon && icons[it.icon]);
+  const menu = el('div', { class: 'ctx-menu' + (hasIcons ? ' has-icons' : '') });
   for (const it of items) {
     if (!it) continue;
     if (it.sep) { menu.append(el('div', { class: 'ctx-sep' })); continue; }
@@ -34,9 +35,12 @@ export function showMenu(x, y, items) {
         if (it.onClick) it.onClick();
       },
     });
-    const ic = el('span', { style: { display: 'inline-flex', width: '14px' } });
-    if (it.icon && icons[it.icon]) ic.innerHTML = icons[it.icon];
-    item.append(ic, el('span', {}, it.label));
+    if (hasIcons) {
+      const ic = el('span', { class: 'ctx-icon' });
+      if (it.icon && icons[it.icon]) ic.innerHTML = icons[it.icon];
+      item.append(ic);
+    }
+    item.append(el('span', { class: 'ctx-label' }, it.label));
     if (it.hint) item.append(el('span', { class: 'ctx-hint' }, it.hint));
     menu.append(item);
   }

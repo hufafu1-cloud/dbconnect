@@ -2,7 +2,7 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 const os = require('os');
-const fs = require('fs');
+const { migrateLegacyUserData } = require('./userDataMigration');
 
 const isSmoke = process.argv.includes('--smoke');
 const isSelfTest = process.argv.includes('--selftest');
@@ -10,24 +10,18 @@ const isDemo = process.argv.includes('--demo');
 
 // 测试/演示模式使用临时用户数据目录，避免污染真实配置
 if (isSmoke || isSelfTest || isDemo) {
-  app.setPath('userData', path.join(os.tmpdir(), 'datavia-test-' + process.pid));
+  app.setPath('userData', path.join(os.tmpdir(), 'dbpanda-test-' + process.pid));
 } else {
-  // 旧品牌（DBConnect）的本地配置一次性迁移到 Datavia 目录，避免已存连接“丢失”
+  // 将 Datavia / DBConnect 的本地配置一次性迁移到 DBPanda，避免已存连接“丢失”
   migrateOldData();
 }
 
-// 改名后 userData 目录从 %APPDATA%/DBConnect 变为 %APPDATA%/Datavia，迁移历史数据
+// productName 改名后 userData 目录变为 %APPDATA%/DBPanda，迁移历史数据
 function migrateOldData() {
   try {
-    const newDir = app.getPath('userData'); // 此时 productName=Datavia
-    const oldDir = path.join(path.dirname(newDir), 'DBConnect');
-    if (oldDir === newDir || !fs.existsSync(oldDir)) return;
-    fs.mkdirSync(newDir, { recursive: true });
-    for (const f of ['connections.json', 'groups.json', 'history.json', 'queries.json']) {
-      const src = path.join(oldDir, f);
-      const dst = path.join(newDir, f);
-      if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst);
-    }
+    const newDir = app.getPath('userData');
+    const parent = path.dirname(newDir);
+    migrateLegacyUserData(newDir, [path.join(parent, 'Datavia'), path.join(parent, 'DBConnect')]);
   } catch (e) { /* 迁移失败不影响启动 */ }
 }
 
@@ -36,6 +30,7 @@ const dbm = require('./db');
 
 let win = null;
 let allowClose = false;
+const WINDOW_TITLE = `DBPanda v${app.getVersion()}`;
 
 function createWindow(show) {
   win = new BrowserWindow({
@@ -44,7 +39,7 @@ function createWindow(show) {
     minWidth: 1024,
     minHeight: 640,
     show: false,
-    title: 'Datavia',
+    title: WINDOW_TITLE,
     icon: path.join(__dirname, '../../assets/icon.ico'),
     backgroundColor: '#f3f4f6',
     webPreferences: {
@@ -53,6 +48,10 @@ function createWindow(show) {
       nodeIntegration: false,
       spellcheck: false,
     },
+  });
+  win.on('page-title-updated', (event) => {
+    event.preventDefault();
+    win.setTitle(WINDOW_TITLE);
   });
   win.loadFile(path.join(__dirname, '../renderer/index.html'));
   win.once('ready-to-show', () => { if (show) win.show(); });
@@ -123,6 +122,16 @@ app.whenReady().then(async () => {
     return;
   }
   if (isSmoke) {
+    const smokeStore = require('./store');
+    const passwordPromptConnection = smokeStore.save({
+      name: 'Smoke session password', type: 'mysql', host: '127.0.0.1', port: 1,
+      user: 'smoke', password: 'not-persisted', savePassword: false,
+    });
+    smokeStore.clearSessionPasswords();
+    const failedSessionConnection = smokeStore.save({
+      name: 'Smoke failed session password', type: 'mysql', host: '127.0.0.1', port: 1,
+      user: 'smoke', password: 'wrong-session-password', savePassword: false,
+    });
     createWindow(false);
     const errors = [];
     win.webContents.on('console-message', (...a) => {
@@ -138,9 +147,74 @@ app.whenReady().then(async () => {
         const domOk = await win.webContents.executeJavaScript(
           'window.__APP_READY === true && !!document.getElementById("tree") && !!document.getElementById("tabbar")');
         const cmOk = await win.webContents.executeJavaScript('typeof CodeMirror === "function"');
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} errors=${errors.length}`);
+        const titleOk = win.getTitle() === WINDOW_TITLE;
+        const menuLayout = await win.webContents.executeJavaScript(`(() => {
+          const top = document.querySelector('#menubar .menu-item');
+          top.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          const textMenu = document.querySelector('.ctx-menu');
+          const textItem = textMenu && textMenu.querySelector('.ctx-item');
+          const textLabel = textItem && textItem.querySelector('.ctx-label');
+          const textOnly = !!textMenu && !textMenu.querySelector('.ctx-icon');
+          const textInset = textItem && textLabel
+            ? Math.round(textLabel.getBoundingClientRect().left - textItem.getBoundingClientRect().left)
+            : -1;
+          window.__test.closeMenus();
+          window.__test.openConnMenu();
+          const iconItems = [...document.querySelectorAll('.ctx-menu .ctx-item')];
+          const iconColumns = iconItems.length > 0 && iconItems.every((item) => item.querySelector('.ctx-icon'));
+          const databaseIconMarkup = iconItems.map((item) => item.querySelector('.ctx-icon svg')?.outerHTML || '');
+          const databaseIconsOk = databaseIconMarkup.length === 7
+            && databaseIconMarkup.every(Boolean) && new Set(databaseIconMarkup).size === 7;
+          window.__test.closeMenus();
+          window.__test.openConnDialog();
+          const modal = document.querySelector('.modal');
+          const form = modal && modal.querySelector('.form-grid');
+          const labels = form ? [...form.querySelectorAll('label')].filter((label) => (
+            label.textContent.trim() && getComputedStyle(label).display !== 'none'
+          )) : [];
+          const labelTextLeft = labels.length ? Math.min(...labels.map((label) => {
+            const range = document.createRange();
+            range.selectNodeContents(label);
+            return range.getBoundingClientRect().left;
+          }).filter((left) => left > 0)) : 0;
+          const modalRect = modal && modal.getBoundingClientRect();
+          const formRect = form && form.getBoundingClientRect();
+          const formLeft = modalRect ? Math.round(labelTextLeft - modalRect.left) : -1;
+          const formRight = modalRect && formRect ? Math.round(modalRect.right - formRect.right) : -1;
+          const formBalanced = formLeft > 0 && Math.abs(formLeft - formRight) <= 6;
+          const passwordRow = form && form.querySelector('.password-row');
+          const passwordInput = passwordRow && passwordRow.querySelector('input[type="password"]');
+          const passwordSave = passwordRow && passwordRow.querySelector('.password-save-check input[type="checkbox"]');
+          const passwordRowRect = passwordRow && passwordRow.getBoundingClientRect();
+          const passwordOptionFits = !!(passwordRowRect && formRect && passwordRowRect.right <= formRect.right + 1);
+          const passwordOptionOk = !!(passwordSave && passwordSave.checked && passwordInput
+            && passwordInput.getBoundingClientRect().width >= 180 && passwordOptionFits);
+          window.__test.closeMenus();
+          return { textOnly, textInset, iconColumns, databaseIconsOk, formBalanced, formLeft, formRight, passwordOptionOk };
+        })()`);
+        const menuOk = menuLayout.textOnly && menuLayout.textInset === 12 && menuLayout.iconColumns;
+        await win.webContents.executeJavaScript(
+          `window.__test.openConnection(${JSON.stringify(passwordPromptConnection.id)}).catch(() => {}); true`);
+        await new Promise((r) => setTimeout(r, 100));
+        const passwordPromptOk = await win.webContents.executeJavaScript(`(() => {
+          const prompt = document.querySelector('.password-prompt');
+          const input = prompt && prompt.querySelector('input[type="password"]');
+          return !!(prompt && input && document.querySelector('.modal-head').textContent.includes('Smoke session password'));
+        })()`);
+        await win.webContents.executeJavaScript('window.__test.closeMenus()');
+        await win.webContents.executeJavaScript(
+          `window.__test.openConnection(${JSON.stringify(failedSessionConnection.id)})`);
+        await win.webContents.executeJavaScript(
+          `window.__test.openConnection(${JSON.stringify(failedSessionConnection.id)}).catch(() => {}); true`);
+        await new Promise((r) => setTimeout(r, 100));
+        const failedSessionRetryPrompt = await win.webContents.executeJavaScript(
+          `!!document.querySelector('.password-prompt') && document.querySelector('.modal-head').textContent.includes('Smoke failed session password')`);
+        await win.webContents.executeJavaScript('window.__test.closeMenus()');
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} passwordOption=${menuLayout.passwordOptionOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
-        app.exit(domOk && cmOk && errors.length === 0 ? 0 : 1);
+        app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
+          && menuLayout.formBalanced && menuLayout.passwordOptionOk
+          && passwordPromptOk && failedSessionRetryPrompt && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);
         app.exit(1);
@@ -163,6 +237,7 @@ app.on('before-quit', (e) => {
   if (quitting) return;
   e.preventDefault();
   quitting = true;
+  require('./store').clearSessionPasswords();
   Promise.race([
     dbm.closeAll(),
     new Promise((r) => setTimeout(r, 1500)),

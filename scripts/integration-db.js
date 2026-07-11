@@ -1,6 +1,6 @@
 'use strict';
 
-// Real-database integration checks for Datavia adapters.
+// Real-database integration checks for DBPanda adapters.
 //
 // Select targets explicitly:
 //   DB_INTEGRATION_TARGETS=mysql,postgres,mssql,clickhouse node scripts/integration-db.js
@@ -217,15 +217,15 @@ async function metadataCheck(adapter, type, config) {
 function rowLimitSql(type) {
   switch (type) {
     case 'postgres':
-      return 'SELECT generate_series(1, 5) AS datavia_probe ORDER BY datavia_probe';
+      return 'SELECT generate_series(1, 5) AS dbpanda_probe ORDER BY dbpanda_probe';
     case 'mssql':
-      return 'SELECT datavia_probe FROM (VALUES (1), (2), (3), (4), (5)) AS datavia_rows(datavia_probe) ORDER BY datavia_probe';
+      return 'SELECT dbpanda_probe FROM (VALUES (1), (2), (3), (4), (5)) AS dbpanda_rows(dbpanda_probe) ORDER BY dbpanda_probe';
     case 'clickhouse':
-      return 'SELECT number + 1 AS datavia_probe FROM numbers(5) ORDER BY datavia_probe';
+      return 'SELECT number + 1 AS dbpanda_probe FROM numbers(5) ORDER BY dbpanda_probe';
     case 'oboracle':
-      return 'SELECT LEVEL AS "datavia_probe" FROM dual CONNECT BY LEVEL <= 5 ORDER BY LEVEL';
+      return 'SELECT LEVEL AS "dbpanda_probe" FROM dual CONNECT BY LEVEL <= 5 ORDER BY LEVEL';
     default:
-      return 'SELECT datavia_probe FROM (SELECT 1 AS datavia_probe UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5) AS datavia_rows ORDER BY datavia_probe';
+      return 'SELECT dbpanda_probe FROM (SELECT 1 AS dbpanda_probe UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5) AS dbpanda_rows ORDER BY dbpanda_probe';
   }
 }
 
@@ -264,10 +264,10 @@ async function rowLimitCheck(adapter, type, database) {
 function cancellationSql(type) {
   switch (type) {
     case 'mysql':
-    case 'oceanbase': return 'SELECT SLEEP(5) AS datavia_cancel_probe';
-    case 'postgres': return 'SELECT pg_sleep(5) AS datavia_cancel_probe';
-    case 'mssql': return "WAITFOR DELAY '00:00:05'; SELECT 1 AS datavia_cancel_probe";
-    case 'clickhouse': return 'SELECT sleep(3) AS datavia_cancel_probe';
+    case 'oceanbase': return 'SELECT SLEEP(5) AS dbpanda_cancel_probe';
+    case 'postgres': return 'SELECT pg_sleep(5) AS dbpanda_cancel_probe';
+    case 'mssql': return "WAITFOR DELAY '00:00:05'; SELECT 1 AS dbpanda_cancel_probe";
+    case 'clickhouse': return 'SELECT sleep(3) AS dbpanda_cancel_probe';
     default: return null;
   }
 }
@@ -326,8 +326,8 @@ async function cancellationCheck(adapter, type, database) {
 
 async function baselineSelect(adapter, type, database) {
   const sql = type === 'oboracle'
-    ? 'SELECT 1 AS "datavia_probe" FROM dual'
-    : 'SELECT 1 AS datavia_probe';
+    ? 'SELECT 1 AS "dbpanda_probe" FROM dual'
+    : 'SELECT 1 AS dbpanda_probe';
   const rows = resultRows(await adapter.exec(database, sql), 'baseline SELECT');
   assert(rows.length === 1 && Number(rows[0][0]) === 1, 'baseline SELECT returned an unexpected value');
 }
@@ -349,7 +349,7 @@ async function tableMetadataCheck(adapter, type, database, tableName) {
 }
 
 async function exportCheck(adapter, type, database, tableName) {
-  const file = path.join(os.tmpdir(), `datavia-export-${type}-${process.pid}-${Date.now()}.json`);
+  const file = path.join(os.tmpdir(), `dbpanda-export-${type}-${process.pid}-${Date.now()}.json`);
   try {
     const result = await exportTable(adapter, {
       db: database,
@@ -455,7 +455,7 @@ async function crudCheck(adapter, type, config) {
   }
 
   const suffix = `${Date.now().toString(36)}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
-  const tableName = `datavia_it_${suffix}`;
+  const tableName = `dbpanda_it_${suffix}`;
   const plan = crudPlan(type, adapter, config.database, tableName);
 
   await adapter.withSession(config.database, async (run) => {

@@ -166,7 +166,7 @@ function register(getWin) {
       const summary = `共 ${items.length} 项，最高风险：${labels[highest] || '未知'}；显示 ${shown.length} 项`
         + (items.length > shown.length ? `，另有 ${items.length - shown.length} 项未展开，请确认完整操作内容` : '');
       const confirmed = await dialog.showMessageBox(getWin(), {
-        type: 'warning', title: 'Datavia 生产库审批',
+        type: 'warning', title: 'DBPanda 生产库审批',
         message: info.title || '确认执行生产库操作？',
         detail: `${summary}\n\n${detail}\n\n该确认由主进程显示，操作令牌仅可使用一次。`,
         buttons: ['取消', '确认执行'], defaultId: 0, cancelId: 0, noLink: true,
@@ -262,6 +262,9 @@ function register(getWin) {
         const shouldClose = !!(before && dbm.isOpen(cleanConn.id) && runtimeConnectionChanged(before, cleanConn));
         if (shouldClose) await dbm.close(cleanConn.id);
         const saved = store.save(cleanConn);
+        // If the adapter stayed open, it already owns the current connection
+        // password. Do not leave a second copy that could be reused after close.
+        if (dbm.isOpen(saved.id) && saved.savePassword === false) store.clearSessionPassword(saved.id);
         return { ...saved, connectionClosed: shouldClose };
       });
       return { ok: true, data };
@@ -282,7 +285,31 @@ function register(getWin) {
   h('groups:remove', (a) => store.removeGroup(a.name));
 
   // ---- 数据库操作 ----
-  h('db:open', (connId) => withConnectionLock(connId, () => dbm.open(store.getById(connId))));
+  h('db:open', (payload) => {
+    const request = typeof payload === 'string' ? { connId: payload } : (payload || {});
+    const connId = request.connId;
+    return withConnectionLock(connId, async () => {
+      if (dbm.isOpen(connId)) {
+        const result = await dbm.open(store.getById(connId));
+        store.clearSessionPassword(connId);
+        return result;
+      }
+      const supplied = own(request, 'password');
+      if (supplied) store.setSessionPassword(connId, request.password);
+      if (store.needsSessionPassword(connId)) return { needsPassword: true };
+      try {
+        const result = await dbm.open(store.getById(connId));
+        // The connected adapter now owns the password for this connection
+        // session. Closing it must require a fresh password next time.
+        store.clearSessionPassword(connId);
+        return result;
+      } catch (error) {
+        // A failed attempt must not keep retrying an unverified session password.
+        store.clearSessionPassword(connId);
+        throw error;
+      }
+    });
+  });
   h('db:close', (connId) => withConnectionLock(connId, () => dbm.close(connId)));
   h('db:databases', (connId) => dbm.get(connId).listDatabases());
   h('db:schemas', (a) => dbm.get(a.connId).listSchemas(a.db));

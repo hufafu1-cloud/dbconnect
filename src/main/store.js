@@ -1,9 +1,14 @@
-// 连接配置持久化：%APPDATA%/Datavia/connections.json
+// 连接配置持久化：%APPDATA%/DBPanda/connections.json
 // 密码用 Electron safeStorage 加密。仍可读取旧版 b64 记录，但新凭据绝不再退化为可逆 Base64。
 const { app, safeStorage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+
+// Database passwords that the user explicitly chose not to persist. A value is
+// held only until its connection opens; the adapter owns it until that connection
+// closes. It is never written to disk.
+const sessionPasswords = new Map();
 
 function filePath() {
   return path.join(app.getPath('userData'), 'connections.json');
@@ -56,7 +61,7 @@ function list() {
 }
 
 function decryptConnection(c, strict) {
-  const out = { ...c, password: decryptPassword(c.password, strict) };
+  const out = { ...c, password: connectionPassword(c, strict) };
   if (c.ssh) {
     out.ssh = {
       ...c.ssh,
@@ -73,6 +78,18 @@ function hasSecret(p) {
   return p.enc !== 'none' && !!p.v;
 }
 
+function connectionPassword(record, strict = false) {
+  if (record && record.savePassword === false) {
+    const entry = validSessionPassword(record);
+    return entry ? entry.password : '';
+  }
+  return decryptPassword(record && record.password, strict);
+}
+
+function hasDbCredential(record) {
+  return !!record && (hasSecret(record.password) || !!validSessionPassword(record));
+}
+
 function keepEncrypted(p) {
   // 旧版本的 Base64 记录在用户下一次保存配置时自动迁移到 safeStorage。
   if (p && p.enc === 'b64') return encryptPassword(decryptPassword(p));
@@ -82,8 +99,17 @@ function keepEncrypted(p) {
 /** 给 Renderer 的连接列表：只暴露“是否已保存”，不回传任何已解密凭据。 */
 function listPublic() {
   return loadRaw().map((c) => {
-    const out = { ...c, hasPassword: hasSecret(c.password) };
+    const out = {
+      ...c,
+      hasPassword: c.savePassword !== false && hasSecret(c.password),
+      savePassword: c.type !== 'sqlite' && c.savePassword !== false,
+      hasSessionPassword: c.savePassword === false && !!validSessionPassword(c),
+    };
     delete out.password;
+    if (c.type === 'sqlite') {
+      delete out.savePassword;
+      delete out.hasSessionPassword;
+    }
     if (c.ssh) {
       out.ssh = {
         ...c.ssh,
@@ -102,6 +128,26 @@ function getById(id) {
   const c = raw ? decryptConnection(raw, true) : null;
   if (!c) throw new Error('连接配置不存在');
   return c;
+}
+
+function needsSessionPassword(id) {
+  const raw = loadRaw().find((item) => item.id === id);
+  return !!(raw && raw.type !== 'sqlite' && raw.savePassword === false && !validSessionPassword(raw));
+}
+
+function setSessionPassword(id, password) {
+  const raw = loadRaw().find((item) => item.id === id);
+  if (!raw) throw new Error('连接配置不存在');
+  if (raw.type === 'sqlite' || raw.savePassword !== false) throw new Error('该连接不需要会话密码');
+  cacheSessionPassword(raw, password);
+}
+
+function clearSessionPassword(id) {
+  sessionPasswords.delete(id);
+}
+
+function clearSessionPasswords() {
+  sessionPasswords.clear();
 }
 
 const own = (obj, key) => !!obj && Object.prototype.hasOwnProperty.call(obj, key);
@@ -143,22 +189,72 @@ function sameSshCredentialScope(oldSsh, incomingSsh) {
     && normExact(old.keyFile) === normExact(effective(old, incoming, 'keyFile'));
 }
 
+function sessionScope(record) {
+  return {
+    type: record && record.type,
+    host: record && record.host,
+    port: record && record.port,
+    user: record && record.user,
+    options: { ...((record && record.options) || {}) },
+    ssh: record && record.ssh ? {
+      enabled: !!record.ssh.enabled,
+      host: record.ssh.host,
+      port: record.ssh.port,
+      user: record.ssh.user,
+      authType: record.ssh.authType,
+      keyFile: record.ssh.keyFile,
+    } : null,
+  };
+}
+
+function validSessionPassword(record) {
+  if (!record || !record.id) return null;
+  const entry = sessionPasswords.get(record.id);
+  if (!entry) return null;
+  if (!sameDbCredentialScope(entry.scope, record)) {
+    sessionPasswords.delete(record.id);
+    return null;
+  }
+  return entry;
+}
+
+function cacheSessionPassword(record, password) {
+  sessionPasswords.set(record.id, {
+    password: String(password === undefined || password === null ? '' : password),
+    scope: sessionScope(record),
+  });
+}
+
 /**
  * 把 Renderer 提交的脱敏配置与已保存密钥合并，供测试连接使用。
  * 属性缺失表示“保留旧密钥”；显式空字符串表示“清除/使用空密钥”。
  */
 function hydrateConfig(conn) {
   if (!conn || !conn.id) return conn;
-  const exists = loadRaw().some((item) => item.id === conn.id);
-  if (!exists) return conn;
-  // If an existing secret can no longer be decrypted, surface that error. Treating
-  // it as a missing connection would hide the problem and silently test blank creds.
-  const old = getById(conn.id);
+  const raw = loadRaw().find((item) => item.id === conn.id);
+  if (!raw) return conn;
+  // Only decrypt secrets that the Renderer omitted and therefore intends to reuse.
+  // An explicitly supplied replacement must be allowed to overwrite a damaged old
+  // safeStorage payload without trying to decrypt that payload first.
+  const incomingSsh = conn.ssh || {};
+  const old = {
+    ...raw,
+    password: own(conn, 'password') ? '' : connectionPassword(raw, true),
+  };
+  if (raw.ssh) {
+    old.ssh = {
+      ...raw.ssh,
+      password: own(incomingSsh, 'password') ? '' : decryptPassword(raw.ssh.password, true),
+      passphrase: own(incomingSsh, 'passphrase') ? '' : decryptPassword(raw.ssh.passphrase, true),
+    };
+  }
   const out = { ...old, ...conn };
   if (conn.type === 'sqlite') {
     out.password = '';
     delete out.ssh;
     delete out.hasPassword;
+    delete out.hasSessionPassword;
+    delete out.savePassword;
     return out;
   }
   if (!own(conn, 'password')) {
@@ -181,6 +277,7 @@ function hydrateConfig(conn) {
     }
   }
   delete out.hasPassword;
+  delete out.hasSessionPassword;
   if (out.ssh) { delete out.ssh.hasPassword; delete out.ssh.hasPassphrase; }
   return out;
 }
@@ -190,7 +287,7 @@ function save(conn) {
   const i = conn.id ? arr.findIndex((x) => x.id === conn.id) : -1;
   const previous = i >= 0 ? arr[i] : null;
   if (previous && conn.type !== 'sqlite' && !own(conn, 'password')
-      && hasSecret(previous.password) && !sameDbCredentialScope(previous, conn)) {
+      && hasDbCredential(previous) && !sameDbCredentialScope(previous, conn)) {
     throw new Error('连接目标或用户名已改变，请重新输入数据库密码');
   }
   if (previous && previous.ssh && conn.ssh) {
@@ -202,18 +299,39 @@ function save(conn) {
       throw new Error('SSH 私钥配置已改变，请重新输入私钥口令');
     }
   }
-  const record = {
-    ...conn,
-    password: conn.type === 'sqlite'
-      ? encryptPassword('')
-      : Object.prototype.hasOwnProperty.call(conn, 'password')
-      ? encryptPassword(conn.password || '')
-      : keepEncrypted(previous && previous.password),
-  };
+  const id = conn.id || crypto.randomUUID();
+  const savePassword = conn.type !== 'sqlite' && conn.savePassword !== false;
+  const previousSession = previous && validSessionPassword(previous);
+  let encryptedDbPassword = encryptPassword('');
+  let nextSessionPassword;
+  let hasNextSessionPassword = false;
+  if (conn.type !== 'sqlite' && savePassword) {
+    if (own(conn, 'password')) encryptedDbPassword = encryptPassword(conn.password || '');
+    else if (previous && previous.savePassword === false && previousSession) {
+      encryptedDbPassword = encryptPassword(previousSession.password);
+    } else if (previous && previous.savePassword === false) {
+      throw new Error('请重新输入需要保存到本地的数据库密码');
+    } else encryptedDbPassword = keepEncrypted(previous && previous.password);
+  } else if (conn.type !== 'sqlite') {
+    if (own(conn, 'password')) {
+      nextSessionPassword = String(conn.password === undefined || conn.password === null ? '' : conn.password);
+      hasNextSessionPassword = true;
+    } else if (previous && previous.savePassword === false && previousSession) {
+      nextSessionPassword = previousSession.password;
+      hasNextSessionPassword = true;
+    } else if (previous && previous.savePassword !== false) {
+      nextSessionPassword = decryptPassword(previous.password, true);
+      hasNextSessionPassword = true;
+    }
+  }
+  const record = { ...conn, id, savePassword, password: encryptedDbPassword };
+  if (!conn.id) record.createdAt = new Date().toISOString();
+  if (conn.type === 'sqlite') delete record.savePassword;
   // Approval capabilities are single-use IPC data and must never reach disk.
   delete record.approvalToken;
   delete record._approvalToken;
   delete record.hasPassword;
+  delete record.hasSessionPassword;
   if (conn.ssh) {
     record.ssh = {
       ...conn.ssh,
@@ -227,9 +345,7 @@ function save(conn) {
     delete record.ssh.hasPassword;
     delete record.ssh.hasPassphrase;
   }
-  if (!record.id) {
-    record.id = crypto.randomUUID();
-    record.createdAt = new Date().toISOString();
+  if (!conn.id) {
     arr.push(record);
   } else {
     if (i >= 0) {
@@ -239,6 +355,8 @@ function save(conn) {
     else arr.push(record);
   }
   persist(arr);
+  sessionPasswords.delete(record.id);
+  if (!savePassword && hasNextSessionPassword) cacheSessionPassword(record, nextSessionPassword);
   return listPublic().find((x) => x.id === record.id);
 }
 
@@ -334,8 +452,17 @@ function importedSignature(connection) {
 }
 
 function publicRecord(record) {
-  const out = { ...record, hasPassword: hasSecret(record.password) };
+  const out = {
+    ...record,
+    hasPassword: record.savePassword !== false && hasSecret(record.password),
+    savePassword: record.type !== 'sqlite' && record.savePassword !== false,
+    hasSessionPassword: record.savePassword === false && !!validSessionPassword(record),
+  };
   delete out.password;
+  if (record.type === 'sqlite') {
+    delete out.savePassword;
+    delete out.hasSessionPassword;
+  }
   if (record.ssh) {
     out.ssh = {
       ...record.ssh,
@@ -349,7 +476,7 @@ function publicRecord(record) {
 }
 
 function needsCredentialUpdate(existing, candidate) {
-  if (hasSecret(candidate.password) && !hasSecret(existing.password)) return true;
+  if (existing.savePassword !== false && hasSecret(candidate.password) && !hasSecret(existing.password)) return true;
   if (!candidate.ssh || !existing.ssh) return false;
   return (hasSecret(candidate.ssh.password) && !hasSecret(existing.ssh.password))
     || (hasSecret(candidate.ssh.passphrase) && !hasSecret(existing.ssh.passphrase));
@@ -357,7 +484,7 @@ function needsCredentialUpdate(existing, candidate) {
 
 function fillMissingCredentials(existing, candidate) {
   let changed = false;
-  if (hasSecret(candidate.password) && !hasSecret(existing.password)) {
+  if (existing.savePassword !== false && hasSecret(candidate.password) && !hasSecret(existing.password)) {
     existing.password = candidate.password;
     changed = true;
   }
@@ -439,6 +566,7 @@ function previewImportConnections(configs) {
 
 function remove(id) {
   persist(loadRaw().filter((x) => x.id !== id));
+  sessionPasswords.delete(id);
 }
 
 // ---------------- 连接分组（支持空组持久化） ----------------
@@ -569,6 +697,7 @@ function saveAiConfig(cfg) {
 
 module.exports = {
   list, listPublic, getById, hydrateConfig, save, importConnections, previewImportConnections,
+  needsSessionPassword, setSessionPassword, clearSessionPassword, clearSessionPasswords,
   remove, listGroups, addGroup, renameGroup, removeGroup,
   getAiConfig, getAiConfigPublic, hydrateAiConfig, saveAiConfig, normalizeAiBaseUrl,
 };

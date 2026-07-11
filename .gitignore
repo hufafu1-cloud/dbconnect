@@ -3,3 +3,4 @@ release/
 shots/
 *.log
 .DS_Store
+.superpowers/

@@ -125,9 +125,9 @@ function toggleTheme() {
 async function showAbout() {
   const info = await window.api.app.info();
   openModal({
-    title: '关于 Datavia',
+    title: '关于 DBPanda',
     body: el('div', { style: { lineHeight: '2', fontSize: '13px', minWidth: '320px' } },
-      el('div', { style: { fontSize: '17px', fontWeight: '700', letterSpacing: '0.5px' } }, `Datavia`),
+      el('div', { style: { fontSize: '17px', fontWeight: '700', letterSpacing: '0.5px' } }, `DBPanda`),
       el('div', { style: { color: 'var(--text-muted)', marginTop: '-4px' } }, `数据之道 · v${info.version}`),
       el('div', { style: { color: 'var(--text-muted)' } }, 'Navicat 风格的数据库管理工具'),
       el('div', {}, `支持: MySQL / MariaDB · PostgreSQL · SQLite · SQL Server · ClickHouse · OceanBase`),
@@ -225,7 +225,7 @@ export async function runMenuAction(id) {
 function setupCloseGuard() {
   window.api.app.onCloseRequest(async () => {
     if (!anyDirty()) { window.api.app.confirmClose(); return; }
-    const ok = await confirmDialog('退出 Datavia', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
+    const ok = await confirmDialog('退出 DBPanda', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
     if (ok) window.api.app.confirmClose();
   });
 }

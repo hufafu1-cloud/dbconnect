@@ -116,7 +116,7 @@ async function dumpSql(ad, args, progress) {
   const w = (s) => ws.write(s + '\r\n');
   let totalRows = 0;
   try {
-    w('-- Datavia SQL 转储');
+    w('-- DBPanda SQL 转储');
     w(`-- 数据库: ${db || ''}${schema ? ' / ' + schema : ''}`);
     w(`-- 时间: ${new Date().toLocaleString('zh-CN')}`);
     w('');

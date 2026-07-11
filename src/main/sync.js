@@ -242,7 +242,7 @@ async function syncData(srcAd, dstAd, args, progress) {
   let ws = null;
   if (mode === 'script') {
     ws = fs.createWriteStream(file, { encoding: 'utf8' });
-    ws.write(`-- Datavia 数据同步脚本 ${new Date().toLocaleString('zh-CN')}\r\n\r\n`);
+    ws.write(`-- DBPanda 数据同步脚本 ${new Date().toLocaleString('zh-CN')}\r\n\r\n`);
   }
   const writeLn = (s) => ws && ws.write(s + '\r\n');
 

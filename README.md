@@ -1,6 +1,6 @@
-# Datavia — Navicat 风格的数据库管理工具
+# DBPanda — 专业数据库管理工具
 
-> **Datavia**（数据之道）· data + via（拉丁语「道路」）
+> **DBPanda** · 以熊猫为主题的专业桌面数据库管理工具
 
 一款可在 Windows 上安装运行的桌面数据库连接管理工具，界面与操作参考 Navicat 设计。
 基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等数据库。
@@ -22,10 +22,12 @@
 - **SSH 隧道**：所有网络型数据库均可经跳板机连接（密码 / 私钥文件认证，支持私钥口令），
   数据库主机/端口填写跳板机视角的内网地址；测试连接同样走隧道
 - SSH 首次连接会在主进程原生对话框中显示主机密钥 SHA256 指纹，须人工核验后才开始认证；
-  已信任指纹保存在 `%APPDATA%/Datavia/ssh-known-hosts.json`，指纹变化时默认拒绝，只有再次明确核验才会更新
-- 连接配置保存在本机（`%APPDATA%/Datavia/connections.json`）；数据库密码、SSH 密码、
-  私钥口令与 AI API Key 仅在主进程内解密，Renderer 只接收“是否已保存”标记。新凭据必须使用
+  已信任指纹保存在 `%APPDATA%/DBPanda/ssh-known-hosts.json`，指纹变化时默认拒绝，只有再次明确核验才会更新
+- 连接配置保存在本机（`%APPDATA%/DBPanda/connections.json`）；数据库密码、SSH 密码、
+  私钥口令与 AI API Key 仅在主进程内解密，Renderer 只接收脱敏的凭据状态标记。新凭据必须使用
   Electron safeStorage / Windows DPAPI；系统安全存储不可用时会拒绝落盘，而不会退化为明文/Base64。
+  数据库密码可取消“将数据库密码保存在本地”：此时密码仅用于本次连接，关闭连接或重启后再次打开会要求补输；
+  该选项不影响独立配置的 SSH 密码与私钥口令。
   已保存凭据同时绑定主机、端口、大小写敏感用户名、SSH 路由及 TLS/HTTPS 策略，目标变化时必须重输
 - SQL Server 支持加密连接与信任服务器证书选项；SQLite 文件必须经固定用途的系统对话框选择或新建，
   查询 SQL 禁止用 `ATTACH` / `VACUUM INTO` 绕过该本地文件边界
@@ -189,7 +191,7 @@ SQL Server 2022、ClickHouse 24.8 服务矩阵验证元数据、CRUD、高精度
 npm run dist
 ```
 
-输出 `release/Datavia-Setup-<版本>.exe`（NSIS 安装包，支持选择安装目录、创建桌面/开始菜单快捷方式）。
+输出 `release/DBPanda-Setup-<版本>.exe`（NSIS 安装包，支持选择安装目录、创建桌面/开始菜单快捷方式）。
 正式发布可通过 electron-builder 标准的 `CSC_LINK` / `CSC_KEY_PASSWORD` 环境变量注入代码签名证书；
 仓库不保存任何签名私钥。
 

@@ -288,7 +288,7 @@ async function createWriter(format, file, ctx) {
         setColumns(cols);
         const repeated = duplicates(true);
         if (repeated.length) throw new Error(`SQL INSERT 无法可靠回放重复列名：${repeated.join(', ')}；请改用 CSV 或 XLSX`);
-        await writeLn(`-- 由 Datavia 导出于 ${new Date().toLocaleString('zh-CN')}`);
+        await writeLn(`-- 由 DBPanda 导出于 ${new Date().toLocaleString('zh-CN')}`);
         await writeLn('');
       },
       async row(r) {
@@ -333,7 +333,7 @@ function mdCell(s) {
 }
 
 function tempPath(file) {
-  return `${file}.datavia-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`;
+  return `${file}.dbpanda-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`;
 }
 
 async function promoteTemp(temp, file) {
@@ -341,7 +341,7 @@ async function promoteTemp(temp, file) {
     await fs.promises.rename(temp, file);
   } catch (err) {
     if (!['EEXIST', 'EPERM'].includes(err && err.code)) throw err;
-    const backup = `${file}.datavia-backup-${crypto.randomBytes(6).toString('hex')}.tmp`;
+    const backup = `${file}.dbpanda-backup-${crypto.randomBytes(6).toString('hex')}.tmp`;
     let backedUp = false;
     try {
       await fs.promises.rename(file, backup);

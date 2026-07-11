@@ -27,7 +27,7 @@ contextBridge.exposeInMainWorld('api', {
     remove: (name) => inv('groups:remove', { name }),
   },
   db: {
-    open: (connId) => inv('db:open', connId),
+    open: (connId, password) => inv('db:open', password === undefined ? { connId } : { connId, password }),
     close: (connId) => inv('db:close', connId),
     databases: (connId) => inv('db:databases', connId),
     schemas: (connId, db) => inv('db:schemas', { connId, db }),

@@ -1,6 +1,6 @@
-/* ============ Datavia — Navicat 风格界面（支持浅色/深色主题） ============ */
+/* ============ DBPanda — 专业数据库管理界面（支持浅色/深色主题） ============ */
 :root {
-  /* Datavia 品牌靛蓝 */
+  /* DBPanda 品牌色 */
   --accent: #4b57d6;
   --accent-dark: #3a46bb;
   --accent-light: #ebedfc;
@@ -94,12 +94,6 @@ body {
   background: var(--chrome);
   border-bottom: 1px solid var(--border-light);
   flex: 0 0 auto; user-select: none;
-}
-.menu-brand {
-  font-size: 14px; font-weight: 700; letter-spacing: 0.4px;
-  color: var(--accent-dark); padding: 0 14px 0 4px; margin-right: 4px;
-  border-right: 1px solid var(--border-light); cursor: default;
-  user-select: none;
 }
 .menu-item {
   padding: 5px 14px;
@@ -205,8 +199,8 @@ body {
 }
 .tree-twisty.open { transform: rotate(90deg); }
 .tree-twisty.leaf { visibility: hidden; }
-.tree-icon { width: 16px; height: 16px; flex: 0 0 auto; display: inline-flex; }
-.tree-icon svg { width: 16px; height: 16px; }
+.tree-icon { width: 18px; height: 18px; flex: 0 0 auto; display: inline-flex; }
+.tree-icon svg { width: 18px; height: 18px; }
 .tree-label { overflow: hidden; text-overflow: ellipsis; }
 .tree-meta { color: var(--text-muted); font-size: 11px; margin-left: 4px; }
 .tree-children { display: none; }
@@ -216,7 +210,7 @@ body {
 .tree-row .tree-icon { position: relative; }
 .tree-row .tree-icon svg { transition: filter 0.15s, opacity 0.15s; }
 /* 未打开连接：保留数据库类型颜色（仅轻微压暗），靠状态灯+文字区分开/关 */
-.conn-closed > .tree-row .tree-icon svg { opacity: 0.78; }
+.conn-closed > .tree-row .tree-icon svg { filter: grayscale(1); opacity: 0.52; }
 /* 库/模式未展开：灰化压暗（这些无需类型色） */
 .tree-row.dim .tree-icon svg { filter: grayscale(1); opacity: 0.5; }
 .conn-closed > .tree-row .tree-label,
@@ -225,14 +219,14 @@ body {
 .conn-open > .tree-row .tree-label { font-weight: 700; }
 /* 连接状态指示灯（连接图标右下角）：关闭=灰点，打开=绿点(辉光)，始终清晰 */
 .tree-node[data-conn] > .tree-row .tree-icon::after {
-  content: ""; position: absolute; right: -3px; bottom: -3px;
-  width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
-  border: 2px solid var(--panel); background: #9aa1ab;
+  content: ""; position: absolute; right: -1px; bottom: -1px;
+  width: 6px; height: 6px; border-radius: 50%; box-sizing: border-box;
+  border: 1.5px solid #a7adb6; background: var(--panel);
 }
 /* 注意：基础灰点规则带 [data-conn] 属性，优先级高，绿点覆盖须同等或更高优先级 */
 .tree-node[data-conn].conn-open > .tree-row .tree-icon::after {
-  background: #21c463; border-color: var(--panel);
-  box-shadow: 0 0 5px 1px rgba(33, 196, 99, 0.75);
+  background: #20b95a; border-color: var(--panel);
+  box-shadow: 0 0 0 1px #20b95a;
 }
 
 /* ---------- 标签页 ---------- */
@@ -579,6 +573,10 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .ctx-item.disabled { opacity: 0.4; cursor: default; }
 .ctx-item.disabled:hover { background: transparent; }
 .ctx-item.danger { color: var(--danger); }
+.ctx-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 14px; width: 14px; height: 14px;
+}
 .ctx-item svg { width: 14px; height: 14px; }
 .ctx-sep { height: 1px; background: var(--border-light); margin: 4px 8px; }
 
@@ -611,6 +609,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   padding: 12px 16px; border-top: 1px solid var(--border-light);
 }
 .modal-foot .spring { flex: 1; }
+.modal-foot .btn { flex-shrink: 0; white-space: nowrap; }
 
 /* Navicat NCX connection import preview */
 .ncx-import { min-width: 0; }
@@ -645,7 +644,7 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
 /* 连接表单 */
-.form-grid { display: grid; grid-template-columns: 92px 1fr; gap: 10px 12px; align-items: center; min-width: 430px; }
+.form-grid { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px 12px; align-items: center; min-width: 430px; }
 .form-grid label { text-align: right; color: var(--text-muted); font-size: 12.5px; }
 .form-grid input[type="text"], .form-grid input[type="password"], .form-grid input[type="number"], .form-grid select {
   padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px;
@@ -654,8 +653,20 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .form-grid input:focus, .form-grid select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-light); }
 .form-grid .row-flex { display: flex; gap: 8px; align-items: center; }
 .form-grid .row-flex input { flex: 1; }
+.form-grid .password-row > input[type="password"] { min-width: 0; }
+.form-grid .password-save-check {
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  color: var(--text); font-size: 12px; text-align: left; white-space: nowrap;
+}
+.form-grid .password-save-check input { flex: 0 0 auto; width: 14px; height: 14px; }
 .form-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); }
-.test-result { font-size: 12.5px; margin-left: 4px; }
+.test-result {
+  flex: 1 1 0; min-width: 0; max-height: 72px; overflow: auto;
+  margin-left: 4px; padding-right: 4px;
+  font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.test-result:empty { display: none; }
+.test-result:not(:empty) + .spring { display: none; }
 .test-result.ok { color: var(--green); }
 .test-result.err { color: var(--danger); }
 
@@ -675,6 +686,12 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; outline: none; font-size: 12.5px;
 }
 .modal-body select:focus, .modal-body input:focus { border-color: var(--accent); }
+
+.password-prompt { width: 360px; max-width: 70vw; }
+.password-prompt-message { margin-bottom: 12px; color: var(--text-muted); font-size: 12.5px; line-height: 1.6; }
+.password-prompt .row-flex { display: flex; align-items: center; gap: 8px; }
+.password-prompt .row-flex input { flex: 1 1 auto; min-width: 0; padding: 7px 10px; }
+.password-prompt .row-flex .btn { flex: 0 0 auto; }
 
 /* 单元格查看器 */
 .viewer-text {

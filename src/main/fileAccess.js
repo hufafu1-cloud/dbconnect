@@ -123,7 +123,7 @@ async function sha256File(p) {
 async function snapshot(p, expectedSha256) {
   assertAllowed(p, 'read');
   const electronApp = require('electron').app;
-  const dir = path.join(electronApp.getPath('temp'), 'Datavia-operation-snapshots');
+  const dir = path.join(electronApp.getPath('temp'), 'DBPanda-operation-snapshots');
   await fs.promises.mkdir(dir, { recursive: true });
   if (!snapshotsPruned) {
     snapshotsPruned = true;

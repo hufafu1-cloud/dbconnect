@@ -50,14 +50,30 @@ const cylinder = (color) => svg(
 );
 
 export const icons = {
-  // 连接类型：各数据库标志性原创图标（自绘通用意象，非官方 LOGO）
-  mysql: svg(`<path d="M1.6 11.9c2.7-.3 4.8-1.8 6.3-4 1.4-1.9 3.1-3.3 5.5-3.5.6 0 1.1.1 1.5.6-1.2.1-2.2.8-2.9 1.9 1.4.3 2.5 1.4 2.7 2.9-1.1-.9-2.4-1.1-3.6-.5-.6-1.3-1.7-1.8-3-1.5-1.5 2.1-3.5 4-7 4.4z" fill="#00618a"/><path d="M7.7 7.4 9.6 4.1l.5 2.8z" fill="#00618a"/><circle cx="12.6" cy="5.6" r=".5" fill="#fff"/>`),
-  postgres: svg(`<path d="M8 2.5c2.5 0 4.3 1.8 4.3 4.1 0 1.2-.5 2.3-1.4 3.1.2.9 0 2-.8 2.6-.6-.3-1-1-1-1.8-.6.2-1.3.2-1.9.1-.1.8-.5 1.6-1.2 2-.7-.5-1-1.4-.8-2.2-1.4-.7-2.4-2.2-2.4-3.8 0-2.4 1.8-4.1 4.2-4.1z" fill="#31618c"/><circle cx="9.9" cy="6.3" r=".75" fill="#fff"/><circle cx="9.9" cy="6.3" r=".32" fill="#31618c"/><path d="M5.9 10.1c-.3 1.1-.2 2.3.3 3.3" stroke="#31618c" stroke-width="1.4" fill="none" stroke-linecap="round"/>`),
-  sqlite: svg(`<path d="M12.9 2.7C9.1 3.1 5.3 5.9 3.8 10.1l-1.1 3.1 1.4-.8c3-1 6.7-3 8.3-6.2.8-1.6.9-3 .5-3.5z" fill="#1aa6c0"/><path d="M11.8 4 4.2 12" stroke="#fff" stroke-width=".85" stroke-linecap="round"/><path d="M9.4 5.1l.9.9M7.2 7l.9.9M5.3 8.9l.9.9" stroke="#fff" stroke-width=".6" stroke-linecap="round"/>`),
-  mssql: svg(`<rect x="2.4" y="2.7" width="11.2" height="3.1" rx=".9" fill="#c63a2b"/><rect x="2.4" y="6.45" width="11.2" height="3.1" rx=".9" fill="#c63a2b"/><rect x="2.4" y="10.2" width="11.2" height="3.1" rx=".9" fill="#c63a2b"/><circle cx="4.4" cy="4.25" r=".62" fill="#fff"/><circle cx="4.4" cy="8" r=".62" fill="#fff"/><circle cx="4.4" cy="11.75" r=".62" fill="#fff"/>`),
-  clickhouse: svg(`<rect x="2.3" y="7.6" width="2.4" height="6.4" rx=".3" fill="#f4b400"/><rect x="5.3" y="4.4" width="2.4" height="9.6" rx=".3" fill="#f4b400"/><rect x="8.3" y="9.4" width="2.4" height="4.6" rx=".3" fill="#f4b400"/><rect x="11.3" y="2.2" width="2.4" height="11.8" rx=".3" fill="#f4b400"/>`),
-  oceanbase: svg(`<path d="M1.6 6c1.4-1.6 2.9-1.6 4.3 0s2.9 1.6 4.3 0 2.9-1.6 4.2-.5" stroke="#15a34a" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M1.6 9.6c1.4-1.6 2.9-1.6 4.3 0s2.9 1.6 4.3 0 2.9-1.6 4.2-.5" stroke="#15a34a" stroke-width="1.6" fill="none" stroke-linecap="round"/>`),
-  oboracle: svg(`<path d="M1.6 6c1.4-1.6 2.9-1.6 4.3 0s2.9 1.6 4.3 0 2.9-1.6 4.2-.5" stroke="#ea580c" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M1.6 9.6c1.4-1.6 2.9-1.6 4.3 0s2.9 1.6 4.3 0 2.9-1.6 4.2-.5" stroke="#ea580c" stroke-width="1.6" fill="none" stroke-linecap="round"/>`),
+  // 数据库类型：参考各产品的典型色彩与轮廓，针对 14–18px 场景重新简化绘制。
+  mysql: svg(`<path d="M1.1 10.9c2.2.2 4-.5 5.4-2.2.8-1 1.3-2.2 2.5-3.1 1.5-1.1 3.5-1.4 5.2-.6-1.2.2-2.1.8-2.7 1.7 1.5.2 2.7 1.1 3.4 2.4-1.3-.6-2.6-.6-3.7.1-.7-1.2-1.8-1.8-3.1-1.5-1.4 2.5-3.6 3.8-7 3.2z" fill="#00758f"/>
+    <path d="M7.7 7.8 9.2 2.2l1.5 4.2z" fill="#f29111"/>
+    <path d="M3 11c1.5 1 3.2 1.4 5 1.2" stroke="#00758f" stroke-width="1.25" fill="none" stroke-linecap="round"/>
+    <circle cx="12.2" cy="5.9" r=".55" fill="#fff"/><circle cx="12.2" cy="5.9" r=".25" fill="#163a4a"/>`),
+  postgres: svg(`<path d="M8 1.4c3.7 0 6.1 2.2 6.1 5.4 0 2.2-1 3.8-2.6 4.7.2 1.5-.3 2.7-1.5 3.3-1.1-.7-1.5-2.1-1.1-3.6-.6.1-1.2.1-1.8 0-.2 1.5-.8 2.6-2 3.2-1-.8-1.2-2.1-.7-3.4-1.6-.9-2.5-2.5-2.5-4.6C1.9 3.4 4.3 1.4 8 1.4z" fill="#336791" stroke="#24547b" stroke-width=".45" stroke-linejoin="round"/>
+    <path d="M7.2 7.1c.6 1.5 2.1 1.8 3.2.8.2 2-.3 3.6-1.5 4.8" stroke="#fff" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+    <path d="M4.3 6.3c.5-1.7 1.5-2.5 3-2.5s2.5.8 3 2.5" stroke="#fff" stroke-width=".85" fill="none" stroke-linecap="round"/>
+    <circle cx="5.7" cy="6.2" r=".62" fill="#fff"/><circle cx="9.5" cy="6.2" r=".62" fill="#fff"/>`),
+  sqlite: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#0f9fbd"/>
+    <path d="M12.7 3.1C9.4 3.4 6.1 5.8 4.8 9.4l-1.1 3.5 1.8-1.1c2.7-.9 5.8-2.8 7.1-5.6.7-1.4.7-2.6.1-3.1z" fill="#fff"/>
+    <path d="M11.6 4.4 4.6 12" stroke="#08758b" stroke-width=".9" stroke-linecap="round"/>
+    <path d="m9.4 5.4 1 1M7.4 7.3l1 1M5.7 9.2l.9.9" stroke="#0f9fbd" stroke-width=".7" stroke-linecap="round"/>`),
+  mssql: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#c43b32"/>
+    <path d="m3.1 5.1 6.7-2.2 3.1 1.4-6.7 2.2-3.1-1.4zm0 3.2 6.7-2.2 3.1 1.4-6.7 2.2-3.1-1.4zm0 3.2 6.7-2.2 3.1 1.4-6.7 2.2-3.1-1.4z" fill="#fff"/>`),
+  clickhouse: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#1f1f1f"/>
+    <rect x="3" y="7.4" width="1.8" height="4.8" rx=".35" fill="#ffcc01"/><rect x="5.7" y="4.2" width="1.8" height="8" rx=".35" fill="#ffcc01"/>
+    <rect x="8.4" y="6" width="1.8" height="6.2" rx=".35" fill="#ffcc01"/><rect x="11.1" y="2.8" width="1.8" height="9.4" rx=".35" fill="#ffcc01"/>`),
+  oceanbase: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#1677ff"/>
+    <path d="M2.8 6.2c1.2-1.4 2.5-1.4 3.7 0s2.5 1.4 3.7 0 2.2-1.3 3.1-.5M2.8 9.6c1.2-1.4 2.5-1.4 3.7 0s2.5 1.4 3.7 0 2.2-1.3 3.1-.5" stroke="#fff" stroke-width="1.45" fill="none" stroke-linecap="round"/>
+    <circle cx="12.3" cy="3.5" r="1.25" fill="#38d9a9"/>`),
+  oboracle: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#e9572b"/>
+    <circle cx="5.1" cy="8" r="2.45" stroke="#fff" stroke-width="1.45"/>
+    <path d="M9 5.5v5M9 5.5h1.6a1.35 1.35 0 0 1 0 2.7H9m0 0h1.9a1.4 1.4 0 0 1 0 2.8H9" stroke="#fff" stroke-width="1.25" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`),
   connection: cylinder('#5b6470'),
   database: svg(`<ellipse cx="8" cy="3.8" rx="5.4" ry="2.2" fill="#3fa34d"/>
     <path d="M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8" stroke="#3fa34d" stroke-width="1.6"/>

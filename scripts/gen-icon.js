@@ -1,138 +1,237 @@
-// 生成应用图标 assets/icon.png + assets/icon.ico（256x256，蓝底白色数据库圆柱）
-// 仅使用 Node 内置模块，无需任何依赖。
+// Generate DBPanda Windows assets from the exact user-approved panda artwork.
+// The artwork itself is never redrawn: this script only crops, resizes,
+// and packages it as PNG/ICO using Node built-ins.
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
-const W = 256, H = 256;
-const rgba = Buffer.alloc(W * H * 4); // 默认全透明
+const ICO_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
+const OUTPUT_PNG_SIZE = 1024;
+const SOURCE_PATH = path.join(__dirname, '..', 'assets', 'dbpanda-logo.png');
 
-// ---------- 配色与几何（Datavia：靛蓝底 + 白色「数据之道」节点路径） ----------
-const TOP = [112, 126, 248];   // 顶部靛蓝
-const BOT = [60, 50, 182];     // 底部深靛
-const RECT = { x0: 8, y0: 8, x1: 247, y1: 247, r: 54 }; // 圆角矩形
-const NODES = [                // 自左下向右上的三个节点（上行=向前/成长）
-  { x: 72, y: 186, r: 21 },
-  { x: 128, y: 122, r: 25 },
-  { x: 186, y: 74, r: 19 },
-];
-const PATH_HW = 12;            // 连接路径半宽
-const DOT = [60, 50, 182, 255]; // 节点内的靛蓝小圆点（端口感）
+// Square crop containing only the panda-plus-database emblem. The complete
+// transparent wordmark remains available separately as assets/dbpanda-logo.png.
+const BADGE = {
+  cropX: 350,
+  cropY: 150,
+  cropSize: 550,
+};
 
-function inRoundRect(x, y) {
-  const { x0, y0, x1, y1, r } = RECT;
-  if (x < x0 || x > x1 || y < y0 || y > y1) return false;
-  if (x >= x0 + r && x <= x1 - r) return true;
-  if (y >= y0 + r && y <= y1 - r) return true;
-  const cx = x < x0 + r ? x0 + r : x1 - r;
-  const cy = y < y0 + r ? y0 + r : y1 - r;
-  return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
+function clamp(value, min = 0, max = 1) {
+  return Math.max(min, Math.min(max, value));
 }
-function distSeg(px, py, ax, ay, bx, by) {
-  const dx = bx - ax, dy = by - ay;
-  const len2 = dx * dx + dy * dy || 1;
-  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
 }
-function onPath(x, y) {
-  for (let i = 0; i < NODES.length - 1; i++) {
-    if (distSeg(x, y, NODES[i].x, NODES[i].y, NODES[i + 1].x, NODES[i + 1].y) <= PATH_HW) return true;
-  }
-  return false;
-}
-function nodeHit(x, y) {
-  for (const n of NODES) {
-    const d2 = (x - n.x) ** 2 + (y - n.y) ** 2;
-    if (d2 <= (n.r * 0.42) ** 2) return 'dot';   // 内部靛蓝小圆点
-    if (d2 <= n.r * n.r) return 'ring';          // 白色节点
-  }
-  return null;
-}
-// 取某采样点颜色（含 alpha），painter 顺序：节点点 > 节点白 > 路径白 > 渐变底 > 透明
-function sample(x, y) {
-  if (!inRoundRect(x, y)) return [0, 0, 0, 0];
-  const nh = nodeHit(x, y);
-  if (nh === 'dot') return DOT;
-  if (nh === 'ring') return [255, 255, 255, 255];
-  if (onPath(x, y)) return [255, 255, 255, 255];
-  const t = (y - RECT.y0) / (RECT.y1 - RECT.y0);
-  return [
-    Math.round(TOP[0] + (BOT[0] - TOP[0]) * t),
-    Math.round(TOP[1] + (BOT[1] - TOP[1]) * t),
-    Math.round(TOP[2] + (BOT[2] - TOP[2]) * t),
-    255,
-  ];
-}
-// 3x3 超采样抗锯齿（预乘 alpha，边缘平滑）
-for (let py = 0; py < H; py++) {
-  for (let px = 0; px < W; px++) {
-    let pr = 0, pg = 0, pb = 0, pa = 0;
-    for (let sy = 0; sy < 3; sy++) {
-      for (let sx = 0; sx < 3; sx++) {
-        const c = sample(px + (sx + 0.5) / 3, py + (sy + 0.5) / 3);
-        pr += c[0] * c[3]; pg += c[1] * c[3]; pb += c[2] * c[3]; pa += c[3];
-      }
+
+function decodePng(buffer) {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (!signature.every((value, index) => buffer[index] === value)) throw new Error('Invalid PNG signature');
+  let position = 8;
+  let width;
+  let height;
+  let bitDepth;
+  let colorType;
+  let interlace;
+  const idat = [];
+  while (position < buffer.length) {
+    const length = buffer.readUInt32BE(position);
+    const type = buffer.toString('ascii', position + 4, position + 8);
+    const data = buffer.subarray(position + 8, position + 8 + length);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+      interlace = data[12];
+    } else if (type === 'IDAT') {
+      idat.push(data);
+    } else if (type === 'IEND') {
+      break;
     }
-    const i = (py * W + px) * 4;
-    rgba[i] = pa ? Math.round(pr / pa) : 0;
-    rgba[i + 1] = pa ? Math.round(pg / pa) : 0;
-    rgba[i + 2] = pa ? Math.round(pb / pa) : 0;
-    rgba[i + 3] = Math.round(pa / 9);
+    position += length + 12;
   }
+  if (bitDepth !== 8 || ![2, 6].includes(colorType) || interlace !== 0) {
+    throw new Error(`Unsupported source PNG format: depth=${bitDepth}, color=${colorType}, interlace=${interlace}`);
+  }
+
+  const channels = colorType === 2 ? 3 : 4;
+  const stride = width * channels;
+  const filtered = zlib.inflateSync(Buffer.concat(idat));
+  const pixels = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (stride + 1);
+    const filter = filtered[rowStart];
+    for (let x = 0; x < stride; x++) {
+      const raw = filtered[rowStart + 1 + x];
+      const output = y * stride + x;
+      const left = x >= channels ? pixels[output - channels] : 0;
+      const up = y > 0 ? pixels[output - stride] : 0;
+      const upLeft = y > 0 && x >= channels ? pixels[output - stride - channels] : 0;
+      let value;
+      if (filter === 0) value = raw;
+      else if (filter === 1) value = raw + left;
+      else if (filter === 2) value = raw + up;
+      else if (filter === 3) value = raw + Math.floor((left + up) / 2);
+      else if (filter === 4) value = raw + paeth(left, up, upLeft);
+      else throw new Error(`Unsupported PNG filter: ${filter}`);
+      pixels[output] = value & 0xff;
+    }
+  }
+
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let i = 0, j = 0; i < pixels.length; i += channels, j += 4) {
+    rgba[j] = pixels[i];
+    rgba[j + 1] = pixels[i + 1];
+    rgba[j + 2] = pixels[i + 2];
+    rgba[j + 3] = channels === 4 ? pixels[i + 3] : 255;
+  }
+  return { width, height, rgba };
 }
 
-// ---------- PNG 编码 ----------
+function sourcePixel(image, x, y) {
+  const x0 = Math.max(0, Math.min(image.width - 1, Math.floor(x)));
+  const y0 = Math.max(0, Math.min(image.height - 1, Math.floor(y)));
+  const x1 = Math.min(image.width - 1, x0 + 1);
+  const y1 = Math.min(image.height - 1, y0 + 1);
+  const tx = clamp(x - x0);
+  const ty = clamp(y - y0);
+  const out = [0, 0, 0, 0];
+  for (let c = 0; c < 4; c++) {
+    const a = image.rgba[(y0 * image.width + x0) * 4 + c];
+    const b = image.rgba[(y0 * image.width + x1) * 4 + c];
+    const d = image.rgba[(y1 * image.width + x0) * 4 + c];
+    const e = image.rgba[(y1 * image.width + x1) * 4 + c];
+    out[c] = (a * (1 - tx) + b * tx) * (1 - ty) + (d * (1 - tx) + e * tx) * ty;
+  }
+  return out;
+}
+
+function approvedArtworkSample(image, u, v) {
+  const x = BADGE.cropX + u * BADGE.cropSize;
+  const y = BADGE.cropY + v * BADGE.cropSize;
+  return sourcePixel(image, x, y);
+}
+
 const CRC_TABLE = (() => {
-  const t = new Int32Array(256);
+  const table = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
     let c = n;
     for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-    t[n] = c;
+    table[n] = c >>> 0;
   }
-  return t;
+  return table;
 })();
-function crc32(buf) {
+
+function crc32(buffer) {
   let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  for (const byte of buffer) c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
-function chunk(type, data) {
-  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
-  const typeBuf = Buffer.from(type, 'ascii');
-  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])));
-  return Buffer.concat([len, typeBuf, data, crc]);
+
+function pngChunk(type, data) {
+  const typeBuffer = Buffer.from(type, 'ascii');
+  const length = Buffer.alloc(4);
+  const crc = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])));
+  return Buffer.concat([length, typeBuffer, data, crc]);
 }
-function encodePNG(w, h, pixels) {
-  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function encodePng(width, height, pixels) {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
-  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
-  const stride = w * 4;
-  const raw = Buffer.alloc((stride + 1) * h);
-  for (let y = 0; y < h; y++) {
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
     raw[y * (stride + 1)] = 0;
     pixels.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
   }
-  const idat = zlib.deflateSync(raw, { level: 9 });
-  return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))]);
+  return Buffer.concat([
+    signature,
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
 }
 
-const png = encodePNG(W, H, rgba);
+function loadApprovedArtwork() {
+  const image = decodePng(fs.readFileSync(SOURCE_PATH));
+  if (image.width !== 1254 || image.height !== 1254) throw new Error('Approved DBPanda logo must remain 1254x1254');
+  return image;
+}
 
-// ---------- ICO 封装（单个 256px PNG 条目） ----------
-const header = Buffer.from([0, 0, 1, 0, 1, 0]);
-const entry = Buffer.alloc(16);
-entry[0] = 0; // 256 宽
-entry[1] = 0; // 256 高
-entry[4] = 1; // planes
-entry[6] = 32; // bpp
-entry.writeUInt32LE(png.length, 8);
-entry.writeUInt32LE(22, 12);
-const ico = Buffer.concat([header, entry, png]);
+function renderPng(size, image = loadApprovedArtwork()) {
+  const pixels = Buffer.alloc(size * size * 4);
+  const supersampling = size <= 64 ? 4 : size <= 256 ? 2 : 1;
+  const samples = supersampling * supersampling;
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      let pr = 0;
+      let pg = 0;
+      let pb = 0;
+      let pa = 0;
+      for (let sy = 0; sy < supersampling; sy++) {
+        for (let sx = 0; sx < supersampling; sx++) {
+          const color = approvedArtworkSample(
+            image,
+            (px + (sx + 0.5) / supersampling) / size,
+            (py + (sy + 0.5) / supersampling) / size,
+          );
+          pr += color[0] * color[3];
+          pg += color[1] * color[3];
+          pb += color[2] * color[3];
+          pa += color[3];
+        }
+      }
+      const offset = (py * size + px) * 4;
+      pixels[offset] = pa ? Math.round(pr / pa) : 0;
+      pixels[offset + 1] = pa ? Math.round(pg / pa) : 0;
+      pixels[offset + 2] = pa ? Math.round(pb / pa) : 0;
+      pixels[offset + 3] = Math.round(pa / samples);
+    }
+  }
+  return encodePng(size, size, pixels);
+}
 
-const dir = path.join(__dirname, '..', 'assets');
-fs.mkdirSync(dir, { recursive: true });
-fs.writeFileSync(path.join(dir, 'icon.png'), png);
-fs.writeFileSync(path.join(dir, 'icon.ico'), ico);
-console.log('icon.png', png.length, 'bytes; icon.ico', ico.length, 'bytes');
+function encodeIco(images) {
+  const header = Buffer.alloc(6);
+  header.writeUInt16LE(1, 2);
+  header.writeUInt16LE(images.length, 4);
+  const entries = Buffer.alloc(images.length * 16);
+  let offset = 6 + entries.length;
+  images.forEach(({ size, png }, index) => {
+    const entry = index * 16;
+    entries[entry] = size === 256 ? 0 : size;
+    entries[entry + 1] = size === 256 ? 0 : size;
+    entries[entry + 4] = 1;
+    entries[entry + 6] = 32;
+    entries.writeUInt32LE(png.length, entry + 8);
+    entries.writeUInt32LE(offset, entry + 12);
+    offset += png.length;
+  });
+  return Buffer.concat([header, entries, ...images.map(({ png }) => png)]);
+}
+
+function generate(outputDir = path.join(__dirname, '..', 'assets')) {
+  fs.mkdirSync(outputDir, { recursive: true });
+  const image = loadApprovedArtwork();
+  const png = renderPng(OUTPUT_PNG_SIZE, image);
+  const icoImages = ICO_SIZES.map((size) => ({ size, png: renderPng(size, image) }));
+  fs.writeFileSync(path.join(outputDir, 'icon.png'), png);
+  fs.writeFileSync(path.join(outputDir, 'icon.ico'), encodeIco(icoImages));
+  console.log(`Generated exact approved DBPanda emblem: ${OUTPUT_PNG_SIZE}px PNG, ICO [${ICO_SIZES.join(', ')}]`);
+}
+
+if (require.main === module) generate();
+
+module.exports = { BADGE, ICO_SIZES, OUTPUT_PNG_SIZE, SOURCE_PATH, decodePng, encodeIco, generate, renderPng };

@@ -1,22 +1,26 @@
 {
-  "name": "datavia",
-  "productName": "Datavia",
-  "version": "2.5.1",
-  "description": "Datavia — Navicat 风格的数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
+  "name": "dbpanda",
+  "productName": "DBPanda",
+  "version": "2.5.2",
+  "description": "DBPanda — 专业数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
   "main": "src/main/main.js",
-  "author": "Datavia",
+  "author": "DBPanda",
   "license": "MIT",
   "packageManager": "npm@9.6.5",
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",
     "selftest": "electron . --selftest",
-    "verify": "npm run selftest && npm run smoke",
+    "brand:test": "node scripts/test-brand-assets.js && node scripts/test-product-brand.js",
+    "ui:test": "node scripts/test-dialog-layout.js",
+    "verify": "npm run brand:test && npm run ui:test && npm run selftest && npm run smoke",
     "integration": "node scripts/integration-db.js",
     "demo": "electron . --demo",
     "icon": "node scripts/gen-icon.js",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win",
+    "predist": "npm run icon",
+    "dist": "node scripts/build-release.js",
+    "release:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1",
     "postinstall": "electron-builder install-app-deps || echo skip-native-rebuild"
   },
   "devDependencies": {
@@ -38,8 +42,8 @@
     "ssh2": "^1.17.0"
   },
   "build": {
-    "appId": "com.datavia.app",
-    "productName": "Datavia",
+    "appId": "com.dbpanda.app",
+    "productName": "DBPanda",
     "directories": {
       "output": "release"
     },
@@ -70,7 +74,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Datavia"
+      "shortcutName": "DBPanda"
     }
   }
 }

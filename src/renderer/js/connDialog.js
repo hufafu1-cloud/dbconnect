@@ -110,18 +110,26 @@ export function openConnDialog(existing, presetType, presetGroup) {
       f.host = field('text', cfg.host || 'localhost');
       f.port = field('number', cfg.port || d.port);
       f.user = field('text', cfg.user !== undefined && cfg.user !== '' ? cfg.user : d.user);
-      f.password = field('password', '', cfg.hasPassword ? '已安全保存；留空保持不变' : '');
+      f.password = field('password', '', cfg.hasPassword
+        ? '已安全保存；留空保持不变'
+        : (cfg.hasSessionPassword ? '本次会话可用；留空保持不变' : ''));
       f.passwordDirty = false;
       f.password.addEventListener('input', () => { f.passwordDirty = true; });
+      f.savePassword = el('input', { type: 'checkbox' });
+      f.savePassword.checked = cfg.savePassword !== false;
       const showPw = el('button', { class: 'btn', tabIndex: -1, onClick: () => {
         f.password.type = f.password.type === 'password' ? 'text' : 'password';
       } }, '👁');
+      const savePasswordOption = el('label', {
+        class: 'password-save-check',
+        title: '取消勾选后，密码只用于本次连接，关闭连接后需重新输入',
+      }, f.savePassword, el('span', {}, '将数据库密码保存在本地'));
       f.database = field('text', cfg.database !== undefined && cfg.database !== '' ? cfg.database : d.database,
         t === 'mysql' ? '（可选）初始数据库' : '初始数据库');
       add('主机', f.host);
       add('端口', f.port);
       add('用户名', f.user);
-      add('密码', el('div', { class: 'row-flex' }, f.password, showPw));
+      add('密码', el('div', { class: 'row-flex password-row' }, f.password, showPw, savePasswordOption));
       add('初始数据库', f.database);
       if (t === 'mssql') {
         f.encrypt = el('input', { type: 'checkbox' });
@@ -227,7 +235,8 @@ export function openConnDialog(existing, presetType, presetGroup) {
       out.host = f.host.value.trim() || 'localhost';
       out.port = Number(f.port.value) || TYPE_DEFAULTS[t].port;
       out.user = f.user.value.trim();
-      if (!isEdit || f.passwordDirty || !cfg.hasPassword) out.password = f.password.value;
+      out.savePassword = f.savePassword.checked;
+      if (!isEdit || f.passwordDirty || (!cfg.hasPassword && cfg.savePassword !== false)) out.password = f.password.value;
       out.database = f.database.value.trim();
       if (t === 'mssql') out.options = { encrypt: f.encrypt.checked, trustCert: f.trustCert.checked };
       if (t === 'clickhouse') out.options = { https: f.https.checked };
@@ -309,9 +318,16 @@ export function openConnDialog(existing, presetType, presetGroup) {
                 state.open.delete(saved.id);
                 emit('conn-closed', { connId: saved.id });
               }
+              const shouldOpen = !state.open.has(saved.id);
               await reloadConnections();
-              toast.success(isEdit ? '连接已更新' : '连接已创建');
               m.close();
+              toast.success(shouldOpen
+                ? (isEdit ? '连接已更新，正在打开…' : '连接已创建，正在打开…')
+                : '连接已更新');
+              if (shouldOpen) {
+                const { openConnectionById } = await import('./tree.js');
+                await openConnectionById(saved.id);
+              }
             } catch (e) {
               toast.error(e.message);
             } finally {

@@ -380,7 +380,7 @@ function hasClickHouseFormatClause(sql) {
 
 /**
  * SQLite can reach files outside the selected database through ATTACH and
- * VACUUM ... INTO. Datavia deliberately keeps arbitrary SQL inside the one
+ * VACUUM ... INTO. DBPanda deliberately keeps arbitrary SQL inside the one
  * database chosen through the native connection dialog.
  */
 function hasSQLiteExternalFileClause(sql) {

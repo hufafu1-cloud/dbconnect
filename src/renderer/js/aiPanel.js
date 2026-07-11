@@ -166,7 +166,7 @@ function createPanel() {
   }
 
   function systemPrompt() {
-    return `你是 Datavia 数据库客户端内置的 AI 助手，精通 SQL 与数据库性能优化。当前数据库类型：${dialect()}。\n`
+    return `你是 DBPanda 数据库客户端内置的 AI 助手，精通 SQL 与数据库性能优化。当前数据库类型：${dialect()}。\n`
       + '回答要求：\n'
       + '1. 用简体中文，简洁、专业、可执行。\n'
       + `2. 输出 SQL 时务必放进 \`\`\`sql 代码块，并贴合 ${dialect()} 方言。\n`
