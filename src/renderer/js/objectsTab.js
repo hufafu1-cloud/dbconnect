@@ -85,6 +85,10 @@ export function initObjectsTab() {
   on('objects-changed', (t) => {
     if (current && t.connId === current.connId && t.db === current.db) load(true);
   });
+  // 连接列表在应用启动后异步加载；概览必须随之刷新，不能保留初始化时的 0。
+  on('connections-changed', () => {
+    if (!current) renderWorkspaceOverview();
+  });
   on('queries-changed', () => { if (currentKind === 'query') load(false); });
   on('conn-closed', (t) => {
     if (current && current.connId === t.connId) {
