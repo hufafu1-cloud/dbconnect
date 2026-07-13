@@ -67,7 +67,7 @@ export function initObjectsTab() {
   pane.append(toolbarEl, listEl);
 
   renderToolbar();
-  renderPlaceholder('在左侧打开连接并选择数据库');
+  renderWorkspaceOverview();
 
   on('target-selected', (t) => {
     if (!t) {
@@ -75,7 +75,7 @@ export function initObjectsTab() {
       current = null;
       items = [];
       selected = null;
-      renderPlaceholder('在左侧打开连接并选择数据库');
+      renderWorkspaceOverview();
       if (pathEl) pathEl.textContent = '';
       return;
     }
@@ -92,7 +92,7 @@ export function initObjectsTab() {
       current = null;
       items = [];
       selected = null;
-      renderPlaceholder('在左侧打开连接并选择数据库');
+      renderWorkspaceOverview();
       pathEl && (pathEl.textContent = '');
     }
   });
@@ -171,6 +171,22 @@ function renderPlaceholder(text) {
   listEl.append(el('div', { class: 'obj-placeholder' }, text));
 }
 
+function renderWorkspaceOverview() {
+  listEl.innerHTML = '';
+  const opened = [...state.open.keys()];
+  const target = state.activeTarget || (opened[0] ? { connId: opened[0] } : null);
+  const metric = (value, label) => el('div', { class: 'overview-metric' }, el('b', {}, value), el('span', {}, label));
+  const actionsEl = el('div', { class: 'overview-actions' });
+  if (target) actionsEl.append(el('button', { class: 'btn primary', onClick: () => actions.newQuery(target) }, '新建查询'));
+  actionsEl.append(el('button', { class: 'btn', onClick: () => document.querySelector('.tbtn-big')?.click() }, '新建连接'));
+  listEl.append(el('div', { class: 'workspace-overview' },
+    el('div', { class: 'overview-eyebrow' }, 'DBPANDA 工作区'),
+    el('div', { class: 'overview-title' }, opened.length ? '从一个连接开始工作' : '建立你的第一个数据库连接'),
+    el('div', { class: 'overview-copy' }, opened.length ? '在左侧选择数据库或对象，或者直接开始一段新查询。' : '连接后可浏览对象、执行查询、导入数据或进行跨库传输。'),
+    el('div', { class: 'overview-metrics' }, metric(String(state.connections.length), '已保存连接'), metric(String(opened.length), '当前已打开')),
+    actionsEl));
+}
+
 function renderObjectEmptyState(kind) {
   listEl.innerHTML = '';
   const title = kind === 'table' ? '这个数据库里还没有表' : `还没有${KINDS[kind].label}`;
@@ -202,13 +218,13 @@ async function load(force) {
   const k = KINDS[kind];
   const context = current ? { ...current } : null;
   const cid = connIdNow();
-  if (!cid) { renderPlaceholder('请先打开一个连接'); return; }
+  if (!cid) { renderWorkspaceOverview(); return; }
   const stillCurrent = () => generation === loadGeneration && currentKind === kind
     && JSON.stringify(current) === JSON.stringify(context);
 
   if (k.needDb) {
     if (!context || context.connId !== cid || !context.db) {
-      renderPlaceholder(`在左侧选择数据库后查看${k.label}`);
+      renderWorkspaceOverview();
       return;
     }
   }

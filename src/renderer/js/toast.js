@@ -55,7 +55,9 @@ export function confirmDialog(title, message, { danger = false, okLabel = '确�
     let done = false;
     const m = openModal({
       title,
-      body: el('div', { style: { maxWidth: '420px', lineHeight: '1.6', whiteSpace: 'pre-wrap' } }, message),
+      body: el('div', { class: danger ? 'risk-confirm-body' : 'confirm-body' },
+        danger ? el('div', { class: 'risk-confirm-kicker' }, '请确认操作影响') : null,
+        el('div', { class: 'risk-confirm-message' }, message)),
       buttons: [
         { label: '取消', onClick: () => { done = true; resolve(false); } },
         { label: okLabel, primary: !danger, danger, onClick: () => { done = true; resolve(true); } },

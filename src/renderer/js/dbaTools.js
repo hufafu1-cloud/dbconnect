@@ -141,7 +141,10 @@ export async function openTransferDialog(preset) {
   const pairRow = (label, c, d, s) => el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12.5px', flex: '0 0 36px', textAlign: 'right' } }, label),
     c, d, s);
-  const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', width: '620px', maxWidth: '80vw' } },
+  let transferStage = 1;
+  const steps = el('div', { class: 'transfer-steps' },
+    el('span', { class: 'active' }, '1 选择来源与目标'), el('span', {}, '2 确认策略并传输'));
+  const selectionStage = el('div', { class: 'transfer-stage' },
     pairRow('源:', srcConn, srcDb, srcSchema),
     pairRow('目标:', dstConn, dstDb, dstSchema),
     el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
@@ -157,7 +160,10 @@ export async function openTransferDialog(preset) {
       el('label', { class: 'form-check' }, chkDrop, '先删除已存在的目标表'),
       el('label', { class: 'form-check' }, chkData, '复制数据'),
       el('label', { class: 'form-check' }, chkContinue, '出错继续')),
-    bar, text,
+    bar, text);
+  const reviewStage = el('div', { class: 'transfer-review', style: { display: 'none' } });
+  const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', width: '620px', maxWidth: '80vw' } },
+    steps, selectionStage, reviewStage,
   );
 
   const m = openModal({
@@ -165,9 +171,38 @@ export async function openTransferDialog(preset) {
     body,
     buttons: [
       { label: '关闭', onClick: () => !running },
-      { label: '开始传输', primary: true, onClick: () => { run(); return false; } },
+      { label: '下一步：确认策略', primary: true, onClick: () => {
+        if (transferStage === 1) { showReview(); return false; }
+        run(); return false;
+      } },
     ],
   });
+
+  function showReview() {
+    const picked = tableChecks.filter((x) => x.cb.checked);
+    if (!picked.length) { toast.error('请至少选择一张表'); return; }
+    if (srcConn.value === dstConn.value && srcDb.value === dstDb.value && (srcSchema.value || '') === (dstSchema.value || '')) {
+      toast.error('来源与目标相同'); return;
+    }
+    const rows = picked.reduce((sum, x) => sum + (Number.isFinite(x.table.rows) ? x.table.rows : 0), 0);
+    reviewStage.innerHTML = '';
+    reviewStage.append(
+      el('div', { class: 'transfer-review-title' }, '请核对本次传输'),
+      el('div', { class: 'transfer-review-route' },
+        el('div', {}, el('small', {}, '来源'), el('b', {}, endpointLabel(srcConn, srcDb, srcSchema))),
+        el('span', {}, '→'),
+        el('div', {}, el('small', {}, '目标'), el('b', {}, endpointLabel(dstConn, dstDb, dstSchema)))),
+      el('div', { class: 'transfer-review-summary' }, `${picked.length} 张表 · 已知约 ${rows.toLocaleString()} 行 · ${chkData.checked ? '复制结构和数据' : '仅复制结构'}`),
+      chkDrop.checked ? el('div', { class: 'transfer-review-warning' }, '将覆盖目标中的同名表，原有数据会被删除。') : null);
+    selectionStage.style.display = 'none';
+    reviewStage.style.display = '';
+    transferStage = 2;
+    steps.children[0].classList.remove('active');
+    steps.children[0].classList.add('done');
+    steps.children[1].classList.add('active');
+    const primary = [...m.overlay.querySelectorAll('.modal-foot .btn')].find((b) => b.textContent.includes('下一步'));
+    if (primary) primary.textContent = '开始传输';
+  }
 
   async function run() {
     if (running) return;

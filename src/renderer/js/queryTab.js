@@ -227,18 +227,14 @@ export function openQueryTab(target, initialSql, opts) {
     });
   }
 
-  const toolbar = el('div', { class: 'pane-toolbar' },
-    btnRun, btnRunSel, btnRunAll, btnStop,
+  const toolbar = el('div', { class: 'pane-toolbar query-toolbar' },
+    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '执行'), btnRun, btnRunSel, btnRunAll, btnStop),
     el('span', { class: 'sep' }),
-    el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '连接:'), connSel, prodBadge,
-    el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel, schemaBadge,
+    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '上下文'), connSel, prodBadge,
+      el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel, schemaBadge),
     el('span', { class: 'sep' }),
-    mkBtn('explain', '解释', explainSql),
-    mkBtn('format', '美化', formatSql),
-    btnAi,
-    mkBtn('openFile', '打开', openFile),
-    mkBtn('save', '保存', () => saveQuery()),
-    mkBtn('exportIcon', '另存文件', () => saveAsFile()),
+    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '工具'), mkBtn('explain', '解释', explainSql), mkBtn('format', '美化', formatSql), btnAi),
+    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '文件'), mkBtn('openFile', '打开', openFile), mkBtn('save', '保存', () => saveQuery()), mkBtn('exportIcon', '另存文件', () => saveAsFile())),
     el('span', { class: 'sep' }),
     maxRowsSel,
     el('span', { class: 'sep' }),
@@ -273,6 +269,10 @@ export function openQueryTab(target, initialSql, opts) {
   }
 
   // ---- 编辑器 ----
+  const queryStatus = el('div', { class: 'query-status-strip' },
+    el('span', { class: 'query-status-dot' }),
+    el('span', { class: 'query-status-main' }, '准备执行'),
+    el('span', { class: 'query-status-detail' }, 'SQL 将在当前连接与数据库中运行'));
   const editorHost = el('div', { class: 'query-editor' });
   let splitterHeight = Number(restoreState && restoreState.splitterHeight);
   if (!Number.isFinite(splitterHeight) || splitterHeight < 60 || splitterHeight > 2000) splitterHeight = null;
@@ -284,7 +284,7 @@ export function openQueryTab(target, initialSql, opts) {
   const rbody = el('div', { class: 'result-body' });
   resultsHost.append(rtabs, rbody);
 
-  pane.append(toolbar, editorHost, splitter, resultsHost);
+  pane.append(toolbar, queryStatus, editorHost, splitter, resultsHost);
 
   let cm = CodeMirror(editorHost, {
     value: initialText,
@@ -562,6 +562,14 @@ export function openQueryTab(target, initialSql, opts) {
     }
     txStatus.title = transactionWarning || '';
     txStatus.style.display = transactionSupported && transactionState === 'idle' && autoCommitInput.checked ? 'none' : '';
+    if (queryStatus) {
+      const main = queryStatus.querySelector('.query-status-main');
+      const detail = queryStatus.querySelector('.query-status-detail');
+      const dot = queryStatus.querySelector('.query-status-dot');
+      if (main) main.textContent = running ? '正在执行' : (transactionState === 'active' ? '事务进行中' : '准备执行');
+      if (detail) detail.textContent = `${connId ? connLabel(connId) : '未选择连接'}${db ? ` › ${db}` : ''}${transactionState === 'active' ? ' · 手动提交模式' : ' · 自动提交'}`;
+      if (dot) dot.style.background = transactionState === 'failed' ? 'var(--danger)' : (running ? 'var(--orange)' : 'var(--green)');
+    }
     if (cm) {
       tab.setDirty(cm.getValue() !== savedText || transactionState !== 'idle');
     }

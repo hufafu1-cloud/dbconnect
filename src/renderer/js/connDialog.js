@@ -132,21 +132,26 @@ export function openConnDialog(existing, presetType, presetGroup) {
       add('用户名', f.user);
       add('密码', el('div', { class: 'row-flex password-row' }, f.password, showPw, savePasswordOption));
       add('初始数据库', f.database);
+      const advancedGrid = el('div', { class: 'conn-advanced-grid' });
+      const advanced = el('details', { class: 'conn-advanced', open: isEdit ? 'open' : null },
+        el('summary', {}, '高级连接设置'), advancedGrid);
+      fieldsBox.append(advanced);
+      const addAdvanced = (label, node) => advancedGrid.append(el('label', {}, label), node);
       if (t === 'mssql') {
         f.encrypt = el('input', { type: 'checkbox' });
         f.encrypt.checked = !!(cfg.options && cfg.options.encrypt);
         f.trustCert = el('input', { type: 'checkbox' });
         f.trustCert.checked = !cfg.options || cfg.options.trustCert !== false;
-        add('', el('div', { class: 'form-check' }, f.encrypt, '加密连接 (Azure 需勾选)'));
-        add('', el('div', { class: 'form-check' }, f.trustCert, '信任服务器证书'));
+        addAdvanced('', el('div', { class: 'form-check' }, f.encrypt, '加密连接 (Azure 需勾选)'));
+        addAdvanced('', el('div', { class: 'form-check' }, f.trustCert, '信任服务器证书'));
       }
       if (t === 'oceanbase') {
-        add('', el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } },
+        addAdvanced('', el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } },
           '用户名格式：直连 2881 端口为 用户@租户（如 root@sys）；', el('br'),
           '经 OBProxy(2883) 为 用户@租户#集群名'));
       }
       if (t === 'oboracle') {
-        add('', el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } },
+        addAdvanced('', el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } },
           '用户名格式：用户@Oracle租户（如 SYS@oracle_t），经 OBProxy 加 #集群名；', el('br'),
           '初始数据库留空即可（按 Schema 浏览）。Oracle 模式为实验性支持。'));
       }
@@ -158,14 +163,14 @@ export function openConnDialog(existing, presetType, presetGroup) {
           if (f.https.checked && f.port.value === '8123') f.port.value = '8443';
           else if (!f.https.checked && f.port.value === '8443') f.port.value = '8123';
         });
-        add('', el('div', { class: 'form-check' }, f.https, '使用 HTTPS（云服务通常为 8443 端口）'));
+        addAdvanced('', el('div', { class: 'form-check' }, f.https, '使用 HTTPS（云服务通常为 8443 端口）'));
       }
 
       // ---- SSH 隧道（所有网络型数据库通用） ----
       const ssh = cfg.ssh || {};
       f.sshEnabled = el('input', { type: 'checkbox' });
       f.sshEnabled.checked = !!ssh.enabled;
-      add('', el('div', { class: 'form-check', style: { borderTop: '1px solid var(--border-light)', paddingTop: '10px', marginTop: '2px' } },
+      addAdvanced('', el('div', { class: 'form-check', style: { borderTop: '1px solid var(--border-light)', paddingTop: '10px', marginTop: '2px' } },
         f.sshEnabled, el('b', {}, '使用 SSH 隧道'),
         el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '（上方主机/端口填跳板机视角的地址）')));
 
@@ -191,7 +196,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       const sshRows = [];
       const addSsh = (label, node, group) => {
         const l = el('label', {}, label);
-        fieldsBox.append(l, node);
+        advancedGrid.append(l, node);
         sshRows.push({ l, node, group });
       };
       addSsh('SSH 主机', f.sshHost, 'all');
