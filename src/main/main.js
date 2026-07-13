@@ -220,7 +220,8 @@ app.whenReady().then(async () => {
           const passwordSave = passwordRow && passwordRow.querySelector('.password-save-check input[type="checkbox"]');
           const passwordRowRect = passwordRow && passwordRow.getBoundingClientRect();
           const passwordOptionFits = !!(passwordRowRect && formRect && passwordRowRect.right <= formRect.right + 1);
-          const passwordOptionOk = !!(passwordSave && passwordSave.checked && passwordInput
+          // 新建连接默认不保存密码；这里只验证选项可见、未默认勾选且不会挤压输入框。
+          const passwordOptionOk = !!(passwordSave && !passwordSave.checked && passwordInput
             && passwordInput.getBoundingClientRect().width >= 180 && passwordOptionFits);
           window.__test.closeMenus();
           return { textOnly, textInset, iconColumns, databaseIconsOk, formBalanced, formLeft, formRight, passwordOptionOk };

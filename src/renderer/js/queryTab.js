@@ -190,6 +190,8 @@ export function openQueryTab(target, initialSql, opts) {
   const btnTxBegin = mkBtn('run', '开始', beginTransaction);
   const btnTxCommit = mkBtn('save', '提交', commitTransaction);
   const btnTxRollback = mkBtn('cross', '回滚', rollbackTransaction);
+  const transactionControls = el('div', { class: 'transaction-controls', title: '关闭自动提交后，可在这里管理当前标签页的事务' },
+    el('span', { class: 'transaction-label' }, '事务'), autoCommitControl, btnTxBegin, btnTxCommit, btnTxRollback, txStatus);
   autoCommitInput.addEventListener('change', () => {
     if (autoCommitInput.checked && transactionState !== 'idle') {
       autoCommitInput.checked = false;
@@ -240,7 +242,7 @@ export function openQueryTab(target, initialSql, opts) {
     el('span', { class: 'sep' }),
     maxRowsSel,
     el('span', { class: 'sep' }),
-    autoCommitControl, btnTxBegin, btnTxCommit, btnTxRollback, txStatus,
+    transactionControls,
     el('span', { class: 'spring' }),
   );
 

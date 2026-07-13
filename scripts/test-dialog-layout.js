@@ -46,10 +46,10 @@ assert.match(menuIcon, /width:\s*14px/);
 const formGrid = rule('.form-grid');
 assert.match(formGrid, /grid-template-columns:\s*64px\s+minmax\(0,\s*1fr\)/);
 
-assert.match(connDialog, /f\.savePassword\.checked\s*=\s*cfg\.savePassword\s*!==\s*false/);
+assert.match(connDialog, /f\.savePassword\.checked\s*=\s*isEdit\s*\?\s*cfg\.savePassword\s*!==\s*false\s*:\s*false/);
 assert.match(connDialog, /class:\s*'password-save-check'/);
 assert.match(connDialog, /out\.savePassword\s*=\s*f\.savePassword\.checked/);
-assert.match(connDialog, /cfg\.savePassword\s*!==\s*false/);
+assert.match(connDialog, /新建连接采用安全默认值/);
 const passwordSaveCheck = rule('.form-grid .password-save-check');
 assert.match(passwordSaveCheck, /flex:\s*0\s+0\s+auto/);
 assert.match(passwordSaveCheck, /white-space:\s*nowrap/);

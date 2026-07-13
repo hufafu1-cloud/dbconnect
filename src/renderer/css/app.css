@@ -364,6 +364,24 @@ body {
 
 .grid-empty { padding: 28px; text-align: center; color: var(--text-muted); }
 
+/* 对象页空状态：把首次操作直接放在用户视线中心。 */
+.obj-empty-state { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-muted); }
+.obj-empty-title { color: var(--text); font-size: 15px; font-weight: 600; margin-bottom: 7px; }
+.obj-empty-hint { font-size: 12.5px; margin-bottom: 16px; }
+.obj-empty-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+/* 查询执行与事务控制分区，避免把“运行”和“提交”视为同一类操作。 */
+.transaction-controls { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px; border: 1px solid var(--border-light); border-radius: 5px; background: var(--panel); }
+.transaction-label { font-size: 11.5px; color: var(--text-muted); padding-right: 2px; }
+
+/* 传输对话框明确标示方向、目标及规模。 */
+.transfer-preflight { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 9px 10px; border: 1px solid var(--border-light); border-radius: 6px; background: var(--panel-2); font-size: 12px; }
+.transfer-endpoint { max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 7px; border-radius: 4px; }
+.transfer-endpoint.source { color: var(--text-muted); background: var(--hover); }
+.transfer-endpoint.target { color: var(--accent-dark); background: var(--accent-light); font-weight: 600; }
+.transfer-arrow { color: var(--accent); font-size: 16px; font-weight: 700; }
+.transfer-summary { flex-basis: 100%; color: var(--text-muted); }
+
 /* ---------- 筛选构建器 ---------- */
 .filter-builder {
   padding: 8px 10px;

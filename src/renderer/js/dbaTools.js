@@ -65,6 +65,24 @@ export async function openTransferDialog(preset) {
   const chkContinue = el('input', { type: 'checkbox' });
 
   const { bar, text, fill } = progressBarPair();
+  const preflight = el('div', { class: 'transfer-preflight' });
+
+  function endpointLabel(connSel, dbSel, schemaSel) {
+    const schema = schemaSel.value ? ` / ${schemaSel.value}` : '';
+    return `${connLabel(connSel.value)} / ${dbSel.value || '未选择数据库'}${schema}`;
+  }
+  function updatePreflight() {
+    const picked = tableChecks.filter((x) => x.cb.checked);
+    const knownRows = picked.reduce((sum, x) => sum + (Number.isFinite(x.table.rows) ? x.table.rows : 0), 0);
+    const unknownRows = picked.some((x) => !Number.isFinite(x.table.rows));
+    preflight.innerHTML = '';
+    preflight.append(
+      el('span', { class: 'transfer-endpoint source' }, endpointLabel(srcConn, srcDb, srcSchema)),
+      el('span', { class: 'transfer-arrow' }, '→'),
+      el('span', { class: 'transfer-endpoint target' }, endpointLabel(dstConn, dstDb, dstSchema)),
+      el('span', { class: 'transfer-summary' }, `已选 ${picked.length} 张表 · ${unknownRows ? `至少 ${knownRows.toLocaleString()}` : knownRows.toLocaleString()} 行`),
+    );
+  }
 
   async function fillDbSel(connSel, dbSel, schemaSel, presetDb) {
     const dbs = await loadDbs(connSel.value);
@@ -99,8 +117,10 @@ export async function openTransferDialog(preset) {
           el('span', {}, (t.schema && t.schema !== 'public' && t.schema !== 'dbo' ? t.schema + '.' : '') + t.name),
           el('span', { style: { color: 'var(--text-muted)', fontSize: '11px', marginLeft: 'auto' } }, t.rows === null || t.rows === undefined ? '' : `${t.rows} 行`));
         tableChecks.push({ cb, table: t, row });
+        cb.addEventListener('change', updatePreflight);
         tablesBox.append(row);
       }
+      updatePreflight();
     } catch (e) {
       tablesBox.innerHTML = '';
       tablesBox.append('加载失败: ' + e.message);
@@ -111,11 +131,11 @@ export async function openTransferDialog(preset) {
     for (const x of tableChecks) x.row.style.display = !q || x.table.name.toLowerCase().includes(q) ? 'flex' : 'none';
   });
 
-  srcConn.addEventListener('change', async () => { await fillDbSel(srcConn, srcDb, srcSchema); refreshTables(); });
-  srcDb.addEventListener('change', async () => { await fillSchemaSel(srcConn, srcDb, srcSchema); refreshTables(); });
-  srcSchema.addEventListener('change', refreshTables);
-  dstConn.addEventListener('change', () => fillDbSel(dstConn, dstDb, dstSchema));
-  dstDb.addEventListener('change', () => fillSchemaSel(dstConn, dstDb, dstSchema));
+  srcConn.addEventListener('change', async () => { await fillDbSel(srcConn, srcDb, srcSchema); await refreshTables(); updatePreflight(); });
+  srcDb.addEventListener('change', async () => { await fillSchemaSel(srcConn, srcDb, srcSchema); await refreshTables(); updatePreflight(); });
+  srcSchema.addEventListener('change', async () => { await refreshTables(); updatePreflight(); });
+  dstConn.addEventListener('change', async () => { await fillDbSel(dstConn, dstDb, dstSchema); updatePreflight(); });
+  dstDb.addEventListener('change', async () => { await fillSchemaSel(dstConn, dstDb, dstSchema); updatePreflight(); });
 
   const lbl = (s) => el('span', { style: { color: 'var(--text-muted)', fontSize: '12.5px' } }, s);
   const pairRow = (label, c, d, s) => el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
@@ -126,11 +146,12 @@ export async function openTransferDialog(preset) {
     pairRow('目标:', dstConn, dstDb, dstSchema),
     el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
       lbl('表:'),
-      el('button', { class: 'pbtn', onClick: () => tableChecks.forEach((x) => { x.cb.checked = true; }) }, '全选'),
-      el('button', { class: 'pbtn', onClick: () => tableChecks.forEach((x) => { x.cb.checked = !x.cb.checked; }) }, '反选'),
+      el('button', { class: 'pbtn', onClick: () => { tableChecks.forEach((x) => { x.cb.checked = true; }); updatePreflight(); } }, '全选'),
+      el('button', { class: 'pbtn', onClick: () => { tableChecks.forEach((x) => { x.cb.checked = !x.cb.checked; }); updatePreflight(); } }, '反选'),
       el('span', { class: 'spring', style: { flex: '1' } }),
       filterInput),
     tablesBox,
+    preflight,
     el('div', { style: { display: 'flex', gap: '16px', flexWrap: 'wrap' } },
       el('label', { class: 'form-check' }, chkCreate, '创建表'),
       el('label', { class: 'form-check' }, chkDrop, '先删除已存在的目标表'),
@@ -155,6 +176,17 @@ export async function openTransferDialog(preset) {
     if (srcConn.value === dstConn.value && srcDb.value === dstDb.value && (srcSchema.value || '') === (dstSchema.value || '')) {
       toast.error('源与目标相同'); return;
     }
+    const knownRows = tableChecks.filter((x) => x.cb.checked).reduce((sum, x) => sum + (Number.isFinite(x.table.rows) ? x.table.rows : 0), 0);
+    const preflightMessage = [
+      `来源：${endpointLabel(srcConn, srcDb, srcSchema)}`,
+      `目标：${endpointLabel(dstConn, dstDb, dstSchema)}`,
+      `内容：${picked.length} 张表，已知约 ${knownRows.toLocaleString()} 行`,
+      `策略：${chkCreate.checked ? '创建目标表' : '不创建目标表'}；${chkData.checked ? '复制数据' : '仅复制结构'}${chkDrop.checked ? '；覆盖目标中的同名表' : ''}`,
+    ].join('\n');
+    const confirmed = await confirmDialog('传输预检查', preflightMessage, {
+      danger: chkDrop.checked, okLabel: '确认并继续',
+    });
+    if (!confirmed) return;
     const transferPayload = {
       srcConnId: srcConn.value, dstConnId: dstConn.value,
       srcDb: srcDb.value, srcSchema: srcSchema.value || null,

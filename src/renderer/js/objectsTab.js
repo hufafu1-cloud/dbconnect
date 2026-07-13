@@ -171,6 +171,25 @@ function renderPlaceholder(text) {
   listEl.append(el('div', { class: 'obj-placeholder' }, text));
 }
 
+function renderObjectEmptyState(kind) {
+  listEl.innerHTML = '';
+  const title = kind === 'table' ? '这个数据库里还没有表' : `还没有${KINDS[kind].label}`;
+  const hint = kind === 'table' ? '可以先新建一张表，或从文件导入数据开始。' : '切换对象类型，或创建一个新的对象开始。';
+  const actionsEl = el('div', { class: 'obj-empty-actions' });
+  if (kind === 'table' && current) {
+    actionsEl.append(
+      el('button', { class: 'btn primary', onClick: () => actions.newTable(current) }, '新建表'),
+      el('button', { class: 'btn', onClick: () => actions.importTable(current) }, '导入数据'),
+      el('button', { class: 'btn', onClick: () => actions.newQuery(current) }, '新建查询'),
+    );
+  } else if (current) {
+    actionsEl.append(el('button', { class: 'btn primary', onClick: () => actions.newQuery(current) }, '新建查询'));
+  }
+  listEl.append(el('div', { class: 'obj-empty-state' },
+    el('div', { class: 'obj-empty-title' }, title),
+    el('div', { class: 'obj-empty-hint' }, hint), actionsEl));
+}
+
 // ---------------- 数据加载 ----------------
 async function load(force) {
   const generation = ++loadGeneration;
@@ -359,7 +378,8 @@ function renderList() {
   const q = (searchEl.value || '').trim().toLowerCase();
   const shown = items.filter((it) => !q || it.name.toLowerCase().includes(q));
   if (!shown.length) {
-    renderPlaceholder(items.length ? '（无匹配项）' : `（没有${k.label}）`);
+    if (items.length) renderPlaceholder('（无匹配项）');
+    else renderObjectEmptyState(currentKind);
     return;
   }
   const cols = COLUMNS[currentKind];

@@ -116,14 +116,15 @@ export function openConnDialog(existing, presetType, presetGroup) {
       f.passwordDirty = false;
       f.password.addEventListener('input', () => { f.passwordDirty = true; });
       f.savePassword = el('input', { type: 'checkbox' });
-      f.savePassword.checked = cfg.savePassword !== false;
+      // 新建连接采用安全默认值；编辑已有连接时保留用户原有选择。
+      f.savePassword.checked = isEdit ? cfg.savePassword !== false : false;
       const showPw = el('button', { class: 'btn', tabIndex: -1, onClick: () => {
         f.password.type = f.password.type === 'password' ? 'text' : 'password';
       } }, '👁');
       const savePasswordOption = el('label', {
         class: 'password-save-check',
         title: '取消勾选后，密码只用于本次连接，关闭连接后需重新输入',
-      }, f.savePassword, el('span', {}, '将数据库密码保存在本地'));
+      }, f.savePassword, el('span', {}, '保存密码到本地（加密存储）'));
       f.database = field('text', cfg.database !== undefined && cfg.database !== '' ? cfg.database : d.database,
         t === 'mysql' ? '（可选）初始数据库' : '初始数据库');
       add('主机', f.host);
