@@ -1,12 +1,12 @@
 // 渲染进程入口：装配工具栏、树、标签页、快捷键与自动化测试钩子
 import { $, el, iconEl } from './util.js';
-import { state, reloadConnections, on, emit, getActiveTarget, setActiveTarget } from './state.js';
+import { state, reloadConnections, on, emit, getActiveTarget, setActiveTarget, objectsCacheKey } from './state.js';
 import { toast, openModal, confirmDialog } from './toast.js';
 import { showMenu } from './contextmenu.js';
 import { renderTree, setupTreeFilter, openConnectionById, revealTarget } from './tree.js';
 import { initObjectsTab } from './objectsTab.js';
 import {
-  addTab, closeActive, anyDirty, getActiveTab,
+  addTab, closeActive, anyDirty, getActiveTab, activateRelative,
   getStoredWorkspace, restoreWorkspaceTabs, retryDeferredWorkspaceTabs,
   setWorkspaceContextProvider, touchWorkspacePersistence, persistWorkspaceNow,
 } from './tabs.js';
@@ -134,7 +134,7 @@ async function showAbout() {
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
         `Electron ${info.electron} · Node ${info.node} · Chromium ${info.chrome}`),
       el('div', { style: { color: 'var(--text-muted)', fontSize: '12px' } },
-        '快捷键: F5/Ctrl+Enter 运行当前语句 · Ctrl+S 保存 SQL · Ctrl+W 关闭标签 · F12 开发者工具')),
+        '快捷键: Ctrl+R/F5 运行 · Ctrl+Shift+R 运行选中 · Ctrl+F 查找 · Ctrl+H 替换 · Ctrl+D 设计表 · F5 刷新对象 · Ctrl+S 保存 SQL · Ctrl+Tab 切换标签 · Ctrl+W 关闭标签')),
     buttons: [{ label: '确定', primary: true }],
   });
 }
@@ -168,13 +168,26 @@ function setupSplitter() {
 function setupShortcuts() {
   document.addEventListener('keydown', (e) => {
     if (window.__APP_READY !== true) return;
+    const t = e.target;
+    // SQL 编辑器内的按键交给 CodeMirror（F5 运行、Ctrl+F 编辑器内查找等）
+    const inEditor = !!(t && t.closest && t.closest('.CodeMirror'));
+    const inInput = inEditor || !!(t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable));
+    if (e.key === 'F5' && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+      if (!inEditor) { e.preventDefault(); runMenuAction('refresh'); }
+      return;
+    }
+    if (e.ctrlKey && !e.altKey && e.key === 'Tab') {
+      e.preventDefault();
+      activateRelative(e.shiftKey ? -1 : 1);
+      return;
+    }
     if (!e.ctrlKey || e.shiftKey || e.altKey) return;
     const k = e.key.toLowerCase();
     if (k === 'w') { e.preventDefault(); closeActive(); }
     else if (k === 'n') { e.preventDefault(); runMenuAction('new-conn'); }
     else if (k === 'q') { e.preventDefault(); runMenuAction('new-query'); }
-    else if (k === 'd') { e.preventDefault(); runMenuAction('toggle-theme'); }
-    else if (k === 'f') { e.preventDefault(); runMenuAction('search'); }
+    else if (k === 'd') { if (!inInput) { e.preventDefault(); runMenuAction('design-table'); } }
+    else if (k === 'f') { if (!inEditor) { e.preventDefault(); runMenuAction('search'); } }
   });
 }
 
@@ -234,6 +247,26 @@ export async function runMenuAction(id) {
         break;
       }
       case 'refresh': if (t && t.db) emit('objects-changed', t); break;
+      case 'design-table': {
+        const cur = state.activeTarget;
+        if (!cur || !cur.table || !state.open.has(cur.connId)) { toast.info('请先在左侧选择一个表'); break; }
+        const oc = state.open.get(cur.connId);
+        const objs = oc && oc.objectsCache && oc.objectsCache.get(objectsCacheKey(cur.db, cur.schema));
+        const isView = !!(objs && objs.views && objs.views.some((v) => v.name === cur.table));
+        actions.designTable({ connId: cur.connId, db: cur.db, schema: cur.schema, table: cur.table }, isView);
+        break;
+      }
+      case 'editor-find':
+      case 'editor-replace': {
+        const active = getActiveTab();
+        const cmi = active && active.handle && active.handle._cm;
+        if (!cmi) { toast.info('请先打开一个查询标签页'); break; }
+        const { openEditorSearch } = await import('./editorSearch.js');
+        openEditorSearch(cmi, { replace: id === 'editor-replace' });
+        break;
+      }
+      case 'next-tab': activateRelative(1); break;
+      case 'prev-tab': activateRelative(-1); break;
       case 'toggle-theme': toggleTheme(); break;
       case 'about': showAbout(); break;
       default: break;

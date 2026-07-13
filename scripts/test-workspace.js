@@ -219,6 +219,7 @@ async function main() {
     const transformed = tabsSource
       .replace("import { $, el, iconEl } from './util.js';", 'const { $, el, iconEl } = globalThis.__tabsTest;')
       .replace("import { confirmDialog, toast } from './toast.js';", 'const { confirmDialog, toast } = globalThis.__tabsTest;')
+      .replace("import { showMenu } from './contextmenu.js';", 'const showMenu = () => {};')
       .replace("import { loadWorkspace, saveWorkspace } from './workspace.js';", 'const { loadWorkspace, saveWorkspace } = globalThis.__tabsTest;')
       + `\n// tabs-test-${Date.now()}-${Math.random()}`;
     const module = await import(`data:text/javascript;base64,${Buffer.from(transformed).toString('base64')}`);

@@ -22,6 +22,15 @@ class BaseAdapter {
   /** 非空时强制网格只读，并在界面显示该原因 */
   get readonlyReason() { return null; }
 
+  /** 无主键表可用于唯一定位行的系统列名（如 PostgreSQL 的 ctid）；null 表示不支持 */
+  async rowIdFor(_db, _schema, _table) { return null; }
+
+  /** 系统行标识伪列在 SQL 中的写法（SQLite rowid 等不能加引号） */
+  quoteRowId(name) {
+    if (name === 'rowid' || name === 'ROWID') return name;
+    return this.quoteIdent(name);
+  }
+
   // ---- 子类必须实现 ----
   // async connect()
   // async close()
@@ -48,7 +57,7 @@ class BaseAdapter {
   async cellBlob(db, args) {
     const { schema, table, column, pk } = args;
     const where = Object.entries(pk)
-      .map(([c, v]) => (v === null ? `${this.quoteIdent(c)} IS NULL` : `${this.quoteIdent(c)} = ${this.literal(v)}`))
+      .map(([c, v]) => (v === null ? `${this.quoteRowId(c)} IS NULL` : `${this.quoteRowId(c)} = ${this.literal(v)}`))
       .join(' AND ');
     const sql = `SELECT ${this.quoteIdent(column)} FROM ${this.qualify(db, schema, table)} WHERE ${where}`;
     const r = await this.exec(db, sql); // exec 返回原始行（未 sanitize），BLOB 为 Buffer
@@ -724,21 +733,41 @@ class BaseAdapter {
     const orderClause = orderBy
       ? ` ORDER BY ${this.quoteIdent(orderBy)} ${orderDir === 'desc' ? 'DESC' : 'ASC'}`
       : '';
+    // 无主键时尝试用系统行标识列（PG ctid 等）定位行，使网格仍可编辑
+    let pk = info.pk || [];
+    let rowIdColumn = null;
+    if (!pk.length && !this.readonlyReason) {
+      try { rowIdColumn = await this.rowIdFor(db, schema, table); } catch (e) { rowIdColumn = null; }
+      if (rowIdColumn) pk = [rowIdColumn];
+    }
     let total = null;
     if (!skipCount) {
       const cr = await this.exec(db, `SELECT COUNT(*) FROM ${qtable}${whereClause}`);
       total = Number(cr.rows[0][0]);
     }
     const t0 = Date.now();
-    const sql = this.pageSql(`SELECT * FROM ${qtable}${whereClause}`, orderClause, safePageSize, offset);
+    // 行标识列附加在末尾查询，返回前剥离为 rowIds，不作为可见列展示
+    const select = rowIdColumn ? `SELECT *, ${this.quoteRowId(rowIdColumn)} FROM` : 'SELECT * FROM';
+    const sql = this.pageSql(`${select} ${qtable}${whereClause}`, orderClause, safePageSize, offset);
     const r = await this.exec(db, sql);
+    let cols = r.columns;
+    let rows = r.rows;
+    let rowIds = null;
+    if (rowIdColumn) {
+      const idIdx = cols.length - 1;
+      rowIds = rows.map((row) => (row[idIdx] === null || row[idIdx] === undefined ? null : String(row[idIdx])));
+      cols = cols.slice(0, idIdx);
+      rows = rows.map((row) => row.slice(0, idIdx));
+    }
     const typeByName = {};
     for (const c of info.columns) typeByName[c.name] = c.type;
     return {
-      columns: r.columns.map((c) => ({ name: c.name, type: typeByName[c.name] || c.type || '' })),
-      rows: sanitizeRows(r.rows),
+      columns: cols.map((c) => ({ name: c.name, type: typeByName[c.name] || c.type || '' })),
+      rows: sanitizeRows(rows),
       total,
-      pk: info.pk,
+      pk,
+      rowIdColumn,
+      rowIds,
       readonlyReason: this.readonlyReason,
       ms: Date.now() - t0,
       page: safePage,
@@ -753,7 +782,7 @@ class BaseAdapter {
     const L = (v) => this.literal(v);
     const whereOf = (obj) =>
       Object.entries(obj)
-        .map(([c, v]) => (v === null ? `${q(c)} IS NULL` : `${q(c)} = ${L(v)}`))
+        .map(([c, v]) => (v === null ? `${this.quoteRowId(c)} IS NULL` : `${this.quoteRowId(c)} = ${L(v)}`))
         .join(' AND ');
     const sqls = [];
     for (const e of edits) {

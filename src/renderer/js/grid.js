@@ -64,9 +64,11 @@ export class DataGrid {
     this.clearPending();
     this.selection = new Set();
     this.lastSel = null;
-    this.wrap = el('div', { class: 'grid-wrap' });
+    this.focus = null; // {dr: 显示行序号(含新行), c: 列序号}
+    this.wrap = el('div', { class: 'grid-wrap', tabindex: '0' });
     host.append(this.wrap);
     this.wrap.addEventListener('scroll', () => this._removeEditor(false));
+    this.wrap.addEventListener('keydown', (e) => this._onKeyDown(e));
   }
 
   get editable() { return !!this.opts.editable && this.pk.length > 0; }
@@ -81,12 +83,16 @@ export class DataGrid {
     return this.cellEdits.size > 0 || this.newRows.length > 0 || this.deletedRows.size > 0;
   }
 
-  setData({ columns, rows, pk }) {
+  setData({ columns, rows, pk, rowIds, rowIdColumn }) {
     this.columns = columns || [];
     this.rows = rows || [];
     this.pk = pk || [];
+    // 无主键表的行标识（如 PostgreSQL ctid）：不作为可见列，仅用于定位行
+    this.rowIds = rowIds || null;
+    this.rowIdColumn = rowIdColumn || null;
     this.clearPending();
     this.selection.clear();
+    this.focus = null;
     this.render();
   }
 
@@ -144,6 +150,103 @@ export class DataGrid {
     if (!this.rows.length && !this.newRows.length) {
       this.wrap.append(el('div', { class: 'grid-empty' }, '(0 行)'));
     }
+    if (this.focus) this._setFocus(this.focus.dr, this.focus.c, { scroll: false, select: false });
+  }
+
+  // ---------- 单元格焦点 / 键盘导航 ----------
+  /** 显示行序号 → {r, isNew}（新行排在已有行之后） */
+  _fromDisplay(dr) {
+    return dr < this.rows.length ? { r: dr, isNew: false } : { r: dr - this.rows.length, isNew: true };
+  }
+
+  _tdAt(dr, c) {
+    const tr = this.tbody && this.tbody.querySelectorAll('tr')[dr];
+    return (tr && tr.children[c + 1]) || null;
+  }
+
+  _setFocus(dr, c, { scroll = true, select = true } = {}) {
+    const count = this.rows.length + this.newRows.length;
+    if (!count || !this.columns.length || !this.tbody) return;
+    dr = Math.min(Math.max(0, dr), count - 1);
+    c = Math.min(Math.max(0, c), this.columns.length - 1);
+    const old = this.tbody.querySelector('td.cell-focus');
+    if (old) old.classList.remove('cell-focus');
+    this.focus = { dr, c };
+    const td = this._tdAt(dr, c);
+    if (td) {
+      td.classList.add('cell-focus');
+      if (scroll) td.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+    // 键盘导航时选中行跟随焦点（Navicat 行为）；鼠标多选场景由调用方跳过
+    if (select && dr < this.rows.length) this._selectRow(dr, false, null);
+  }
+
+  _editFocused() {
+    const f = this.focus;
+    if (!f) return;
+    const { r, isNew } = this._fromDisplay(f.dr);
+    const td = this._tdAt(f.dr, f.c);
+    if (!td) return;
+    if (this.editable || isNew) this._beginEdit(td, r, f.c, isNew);
+    else {
+      const v = this._currentVal(r, f.c, isNew);
+      cellViewer(this.columns[f.c].name, v === undefined ? null : v, null);
+    }
+  }
+
+  _onKeyDown(e) {
+    if (this._editor) return; // 浮动编辑器自行处理按键
+    const count = this.rows.length + this.newRows.length;
+    if (!count || !this.columns.length) return;
+    const f = this.focus;
+    const key = e.key;
+    const NAV = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'];
+    if (!f) {
+      if (NAV.includes(key)) { e.preventDefault(); this._setFocus(0, 0); }
+      return;
+    }
+    const move = (dr, c) => { e.preventDefault(); this._setFocus(dr, c); };
+    if (key === 'ArrowUp') move(f.dr - 1, f.c);
+    else if (key === 'ArrowDown') move(f.dr + 1, f.c);
+    else if (key === 'ArrowLeft') move(f.dr, f.c - 1);
+    else if (key === 'ArrowRight') move(f.dr, f.c + 1);
+    else if (key === 'Home' && !e.ctrlKey) move(f.dr, 0);
+    else if (key === 'End' && !e.ctrlKey) move(f.dr, this.columns.length - 1);
+    else if (key === 'Home' && e.ctrlKey) move(0, 0);
+    else if (key === 'End' && e.ctrlKey) move(count - 1, this.columns.length - 1);
+    else if (key === 'Tab') {
+      e.preventDefault();
+      let c = f.c + (e.shiftKey ? -1 : 1);
+      let dr = f.dr;
+      if (c < 0) { c = this.columns.length - 1; dr = Math.max(0, dr - 1); }
+      else if (c >= this.columns.length) { c = 0; dr = Math.min(count - 1, dr + 1); }
+      this._setFocus(dr, c);
+    } else if (key === 'Enter' || key === 'F2') {
+      e.preventDefault();
+      this._editFocused();
+    } else if (key === 'Delete') {
+      const { r, isNew } = this._fromDisplay(f.dr);
+      if (this.editable || isNew) {
+        e.preventDefault();
+        this._setCell(r, f.c, null, isNew, this._tdAt(f.dr, f.c));
+      }
+    } else if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'c' && !e.shiftKey && !e.altKey) {
+      if (window.getSelection && String(window.getSelection())) return; // 用户手动选择了文本，保留默认复制
+      e.preventDefault();
+      if (this.selection.size > 1) { this._copyRows('tsv'); return; }
+      const { r, isNew } = this._fromDisplay(f.dr);
+      const v = this._currentVal(r, f.c, isNew);
+      navigator.clipboard.writeText(cellText(v === undefined ? null : v));
+      toast.success('已复制单元格');
+    } else if (!e.ctrlKey && !e.altKey && !e.metaKey && key.length === 1) {
+      // 直接输入进入编辑（输入字符作为起始内容），Navicat/Excel 习惯
+      const { r, isNew } = this._fromDisplay(f.dr);
+      if (this.editable || isNew) {
+        e.preventDefault();
+        const td = this._tdAt(f.dr, f.c);
+        if (td) this._beginEdit(td, r, f.c, isNew, key);
+      }
+    }
   }
 
   _renderRow(values, r, isNew) {
@@ -185,7 +288,12 @@ export class DataGrid {
         cellViewer(this.columns[i].name, v === undefined ? null : v, blobCtx);
       }
     });
-    td.addEventListener('click', (e) => this._selectRow(r, isNew, e));
+    td.addEventListener('click', (e) => {
+      this._selectRow(r, isNew, e);
+      // 单击即获得单元格焦点（Navicat 式）；多选时不重置行选择
+      this._setFocus(isNew ? this.rows.length + r : r, i, { scroll: false, select: false });
+      this.wrap.focus();
+    });
     return td;
   }
 
@@ -216,11 +324,12 @@ export class DataGrid {
     return this.rows[r][i];
   }
 
-  _beginEdit(td, r, i, isNew) {
+  _beginEdit(td, r, i, isNew, initialText) {
     const cur = this._currentVal(r, i, isNew);
     if (cur && typeof cur === 'object' && cur.__blob) { toast.info('BLOB 字段不支持在网格中编辑'); return; }
     if (!isNew && this.deletedRows.has(r)) return;
     this._removeEditor(false);
+    this._setFocus(isNew ? this.rows.length + r : r, i, { scroll: false, select: false });
     const rect = td.getBoundingClientRect();
     const wrapRect = this.wrap.getBoundingClientRect();
     const ta = el('textarea', { class: 'cell-editor', spellcheck: false });
@@ -231,8 +340,8 @@ export class DataGrid {
     ta.style.height = Math.max(rect.height + 2, 28) + 'px';
     this._editor = { ta, td, r, i, isNew, orig: cur };
     ta.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); this._removeEditor(true); }
-      else if (e.key === 'Escape') { e.preventDefault(); this._removeEditor(false); }
+      if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); this._removeEditor(true); this.wrap.focus(); }
+      else if (e.key === 'Escape') { e.preventDefault(); this._removeEditor(false); this.wrap.focus(); }
       else if (e.key === 'Tab') {
         e.preventDefault();
         const next = e.shiftKey ? i - 1 : i + 1;
@@ -241,13 +350,21 @@ export class DataGrid {
           const tr = td.parentNode;
           const ntd = tr.children[next + 1];
           if (ntd) this._beginEdit(ntd, r, next, isNew);
+        } else {
+          this.wrap.focus();
         }
       }
     });
     ta.addEventListener('blur', () => this._removeEditor(true));
     this.wrap.append(ta);
     ta.focus();
-    ta.select();
+    if (initialText !== undefined) {
+      // 直接输入进入编辑：以敲下的字符覆盖原值开始
+      ta.value = initialText;
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    } else {
+      ta.select();
+    }
   }
 
   _removeEditor(commit) {
@@ -290,6 +407,10 @@ export class DataGrid {
   /** 当前显示行的主键对象（无主键返回 null） */
   _pkOf(r, isNew) {
     if (isNew || !this.pk || !this.pk.length) return null;
+    if (this.rowIdColumn && this.rowIds) {
+      const id = this.rowIds[r];
+      return id === null || id === undefined ? null : { [this.rowIdColumn]: id };
+    }
     const o = {};
     for (const name of this.pk) {
       const idx = this.columns.findIndex((c) => c.name === name);
@@ -382,6 +503,7 @@ export class DataGrid {
     const ops = [];
     const pkIdx = this.pk.map((name) => this.columns.findIndex((c) => c.name === name));
     const pkOf = (r) => {
+      if (this.rowIdColumn && this.rowIds) return { [this.rowIdColumn]: this.rowIds[r] };
       const o = {};
       this.pk.forEach((name, j) => { o[name] = this.rows[r][pkIdx[j]]; });
       return o;

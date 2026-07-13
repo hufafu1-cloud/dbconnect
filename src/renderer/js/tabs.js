@@ -1,6 +1,7 @@
 // 标签页管理
 import { $, el, iconEl } from './util.js';
 import { confirmDialog, toast } from './toast.js';
+import { showMenu } from './contextmenu.js';
 import { loadWorkspace, saveWorkspace } from './workspace.js';
 
 const tabs = new Map(); // id -> {id, tabEl, paneEl, onShow, onClose, isDirty, recovery, title}
@@ -340,6 +341,16 @@ export function addTab(opts) {
     }, '✕'));
   }
   tabEl.addEventListener('auxclick', (e) => { if (e.button === 1) closeTab(id); });
+  tabEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, [
+      !opts.permanent && { label: '关闭', hint: 'Ctrl+W', onClick: () => closeTab(id) },
+      { label: '关闭其他标签页', onClick: () => closeOtherTabs(id) },
+      { label: '关闭右侧标签页', onClick: () => closeTabsToRight(id) },
+      { sep: true },
+      { label: '关闭全部标签页', onClick: () => closeAllTabs() },
+    ].filter(Boolean));
+  });
 
   const paneEl = el('div', { class: 'tabpane' });
   $('#tabbar').append(tabEl);
@@ -384,4 +395,37 @@ export function anyDirty() {
 
 export function closeActive() {
   if (activeId) closeTab(activeId);
+}
+
+/** 标签的视觉顺序（tabbar DOM 顺序，工作区恢复后可能与插入顺序不同） */
+function orderedTabIds() {
+  const bar = $('#tabbar');
+  if (!bar) return [...tabs.keys()];
+  const byEl = new Map([...tabs.values()].map((t) => [t.tabEl, t.id]));
+  return [...bar.children].map((elm) => byEl.get(elm)).filter(Boolean);
+}
+
+/** Ctrl+Tab / Ctrl+Shift+Tab 循环切换 */
+export function activateRelative(delta) {
+  const ids = orderedTabIds();
+  if (ids.length < 2) return;
+  const i = Math.max(0, ids.indexOf(activeId));
+  activate(ids[(i + delta + ids.length) % ids.length]);
+}
+
+export async function closeOtherTabs(keepId) {
+  for (const id of orderedTabIds()) {
+    if (id !== keepId) await closeTab(id);
+  }
+}
+
+export async function closeTabsToRight(id) {
+  const ids = orderedTabIds();
+  const i = ids.indexOf(id);
+  if (i < 0) return;
+  for (const tid of ids.slice(i + 1)) await closeTab(tid);
+}
+
+export async function closeAllTabs() {
+  for (const id of orderedTabIds()) await closeTab(id);
 }

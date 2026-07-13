@@ -434,6 +434,98 @@ async function runSelfTest() {
   const pgIndexCatalogSql = pgCatalogQueries.find((sql) => sql.includes('FROM pg_index ix')) || '';
   check('PG 旧版本目录不直接引用 PG11 indnkeyatts 栏位', pgIndexCatalogSql.includes("row_to_json(ix)->>'indnkeyatts'")
     && !/\bix\.indnkeyatts\b/.test(pgIndexCatalogSql), pgIndexCatalogSql);
+  const pgEstimation = new PostgresAdapter({});
+  pgEstimation._q = async (_db, sql) => {
+    if (sql.includes("relkind IN ('r', 'p')")) {
+      pgEstimation._lastListSql = sql;
+      return [
+        { name: 't_analyzed', rows: '42', comment: '' },
+        { name: 't_never_analyzed', rows: null, comment: '' },
+        { name: 't_bulk_loaded', rows: null, comment: '' },
+      ];
+    }
+    return [];
+  };
+  const pgObjects = await pgEstimation.listObjects('db1', 'public');
+  check('PG 未分析表行数显示未知而非 0', pgObjects.tables[0].rows === 42 && pgObjects.tables[1].rows === null,
+    pgObjects.tables);
+  check('PG 行数估算联查 pg_stat_user_tables', /pg_stat_user_tables/.test(pgEstimation._lastListSql || '')
+    && /n_tup_ins/.test(pgEstimation._lastListSql || ''), pgEstimation._lastListSql);
+  const pgRowId = new PostgresAdapter({});
+  pgRowId._q = async (_db, _sql, params) => [{ relkind: params[1] === 'part_tbl' ? 'p' : 'r' }];
+  check('PG 无主键普通表回退 ctid 而分区表不回退',
+    (await pgRowId.rowIdFor('db1', 'public', 'plain_tbl')) === 'ctid'
+    && (await pgRowId.rowIdFor('db1', 'public', 'part_tbl')) === null);
+  const rowIdAdapter = new (class extends require('./db/base').BaseAdapter {
+    quoteIdent(n) { return '"' + n + '"'; }
+    qualify(_db, schema, table) { return `"${schema}"."${table}"`; }
+    async tableInfo() { return { columns: [{ name: 'a', type: 'text' }, { name: 'b', type: 'int4' }], pk: [] }; }
+    async rowIdFor() { return 'ctid'; }
+    pageSql(sql) { return sql; }
+    async exec(_db, sql) {
+      if (sql.includes('COUNT(*)')) return { columns: [{ name: 'count' }], rows: [[2]] };
+      return { columns: [{ name: 'a' }, { name: 'b' }, { name: 'ctid' }], rows: [['x', 1, '(0,1)'], ['y', 2, '(0,2)']] };
+    }
+  })({});
+  const rowIdData = await rowIdAdapter.tableData('db1', { schema: 's', table: 't', page: 1, pageSize: 10 });
+  check('无主键表回退行标识后仍可编辑且不显示标识列',
+    rowIdData.pk.length === 1 && rowIdData.pk[0] === 'ctid' && rowIdData.rowIdColumn === 'ctid'
+    && rowIdData.columns.length === 2 && rowIdData.rows.every((r) => r.length === 2)
+    && rowIdData.rowIds.join(',') === '(0,1),(0,2)', rowIdData);
+  const mysqlObjects = new MySQLAdapter({});
+  mysqlObjects._q = async (sql) => {
+    if (String(sql).startsWith('SHOW FULL TABLES')) {
+      return [{ Tables_in_db: 't_stale', Table_type: 'BASE TABLE' }, { Tables_in_db: 't_ok', Table_type: 'BASE TABLE' }];
+    }
+    if (String(sql).includes('information_schema.TABLES')) {
+      mysqlObjects._metaSql = sql;
+      return [
+        { tn: 't_stale', trows: 0, tcomment: '', tengine: 'InnoDB', dlen: 16384, ilen: 0 },
+        { tn: 't_ok', trows: 5, tcomment: '', tengine: 'InnoDB', dlen: 16384, ilen: 0 },
+      ];
+    }
+    return [];
+  };
+  const mysqlObjs = await mysqlObjects.listObjects('db1');
+  const mysqlStale = mysqlObjs.tables.find((t) => t.name === 't_stale');
+  const mysqlOk = mysqlObjs.tables.find((t) => t.name === 't_ok');
+  check('MySQL InnoDB 估算 0 但有数据页时显示未知', mysqlStale && mysqlStale.rows === null && mysqlOk && mysqlOk.rows === 5,
+    mysqlObjs.tables);
+  check('MySQL 行数估算读取 DATA_LENGTH', /DATA_LENGTH/.test(mysqlObjects._metaSql || ''), mysqlObjects._metaSql);
+  const mssqlObjects = new (require('./db/mssql').MSSQLAdapter)({});
+  mssqlObjects._q = async (_db, sql) => {
+    if (String(sql).includes('sys.tables')) {
+      mssqlObjects._listSql = sql;
+      return [
+        { sch: 'dbo', name: 't_stale', rowcnt: null, comment: '' },
+        { sch: 'dbo', name: 't_ok', rowcnt: 12, comment: '' },
+      ];
+    }
+    return [];
+  };
+  const mssqlObjs = await mssqlObjects.listObjects('db1');
+  check('SQL Server 行数未知不为 0', mssqlObjs.tables[0].rows === null && mssqlObjs.tables[1].rows === 12, mssqlObjs.tables);
+  check('SQL Server 行数估算不再 ISNULL 归零', !/ISNULL\(SUM\(p\.rows\),\s*0\)/.test(mssqlObjects._listSql || '')
+    && /data_pages/.test(mssqlObjects._listSql || ''), mssqlObjects._listSql);
+  const sqliteRowId = new SQLiteAdapter({});
+  sqliteRowId._execRaw = (sql) => ({
+    rows: [/norowid/i.test(String(sql))
+      ? ['CREATE TABLE norowid (a INT) WITHOUT ROWID']
+      : ['CREATE TABLE plain (a INT)']],
+  });
+  check('SQLite 无主键普通表回退 rowid', (await sqliteRowId.rowIdFor(null, null, 'plain')) === 'rowid'
+    && (await sqliteRowId.rowIdFor(null, null, 'norowid')) === null);
+  check('SQLite rowid 伪列不加引号', sqliteRowId.quoteRowId('rowid') === 'rowid'
+    && sqliteRowId.quoteRowId('name') === sqliteRowId.quoteIdent('name'));
+  check('obo 无主键表回退 ROWID', (await obo.rowIdFor('SCOTT', null, 'EMP')) === 'ROWID');
+  const oboObjects = new OBOracleAdapter({});
+  oboObjects._q = async (sql) => (String(sql).includes('all_tables') ? [
+    { TABLE_NAME: 'T_STALE', NUM_ROWS: 0, BLOCKS: 8, COMMENTS: '' },
+    { TABLE_NAME: 'T_OK', NUM_ROWS: 3, BLOCKS: 1, COMMENTS: '' },
+  ] : []);
+  const oboObjs = await oboObjects.listObjects('SCOTT');
+  check('Oracle 估算 0 但有 blocks 时显示未知', oboObjs.tables[0].rows === null && oboObjs.tables[1].rows === 3,
+    oboObjs.tables);
   const { EventEmitter } = require('events');
   const pgSessionAdapter = new PostgresAdapter({});
   const pgSessionClient = new EventEmitter();

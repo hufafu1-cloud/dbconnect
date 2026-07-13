@@ -431,16 +431,21 @@ class OBOracleAdapter extends BaseAdapter {
     let tRows;
     try {
       tRows = await this._q(
-        `SELECT t.table_name, t.num_rows, c.comments FROM all_tables t
+        `SELECT t.table_name, t.num_rows, t.blocks, c.comments FROM all_tables t
          LEFT JOIN all_tab_comments c ON c.owner = t.owner AND c.table_name = t.table_name
          WHERE t.owner = ${L(db)} ORDER BY t.table_name`);
     } catch (e1) {
       try {
         tRows = await this._q(
-          `SELECT table_name, num_rows FROM all_tables WHERE owner = ${L(db)} ORDER BY table_name`);
+          `SELECT table_name, num_rows, blocks FROM all_tables WHERE owner = ${L(db)} ORDER BY table_name`);
       } catch (e2) {
-        tRows = await this._q(
-          `SELECT table_name FROM all_tables WHERE owner = ${L(db)} ORDER BY table_name`);
+        try {
+          tRows = await this._q(
+            `SELECT table_name, num_rows FROM all_tables WHERE owner = ${L(db)} ORDER BY table_name`);
+        } catch (e3) {
+          tRows = await this._q(
+            `SELECT table_name FROM all_tables WHERE owner = ${L(db)} ORDER BY table_name`);
+        }
       }
     }
     let vRows = [];
@@ -449,14 +454,30 @@ class OBOracleAdapter extends BaseAdapter {
         `SELECT view_name FROM all_views WHERE owner = ${L(db)} ORDER BY view_name`);
     } catch (e) { /* 视图目录不可用时只列表 */ }
     return {
-      tables: tRows.map((r) => ({
-        name: val(r, 'table_name'),
-        rows: val(r, 'num_rows') === null || val(r, 'num_rows') === undefined ? null : Number(val(r, 'num_rows')),
-        comment: val(r, 'comments') || '',
-        engine: '',
-      })),
+      tables: tRows.map((r) => {
+        const nr = val(r, 'num_rows');
+        const blocks = val(r, 'blocks');
+        let rows = null;
+        if (nr !== null && nr !== undefined) {
+          const n = Number(nr);
+          if (n > 0) rows = n;
+          else if (n === 0 && blocks !== null && blocks !== undefined && Number(blocks) > 0) rows = null;
+          else rows = n;
+        }
+        return {
+          name: val(r, 'table_name'),
+          rows,
+          comment: val(r, 'comments') || '',
+          engine: '',
+        };
+      }),
       views: vRows.map((r) => ({ name: val(r, 'view_name') })),
     };
+  }
+
+  /** 无主键表用 ROWID 定位行（Navicat 同款做法） */
+  async rowIdFor(_db, _schema, _table) {
+    return 'ROWID';
   }
 
   async tableInfo(db, _schema, table) {

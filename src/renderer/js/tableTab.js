@@ -235,7 +235,28 @@ export function openTableTab(target, openOpts) {
     load();
   };
 
+  // Navicat 式底部记录操作区：添加 / 删除 / 应用 / 放弃 + 当前记录位置
+  const recEl = el('span', { style: { color: 'var(--text-muted)', fontSize: '12px', whiteSpace: 'nowrap' } }, '');
+  const navBtn = (label, title, onClick, extra) =>
+    el('button', { class: 'pbtn' + (extra ? ' ' + extra : ''), title, onClick, style: { minWidth: '26px', padding: '2px 7px' } }, label);
+  const navAdd = navBtn('＋', '添加行', () => { if (canEdit()) grid.addNewRow(); });
+  const navDel = navBtn('－', '删除选中行', () => { if (canEdit()) { grid.deleteSelected(); updateDirty(); } });
+  const navApply = navBtn('✓', '应用更改', applyChanges, 'success');
+  const navDiscard = navBtn('✗', '放弃更改', discardChanges, 'danger');
+
+  function updateRecordInfo() {
+    if (total === null) { recEl.textContent = ''; return; }
+    const hasSel = grid.selection.size && grid.lastSel !== null;
+    recEl.textContent = hasSel
+      ? `第 ${fmtCount((page - 1) * pageSize + grid.lastSel + 1)} 条（共 ${fmtCount(total)} 条）`
+      : `共 ${fmtCount(total)} 条记录`;
+  }
+  grid.opts.onSelect = () => updateRecordInfo();
+
   const pager = el('div', { class: 'pane-info' },
+    el('span', { style: { display: 'inline-flex', gap: '2px', alignItems: 'center' } },
+      navAdd, navDel, navApply, navDiscard),
+    el('span', { class: 'sep' }),
     el('span', { style: { display: 'inline-flex', gap: '2px', alignItems: 'center' } },
       el('button', { class: 'pbtn', title: '第一页', onClick: () => goPage(1) }, '⏮'),
       el('button', { class: 'pbtn', title: '上一页', onClick: () => goPage(page - 1) }, '◀'),
@@ -250,6 +271,7 @@ export function openTableTab(target, openOpts) {
         sel.addEventListener('change', () => { pageSize = Number(sel.value); page = 1; load(); });
         return sel;
       })(), '行'),
+    recEl,
     infoEl,
   );
 
@@ -309,12 +331,13 @@ export function openTableTab(target, openOpts) {
       roBadge.style.display = readonly ? '' : 'none';
       grid.opts.editable = !readonly;
       grid.setSort(orderBy, orderDir);
-      grid.setData({ columns: r.columns, rows: r.rows, pk: r.pk });
+      grid.setData({ columns: r.columns, rows: r.rows, pk: r.pk, rowIds: r.rowIds, rowIdColumn: r.rowIdColumn });
       pageInput.value = String(page);
       pageLabel.textContent = `/ ${pageCount()} 页`;
       infoEl.textContent = `共 ${fmtCount(total)} 行 · 本页 ${r.rows.length} 行 · 查询耗时 ${r.ms} ms`;
       statusbar.setRight(`${fmtCount(total)} 行 · ${r.ms} ms`);
       if (viewMode === 'form' && formView) formView.setIndex(0);
+      updateRecordInfo();
       updateDirty();
       if (tab.touchRecovery) tab.touchRecovery();
     } catch (e) {
@@ -330,6 +353,8 @@ export function openTableTab(target, openOpts) {
     const n = grid.cellEdits.size + grid.newRows.length + grid.deletedRows.size;
     btnApply.disabled = !grid.isDirty();
     btnDiscard.disabled = !grid.isDirty();
+    navApply.disabled = !grid.isDirty();
+    navDiscard.disabled = !grid.isDirty();
     if (grid.isDirty()) infoEl.textContent = `待应用更改: ${n} 处（点击“应用”提交）`;
   }
 

@@ -34,6 +34,81 @@ function selectRow(row) {
   row.classList.add('selected');
 }
 
+// ---------------- 键盘导航（Navicat 式：上下移动、左右展折、Enter 打开、字母定位） ----------------
+let typeBuf = '';
+let typeTimer = null;
+
+function visibleTreeRows() {
+  return [...treeRoot.querySelectorAll('.tree-row')].filter((r) => r.offsetParent !== null);
+}
+
+function rowParts(row) {
+  const node = row.parentElement; // .tree-node
+  const tw = row.querySelector('.tree-twisty');
+  const children = node && node.querySelector(':scope > .tree-children');
+  return {
+    tw,
+    children,
+    hasTwisty: tw && !tw.classList.contains('leaf'),
+    isOpen: !!(children && children.classList.contains('open')),
+  };
+}
+
+function focusTreeRow(row) {
+  row.click(); // 复用行选中 + onSelect（同步激活目标）
+  row.scrollIntoView({ block: 'nearest' });
+}
+
+function treeKeyDown(e) {
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const rows = visibleTreeRows();
+  if (!rows.length) return;
+  const cur = treeRoot.querySelector('.tree-row.selected');
+  const idx = cur ? rows.indexOf(cur) : -1;
+  const key = e.key;
+
+  if (key === 'ArrowDown' || key === 'ArrowUp') {
+    e.preventDefault();
+    const next = rows[Math.min(rows.length - 1, Math.max(0, idx + (key === 'ArrowDown' ? 1 : -1)))];
+    if (next && next !== cur) focusTreeRow(next);
+    else if (!cur && rows[0]) focusTreeRow(rows[0]);
+  } else if (key === 'ArrowRight') {
+    if (!cur) return;
+    e.preventDefault();
+    const p = rowParts(cur);
+    if (p.hasTwisty && !p.isOpen) p.tw.click();
+    else if (p.isOpen && idx + 1 < rows.length) focusTreeRow(rows[idx + 1]); // 已展开 → 进入第一个子节点
+  } else if (key === 'ArrowLeft') {
+    if (!cur) return;
+    e.preventDefault();
+    const p = rowParts(cur);
+    if (p.hasTwisty && p.isOpen) p.tw.click();
+    else {
+      // 折叠态/叶子 → 回到父节点
+      const parentChildren = cur.parentElement && cur.parentElement.closest('.tree-children');
+      const parentRow = parentChildren && parentChildren.parentElement
+        && parentChildren.parentElement.querySelector(':scope > .tree-row');
+      if (parentRow) focusTreeRow(parentRow);
+    }
+  } else if (key === 'Enter') {
+    if (!cur) return;
+    e.preventDefault();
+    cur.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  } else if (key.length === 1 && !/\s/.test(key)) {
+    // typeahead：连续输入字母跳到匹配节点
+    typeBuf += key.toLowerCase();
+    if (typeTimer) clearTimeout(typeTimer);
+    typeTimer = setTimeout(() => { typeBuf = ''; }, 800);
+    const start = idx >= 0 ? idx : 0;
+    const order = [...rows.slice(start + 1), ...rows.slice(0, start + 1)];
+    const hit = order.find((r) => {
+      const label = r.querySelector('.tree-label');
+      return label && label.textContent.toLowerCase().startsWith(typeBuf);
+    });
+    if (hit) { e.preventDefault(); focusTreeRow(hit); }
+  }
+}
+
 function makeBranch() {
   return el('div', { class: 'tree-children' });
 }
@@ -771,7 +846,7 @@ function renderLeaf(conn, db, schema, item, depth, isView) {
     depth,
     icon: isView ? 'view' : 'table',
     label,
-    meta: item.rows !== null && item.rows !== undefined ? String(item.rows) : '',
+    meta: item.rows !== null && item.rows !== undefined ? String(item.rows) : '-',
     twisty: false,
     onSelect: () => {
       setActiveTarget({ connId: conn.id, db, schema: target.schema, table: target.table }, 'tree-object');
@@ -866,6 +941,10 @@ function renderGroupNode(gname, conns) {
 // ---------------- 入口与刷新 ----------------
 export function renderTree() {
   treeRoot = $('#tree');
+  if (!treeRoot.hasAttribute('tabindex')) {
+    treeRoot.setAttribute('tabindex', '0');
+    treeRoot.addEventListener('keydown', treeKeyDown);
+  }
   treeRoot.innerHTML = '';
   connNodes.clear();
   if (!state.connections.length) {

@@ -355,6 +355,14 @@ class SQLiteAdapter extends BaseAdapter {
     } catch (e) { /* ignore */ }
     return { columns, indexes, pk, ddl, metadataComplete };
   }
+
+  /** 无主键的普通表用隐式 rowid 定位行；WITHOUT ROWID 表不支持 */
+  async rowIdFor(_db, _schema, table) {
+    const r = this._execRaw(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ${this.literal(table)}`);
+    const ddl = r.rows[0] && r.rows[0][0];
+    if (ddl && /WITHOUT\s+ROWID/i.test(String(ddl))) return null;
+    return 'rowid';
+  }
 }
 
 module.exports = { SQLiteAdapter };

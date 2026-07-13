@@ -369,13 +369,17 @@ class MySQLAdapter extends BaseAdapter {
     views.sort((a, b) => String(a.name).localeCompare(String(b.name)));
     try {
       const meta = await this._q(
-        `SELECT TABLE_NAME AS tn, TABLE_ROWS AS trows, TABLE_COMMENT AS tcomment, ENGINE AS tengine
+        `SELECT TABLE_NAME AS tn, TABLE_ROWS AS trows, TABLE_COMMENT AS tcomment, ENGINE AS tengine,
+                DATA_LENGTH AS dlen, INDEX_LENGTH AS ilen
          FROM information_schema.TABLES WHERE TABLE_SCHEMA = ${L(db)}`);
       const m = new Map(meta.map((x) => [x.tn, x]));
       for (const t of tables) {
         const x = m.get(t.name);
         if (x) {
-          t.rows = x.trows === null || x.trows === undefined ? null : Number(x.trows);
+          let rows = x.trows === null || x.trows === undefined ? null : Number(x.trows);
+          // InnoDB 等引擎 TABLE_ROWS 为估算值；批量导入后常见 0 但已有数据页
+          if (rows === 0 && (Number(x.dlen) > 0 || Number(x.ilen) > 0)) rows = null;
+          t.rows = rows;
           t.comment = x.tcomment || '';
           t.engine = x.tengine || '';
         }

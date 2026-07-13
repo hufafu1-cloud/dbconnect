@@ -6,6 +6,7 @@ import { DataGrid } from './grid.js';
 import { toast, promptDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { showMenu } from './contextmenu.js';
+import { openEditorSearch, closeEditorSearch, editorSearchNext } from './editorSearch.js';
 
 const CM_MODES = { mysql: 'text/x-mysql', postgres: 'text/x-pgsql', mssql: 'text/x-mssql', sqlite: 'text/x-sqlite', clickhouse: 'text/x-mysql', oceanbase: 'text/x-mysql', oboracle: 'text/x-plsql' };
 let queryNo = 0;
@@ -158,7 +159,7 @@ export function openQueryTab(target, initialSql, opts) {
   const mkBtn = (icon, label, onClick, cls) =>
     el('button', { class: 'pbtn' + (cls ? ' ' + cls : ''), onClick }, iconEl(icon), label);
 
-  const btnRun = mkBtn('run', '运行 (F5)', () => run('current'), 'success');
+  const btnRun = mkBtn('run', '运行 (Ctrl+R)', () => run('current'), 'success');
   const btnRunSel = mkBtn('runSel', '运行选中', () => run('selection'));
   const btnRunAll = mkBtn('runSel', '运行全部', () => run('all'));
   const btnStop = mkBtn('stop', '停止', async () => {
@@ -299,9 +300,16 @@ export function openQueryTab(target, initialSql, opts) {
     extraKeys: {
       'F5': () => run('current'),
       'Ctrl-Enter': () => run('current'),
+      'Ctrl-R': () => run('current'),
+      'Shift-Ctrl-R': () => run('selection'),
       'Ctrl-Space': () => triggerHint(),
       'Ctrl-S': () => saveQuery(),
       'Shift-Ctrl-F': () => formatSql(),
+      'Ctrl-F': (cmi) => openEditorSearch(cmi),
+      'Ctrl-H': (cmi) => openEditorSearch(cmi, { replace: true }),
+      'F3': (cmi) => editorSearchNext(cmi),
+      'Shift-F3': (cmi) => editorSearchNext(cmi, true),
+      'Esc': (cmi) => { if (!closeEditorSearch(cmi)) return CodeMirror.Pass; },
     },
     hintOptions: { completeSingle: false },
   });
@@ -925,7 +933,7 @@ export function openQueryTab(target, initialSql, opts) {
   loadHintColumns();
   refreshTransactionSupport();
   syncTransactionUi();
-  addResultPage('信息', el('div', { class: 'msg-list' }, 'F5 / Ctrl+Enter：有选区运行选区，否则运行光标所在语句；“运行全部”执行完整脚本。关闭自动提交后可显式提交或回滚。'), false);
+  addResultPage('信息', el('div', { class: 'msg-list' }, 'Ctrl+R / F5 / Ctrl+Enter：有选区运行选区，否则运行光标所在语句；Ctrl+Shift+R 运行选中；Ctrl+F 查找 / Ctrl+H 替换。关闭自动提交后可显式提交或回滚。'), false);
   activatePage(0);
   setTimeout(() => cm.focus(), 50);
 

@@ -443,18 +443,44 @@ class PostgresAdapter extends BaseAdapter {
 
   async listObjects(db, schema) {
     const sch = schema || 'public';
+    // 行数为统计估算，不是 COUNT(*)。reltuples / relpages 在批量导入后可能长期为 0；
+    // pg_stat_user_tables.n_live_tup / n_tup_ins 能识别“已有写入但统计未跟上”的情况。
     const tables = await this._q(db,
-      `SELECT c.relname AS name, GREATEST(c.reltuples, 0)::bigint AS rows,
+      `SELECT c.relname AS name,
+              CASE
+                WHEN COALESCE(st.n_live_tup, 0) > 0 THEN st.n_live_tup
+                WHEN c.reltuples > 0 THEN c.reltuples::bigint
+                WHEN c.reltuples < 0 THEN NULL
+                WHEN COALESCE(st.n_tup_ins, 0) > COALESCE(st.n_tup_del, 0) THEN NULL
+                WHEN c.reltuples = 0 AND c.relpages > 0 THEN NULL
+                ELSE 0
+              END AS rows,
               obj_description(c.oid, 'pg_class') AS comment
-       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') ORDER BY c.relname`, [sch]);
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       LEFT JOIN pg_stat_user_tables st ON st.relid = c.oid
+       WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')
+       ORDER BY c.relname`, [sch]);
     const views = await this._q(db,
       `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = $1 AND c.relkind IN ('v', 'm') ORDER BY c.relname`, [sch]);
     return {
-      tables: tables.map((t) => ({ name: t.name, schema: sch, rows: Number(t.rows), comment: t.comment || '', engine: '' })),
+      tables: tables.map((t) => ({
+        name: t.name, schema: sch,
+        rows: t.rows === null || t.rows === undefined ? null : Number(t.rows),
+        comment: t.comment || '', engine: '',
+      })),
       views: views.map((v) => ({ name: v.name, schema: sch })),
     };
+  }
+
+  /** 无主键的普通表用系统列 ctid 定位行（Navicat 同款做法）。
+   *  分区表的 ctid 跨分区不唯一，禁用以避免误改其它分区的行。 */
+  async rowIdFor(db, schema, table) {
+    const rows = await this._q(db,
+      `SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = $1 AND c.relname = $2`, [schema || 'public', table]);
+    return rows.length && rows[0].relkind === 'r' ? 'ctid' : null;
   }
 
   async tableInfo(db, schema, table) {
