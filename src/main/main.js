@@ -1,5 +1,6 @@
 // 主进程入口
 const { app, BrowserWindow, Menu } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { migrateLegacyUserData } = require('./userDataMigration');
@@ -15,6 +16,23 @@ if (isSmoke || isSelfTest || isDemo) {
   // 将 Datavia / DBConnect 的本地配置一次性迁移到 DBPanda，避免已存连接“丢失”
   migrateOldData();
 }
+
+// 只分离 Chromium 磁盘缓存，不迁移 sessionData：safeStorage 依赖原有 profile
+// 的安全状态，迁移整个会话目录会令已保存的数据库密码无法解密。
+function configureDiskCache() {
+  try {
+    const localAppData = process.env.LOCALAPPDATA || path.join(app.getPath('home'), 'AppData', 'Local');
+    const base = isSmoke || isSelfTest || isDemo
+      ? app.getPath('userData')
+      : path.join(localAppData, 'DBPanda');
+    const diskCache = path.join(base, 'ChromiumCache');
+    fs.mkdirSync(diskCache, { recursive: true });
+    app.commandLine.appendSwitch('disk-cache-dir', diskCache);
+  } catch (e) {
+    // 无法创建独立缓存目录时保留 Electron 默认路径，不能阻断数据库客户端启动。
+  }
+}
+configureDiskCache();
 
 // productName 改名后 userData 目录变为 %APPDATA%/DBPanda，迁移历史数据
 function migrateOldData() {
