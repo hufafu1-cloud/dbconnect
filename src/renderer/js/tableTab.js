@@ -13,7 +13,7 @@ export function openTableTab(target, openOpts) {
   setActiveTarget(target, 'table-tab');
   const restored = openOpts && openOpts.restoreState;
   const tabId = (openOpts && openOpts.restoreId) || `table:${target.connId}|${target.db}|${target.schema || ''}|${target.table}`;
-  const tab = addTab({ id: tabId, title: target.table, icon: 'table', color: connColor(target.connId), tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}` });
+  const tab = addTab({ id: tabId, title: target.table, icon: 'table', color: connColor(target.connId), target: { ...target }, tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}` });
   if (tab.pane.childElementCount) {
     // 已存在：若带新筛选条件则套用并重载
     if (openOpts && openOpts.initialWhere && tab._applyWhere) tab._applyWhere(openOpts.initialWhere);
@@ -74,8 +74,6 @@ export function openTableTab(target, openOpts) {
   }
 
   const toolbar = el('div', { class: 'pane-toolbar' },
-    mkBtn('refresh', '刷新', () => load()),
-    el('span', { class: 'sep' }),
     mkBtn('filter', '条件', () => toggleBuilder()),
     whereInput,
     mkBtn('run', '应用筛选', () => { where = whereInput.value.trim(); page = 1; load(); }),
@@ -256,6 +254,8 @@ export function openTableTab(target, openOpts) {
   const pager = el('div', { class: 'pane-info' },
     el('span', { style: { display: 'inline-flex', gap: '2px', alignItems: 'center' } },
       navAdd, navDel, navApply, navDiscard),
+    el('span', { class: 'sep' }),
+    el('button', { class: 'pbtn table-refresh-bottom', title: '刷新当前表数据', onClick: () => load() }, iconEl('refresh'), '刷新'),
     el('span', { class: 'sep' }),
     el('span', { style: { display: 'inline-flex', gap: '2px', alignItems: 'center' } },
       el('button', { class: 'pbtn', title: '第一页', onClick: () => goPage(1) }, '⏮'),

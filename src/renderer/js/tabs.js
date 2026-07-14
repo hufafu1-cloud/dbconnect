@@ -358,12 +358,14 @@ export function addTab(opts) {
 
   const rec = {
     id, tabEl, paneEl, title: opts.title,
+    target: opts.target && typeof opts.target === 'object' ? { ...opts.target } : null,
     permanent: opts.permanent, onShow: opts.onShow, beforeClose: opts.beforeClose, onClose: opts.onClose, isDirty: opts.isDirty,
     recovery: recoveryFor(opts.recovery || opts.workspace),
   };
   const handle = {
     id,
     pane: paneEl,
+    target: rec.target ? { ...rec.target } : null,
     deferredWorkspaceEntry,
     setTitle(t) { rec.title = t; titleEl.textContent = t; tabEl.title = t; scheduleWorkspacePersist(); },
     setDirty(d) { tabEl.classList.toggle('dirty', !!d); scheduleWorkspacePersist(); },

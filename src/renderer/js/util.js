@@ -94,6 +94,9 @@ export const icons = {
     <rect x="8.8" y="2.4" width="5.2" height="5.2" rx="1" fill="#2b7de9" opacity=".35"/>
     <rect x="2" y="8.4" width="5.2" height="5.2" rx="1" fill="#2b7de9" opacity=".35"/>
     <rect x="8.8" y="8.4" width="5.2" height="5.2" rx="1" fill="#2b7de9" opacity=".75"/>`),
+  locate: svg(`<circle cx="8" cy="8" r="5.5" stroke="#2b7de9" stroke-width="1.35" fill="none"/>
+    <path d="M8 1v3M8 12v3M1 8h3M12 8h3" stroke="#2b7de9" stroke-width="1.35" stroke-linecap="round"/>
+    <circle cx="8" cy="8" r="1.8" fill="#2b7de9"/>`),
   struct: svg(`<rect x="2" y="2" width="12" height="3.4" rx="1" fill="#d97706" opacity=".8"/>
     <rect x="2" y="6.4" width="12" height="3.4" rx="1" fill="#d97706" opacity=".5"/>
     <rect x="2" y="10.8" width="12" height="3.4" rx="1" fill="#d97706" opacity=".3"/>`),

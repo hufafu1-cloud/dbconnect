@@ -1014,11 +1014,20 @@ export function openConnectionById(connId) {
 
 /** 展开并选中工作区中保存的连接 / 数据库 / 模式 / 表上下文。 */
 export async function revealTarget(target) {
-  if (!target || !target.connId || !state.open.has(target.connId)) return false;
-  const nodes = [...treeRoot.querySelectorAll('.tree-node')];
+  if (!target || !target.connId || !state.open.has(target.connId) || !treeRoot) return false;
+  let nodes = [...treeRoot.querySelectorAll('.tree-node')];
   let selectedNode = nodes.find((n) => n.dataset.conn === target.connId) || null;
   if (target.db) {
-    const dbNode = nodes.find((n) => n.dataset.connId === target.connId && n.dataset.db === target.db && !n.dataset.schema && !n.dataset.table);
+    let dbNode = nodes.find((n) => n.dataset.connId === target.connId && n.dataset.db === target.db && !n.dataset.schema && !n.dataset.table);
+    // 连接已打开但目录节点尚未完成加载时，先补加载一次再继续定位。
+    if (!dbNode) {
+      const conn = connNodes.get(target.connId);
+      if (conn && conn.reload) {
+        await conn.reload();
+        nodes = [...treeRoot.querySelectorAll('.tree-node')];
+        dbNode = nodes.find((n) => n.dataset.connId === target.connId && n.dataset.db === target.db && !n.dataset.schema && !n.dataset.table);
+      }
+    }
     if (!dbNode) return false;
     if (dbNode._openBranch && (target.schema || target.table)) await dbNode._openBranch();
     selectedNode = dbNode;
@@ -1032,13 +1041,24 @@ export async function revealTarget(target) {
     }
   }
   if (target.table) {
-    const leaf = [...treeRoot.querySelectorAll('[data-leaf-node]')]
+    const leaves = [...treeRoot.querySelectorAll('[data-leaf-node]')];
+    let leaf = leaves
       .find((n) => n.dataset.connId === target.connId && n.dataset.db === target.db
         && (n.dataset.schema || '') === (target.schema || '') && n.dataset.table === target.table);
+    // 不同数据库驱动返回的 schema 可能为空或使用默认值，按连接、数据库和表名兜底匹配。
+    if (!leaf) {
+      leaf = leaves.find((n) => n.dataset.connId === target.connId
+        && (!target.db || n.dataset.db === target.db)
+        && (!target.schema || !n.dataset.schema || n.dataset.schema === target.schema)
+        && n.dataset.table === target.table);
+    }
     if (leaf) selectedNode = leaf;
   }
   const row = selectedNode && selectedNode.querySelector(':scope > .tree-row');
-  if (row) selectRow(row);
+  if (row) {
+    selectRow(row);
+    if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
+  }
   setActiveTarget(target, 'workspace-restore');
   return !!row;
 }

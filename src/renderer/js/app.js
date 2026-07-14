@@ -436,7 +436,28 @@ async function boot() {
   // 侧栏标题（Navicat 的“我的连接”）
   const head = $('#sidebar-head');
   if (head && !head.querySelector('.sidebar-title')) {
-    head.prepend(el('div', { class: 'sidebar-title' }, iconEl('connection'), '我的连接'));
+    const locateButton = el('button', {
+      class: 'sidebar-locate',
+      title: '在目录树中定位当前打开的表',
+      'aria-label': '在目录树中定位当前打开的表',
+      onClick: async () => {
+        const activeTab = getActiveTab();
+        const target = activeTab && activeTab.target && activeTab.target.table
+          ? activeTab.target
+          : null;
+        if (!target || !target.table) {
+          toast.info('请先打开一个表标签');
+          return;
+        }
+        if (!state.open.has(target.connId)) {
+          toast.info('该表所属连接已关闭');
+          return;
+        }
+        const found = await revealTarget(target).catch(() => false);
+        if (!found) toast.info('目录树中未找到该表，请先刷新对象列表');
+      },
+    }, iconEl('locate'));
+    head.prepend(el('div', { class: 'sidebar-title' }, iconEl('connection'), el('span', {}, '我的连接'), locateButton));
   }
   initObjectsTab();
   setupSplitter();

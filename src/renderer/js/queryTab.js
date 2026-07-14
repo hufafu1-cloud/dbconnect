@@ -90,17 +90,22 @@ export function openQueryTab(target, initialSql, opts) {
   }
   function fillConnSel() {
     connSel.innerHTML = '';
-    const opens = [...state.open.keys()];
-    if (!opens.length) connSel.append(el('option', { value: '' }, '(无打开的连接)'));
-    for (const id of opens) {
-      connSel.append(el('option', { value: id, selected: id === connId ? 'selected' : null }, connLabel(id)));
+    const connections = Array.isArray(state.connections) ? state.connections : [];
+    const opens = new Set(state.open.keys());
+    if (!connId) connSel.append(el('option', { value: '', selected: 'selected' }, '(请选择连接)'));
+    for (const saved of connections) {
+      const opened = opens.has(saved.id);
+      const label = connLabel(saved.id);
+      connSel.append(el('option', {
+        value: saved.id,
+        selected: saved.id === connId ? 'selected' : null,
+        title: opened ? '连接已打开' : '选择后自动打开连接',
+      }, opened ? label : `${label}（未打开）`));
     }
-    if (connId && !opens.includes(connId)) {
+    if (connId && !connections.some((item) => item.id === connId)) {
       const saved = state.connections.find((item) => item.id === connId);
       connSel.append(el('option', { value: connId, selected: 'selected', disabled: true },
         `${saved ? saved.name : connId}（未打开）`));
-    } else if (!connId) {
-      connId = opens[0] || null;
     }
     if (connId) connSel.value = connId;
     updateEnvBadge();
@@ -123,8 +128,25 @@ export function openQueryTab(target, initialSql, opts) {
     dbSel.title = dbUnavailable ? '恢复时保存的数据库已不存在或当前不可用；请明确选择新的数据库后再执行' : '数据库';
     updateSchemaBadge();
   }
-  connSel.addEventListener('change', () => {
-    connId = connSel.value || null;
+  connSel.addEventListener('change', async () => {
+    const nextConnId = connSel.value || null;
+    const previousConnId = connId;
+    if (nextConnId && !state.open.has(nextConnId)) {
+      connSel.disabled = true;
+      try {
+        const { openConnectionById } = await import('./tree.js');
+        await openConnectionById(nextConnId);
+      } catch (e) {
+        toast.error(`打开连接失败：${e && e.message ? e.message : e}`);
+      }
+      if (!state.open.has(nextConnId)) {
+        connSel.value = previousConnId || '';
+        fillConnSel();
+        syncTransactionUi();
+        return;
+      }
+    }
+    connId = nextConnId;
     db = null;
     schema = null;
     fillDbSel();
@@ -231,7 +253,7 @@ export function openQueryTab(target, initialSql, opts) {
   const toolbar = el('div', { class: 'pane-toolbar query-toolbar' },
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '执行'), btnRun, btnRunSel, btnRunAll, btnStop),
     el('span', { class: 'sep' }),
-    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '上下文'), connSel, prodBadge,
+    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '连接'), connSel, prodBadge,
       el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel, schemaBadge),
     el('span', { class: 'sep' }),
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '工具'), mkBtn('explain', '解释', explainSql), mkBtn('format', '美化', formatSql), btnAi),
