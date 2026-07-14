@@ -48,6 +48,84 @@ function showConnMenu(anchor) {
 }
 
 const kindBtns = new Map();
+let updateCheckBusy = false;
+let updateDownloadBusy = false;
+let updateDownloaded = false;
+let updatePromptOpen = false;
+let cachedAppVersion = null;
+
+function updateVersion(info) {
+  return info && info.version ? `v${info.version}` : '新版本';
+}
+
+async function currentAppVersion() {
+  if (cachedAppVersion) return cachedAppVersion;
+  try {
+    const info = await window.api.app.info();
+    cachedAppVersion = `v${info.version}`;
+  } catch (e) { cachedAppVersion = '当前版本'; }
+  return cachedAppVersion;
+}
+
+async function offerUpdate(info) {
+  if (updatePromptOpen || updateDownloaded) return;
+  updatePromptOpen = true;
+  try {
+    const ok = await confirmDialog('发现新版本', `当前版本 ${await currentAppVersion()}，发现 ${updateVersion(info)}。现在下载更新吗？`, { okLabel: '下载更新' });
+    if (!ok) return;
+    updateDownloadBusy = true;
+    statusbar.setLeft(`正在下载 ${updateVersion(info)}…`);
+    await window.api.app.updateDownload();
+  } catch (e) {
+    toast.error('更新下载失败：' + (e && e.message ? e.message : e));
+  } finally {
+    updateDownloadBusy = false;
+    updatePromptOpen = false;
+  }
+}
+
+async function checkForUpdates(manual = true) {
+  if (updateCheckBusy || updateDownloadBusy) return;
+  updateCheckBusy = true;
+  if (manual) statusbar.setLeft('正在检查更新…');
+  try {
+    const result = await window.api.app.updateCheck();
+    if (!result || !result.configured) {
+      if (manual) toast.info('更新服务尚未配置');
+      return;
+    }
+    if (!result.updateAvailable) {
+      if (manual) toast.info('当前已是最新版本');
+      return;
+    }
+    await offerUpdate(result.info);
+  } catch (e) {
+    if (manual) toast.error('检查更新失败：' + (e && e.message ? e.message : e));
+  } finally {
+    updateCheckBusy = false;
+  }
+}
+
+function setupUpdaterEvents() {
+  if (!window.api.app.onUpdate) return;
+  window.api.app.onUpdate(async (payload = {}) => {
+    if (payload.event === 'progress') {
+      const percent = Math.max(0, Math.min(100, Number(payload.percent || 0)));
+      statusbar.setLeft(`正在下载更新 ${percent.toFixed(0)}%…`);
+    } else if (payload.event === 'downloaded') {
+      updateDownloaded = true;
+      statusbar.setLeft(`更新 ${updateVersion(payload.info)} 已下载`);
+      const ok = await confirmDialog('更新已下载', `${updateVersion(payload.info)} 已准备好，是否立即重启安装？`, { okLabel: '立即重启' });
+      if (ok) {
+        try { await window.api.app.updateInstall(); }
+        catch (e) { toast.error('安装更新失败：' + (e && e.message ? e.message : e)); }
+      } else toast.info('更新已下载，退出程序时将自动安装');
+    } else if (payload.event === 'error') {
+      updateDownloadBusy = false;
+      toast.error('自动更新失败：' + (payload.message || '未知错误'));
+    }
+  });
+}
 
 function buildToolbar() {
   const tb = $('#toolbar');
@@ -269,6 +347,7 @@ export async function runMenuAction(id) {
       case 'prev-tab': activateRelative(-1); break;
       case 'toggle-theme': toggleTheme(); break;
       case 'about': showAbout(); break;
+      case 'check-update': checkForUpdates(true); break;
       default: break;
     }
 }
@@ -433,6 +512,7 @@ async function boot() {
   const { buildMenuBar } = await import('./menubar.js');
   buildMenuBar(runMenuAction);
   buildToolbar();
+  setupUpdaterEvents();
   // 侧栏标题（Navicat 的“我的连接”）
   const head = $('#sidebar-head');
   if (head && !head.querySelector('.sidebar-title')) {
@@ -527,6 +607,7 @@ async function boot() {
     : '就绪 — 新建或打开一个连接开始使用');
   $('#app').classList.remove('workspace-loading');
   window.__APP_READY = true;
+  setTimeout(() => checkForUpdates(false), 5000);
 }
 
 on('conn-opened', async ({ connId } = {}) => {

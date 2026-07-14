@@ -148,5 +148,13 @@ contextBridge.exposeInMainWorld('api', {
     onMenuAction: (cb) => ipcRenderer.on('menu:action', (_e, id) => cb(id)),
     openExternal: (url) => inv('app:openExternal', url),
     winCmd: (cmd) => inv('app:winCmd', cmd),
+    updateCheck: () => inv('app:update-check'),
+    updateDownload: () => inv('app:update-download'),
+    updateInstall: () => inv('app:update-install'),
+    onUpdate: (cb) => {
+      const listener = (_event, payload) => cb(payload);
+      ipcRenderer.on('app:update', listener);
+      return () => ipcRenderer.removeListener('app:update', listener);
+    },
   },
 });

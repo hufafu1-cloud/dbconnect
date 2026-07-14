@@ -64,6 +64,8 @@ export function buildMenuBar(runAction) {
       { label: '关闭窗口', onClick: () => window.api.app.winCmd('close') },
     ]],
     ['帮助', () => [
+      { label: '检查更新', onClick: () => runAction('check-update') },
+      { sep: true },
       { label: 'GitHub 仓库', onClick: () => window.api.app.openExternal('https://github.com/hufafu1-cloud/dbconnect') },
       { sep: true },
       { label: '关于 DBPanda', onClick: () => runAction('about') },

@@ -1,7 +1,7 @@
 {
   "name": "dbpanda",
   "productName": "DBPanda",
-  "version": "2.5.2",
+  "version": "2.5.4",
   "description": "DBPanda — 专业数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
   "main": "src/main/main.js",
   "author": "DBPanda",
@@ -33,6 +33,7 @@
     "better-sqlite3": "^12.2.0",
     "codemirror": "^5.65.16",
     "egoroof-blowfish": "^4.0.2",
+    "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
     "mssql": "^11.0.1",
     "mysql2": "^3.14.1",
@@ -68,6 +69,10 @@
       ],
       "icon": "assets/icon.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "http://172.16.35.63/download/"
     },
     "nsis": {
       "oneClick": false,

@@ -45,6 +45,7 @@ function migrateOldData() {
 
 const ipc = require('./ipc');
 const dbm = require('./db');
+const updater = require('./updater');
 
 let win = null;
 let allowClose = false;
@@ -132,6 +133,24 @@ ipcMain.on('app:confirm-close', (event, id) => {
   clearPendingClose();
   allowClose = true;
   if (win && !win.isDestroyed()) win.close();
+});
+
+ipcMain.handle('app:update-check', async () => {
+  try { return { ok: true, data: await updater.check() }; }
+  catch (error) { return { ok: false, error: error && error.message ? error.message : String(error) }; }
+});
+ipcMain.handle('app:update-download', async () => {
+  try { return { ok: true, data: await updater.download() }; }
+  catch (error) { return { ok: false, error: error && error.message ? error.message : String(error) }; }
+});
+ipcMain.handle('app:update-install', async () => {
+  try {
+    allowClose = true;
+    return { ok: true, data: updater.install() };
+  } catch (error) {
+    allowClose = false;
+    return { ok: false, error: error && error.message ? error.message : String(error) };
+  }
 });
 
 // 单实例
@@ -286,8 +305,12 @@ app.whenReady().then(async () => {
     return;
   }
   createWindow(true);
+  updater.setup(win);
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(true);
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow(true);
+      updater.setup(win);
+    }
   });
 });
 
