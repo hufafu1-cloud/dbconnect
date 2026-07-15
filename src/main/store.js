@@ -629,7 +629,14 @@ function aiPath() {
   return path.join(app.getPath('userData'), 'ai-config.json');
 }
 
-const AI_DEFAULT = { provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: '', temperature: 0.2 };
+const AI_DEFAULT = {
+  provider: 'thunisoft',
+  baseUrl: 'https://llm.thunisoft.com/v1',
+  model: 'GLM-5.2',
+  // 可通过环境变量覆盖；首次启动时会立即写入 safeStorage，不向渲染进程暴露明文。
+  apiKey: process.env.DBPANDA_AI_API_KEY || 'f39ecbb6-809e-45d6-aed4-8aeb0d54dc1f',
+  temperature: 0.2,
+};
 
 function loadAiRaw() {
   try { return JSON.parse(fs.readFileSync(aiPath(), 'utf8')); } catch (e) { return null; }
@@ -649,13 +656,20 @@ function normalizeAiBaseUrl(value) {
 
 function getAiConfig() {
   const c = loadAiRaw();
-  if (!c) return { ...AI_DEFAULT };
+  if (!c) {
+    try {
+      saveAiConfig(AI_DEFAULT);
+      const seeded = loadAiRaw();
+      if (seeded) return { ...AI_DEFAULT, ...seeded, apiKey: decryptPassword(seeded.apiKey, true) };
+    } catch (e) { /* 首次启动时安全存储不可用，保留内存默认值并等待用户保存 */ }
+    return { ...AI_DEFAULT };
+  }
   return { ...AI_DEFAULT, ...c, apiKey: decryptPassword(c.apiKey, true) };
 }
 
 function getAiConfigPublic() {
   const raw = loadAiRaw();
-  const out = { ...AI_DEFAULT, ...(raw || {}), hasApiKey: hasSecret(raw && raw.apiKey) };
+  const out = { ...AI_DEFAULT, ...(raw || {}), hasApiKey: hasSecret(raw && raw.apiKey) || (!raw && !!AI_DEFAULT.apiKey) };
   delete out.apiKey;
   return out;
 }

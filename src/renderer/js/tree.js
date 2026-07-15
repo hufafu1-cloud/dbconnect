@@ -276,6 +276,11 @@ function renderConnNode(conn) {
   }
 
   container.append(row, children);
+  container._openBranch = async () => {
+    if (!state.open.has(conn.id)) return;
+    if (!loaded) await loadDatabases();
+    setOpen(tw, children, true);
+  };
   connNodes.set(conn.id, { container, reload: loadDatabases, open: () => openConnection(conn) });
   return container;
 }
@@ -935,6 +940,7 @@ function renderGroupNode(gname, conns) {
     children.append(el('div', { class: 'tree-loading', style: { paddingLeft: '24px' } }, '（空分组，右键新建连接）'));
   }
   container.append(row, children);
+  container._openBranch = async () => { setOpen(tw, children, true); };
   return container;
 }
 
@@ -1053,6 +1059,18 @@ export async function revealTarget(target) {
         && n.dataset.table === target.table);
     }
     if (leaf) selectedNode = leaf;
+  }
+  // 定位前逐级展开分组、连接、数据库和模式节点；折叠状态不应阻止定位。
+  if (selectedNode) {
+    const ancestors = [];
+    let cursor = selectedNode;
+    while (cursor && cursor !== treeRoot) {
+      if (cursor.classList && cursor.classList.contains('tree-node')) ancestors.push(cursor);
+      cursor = cursor.parentElement;
+    }
+    for (const node of ancestors.reverse()) {
+      if (node._openBranch) await node._openBranch();
+    }
   }
   const row = selectedNode && selectedNode.querySelector(':scope > .tree-row');
   if (row) {

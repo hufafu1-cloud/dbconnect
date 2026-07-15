@@ -497,6 +497,7 @@ function register(getWin) {
   h('ai:getConfig', () => store.getAiConfigPublic());
   h('ai:saveConfig', (a) => store.saveAiConfig(a));
   h('ai:test', (a) => ai.test(store.hydrateAiConfig(a)));
+  h('ai:listModels', (a) => ai.listModels(store.hydrateAiConfig(a || {})));
   ipcMain.handle('ai:chat', async (event, a) => {
     const ctrl = new AbortController();
     aiAborts.set(a.reqId, ctrl);

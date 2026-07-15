@@ -7,10 +7,16 @@ let configured = false;
 
 function updateInfo(info) {
   if (!info) return null;
+  const notes = Array.isArray(info.releaseNotes)
+    ? info.releaseNotes
+      .filter((item) => item && (item.note || item.version))
+      .map((item) => ({ version: String(item.version || ''), note: String(item.note || '') }))
+    : (typeof info.releaseNotes === 'string' ? info.releaseNotes : '');
   return {
     version: info.version || '',
     releaseDate: info.releaseDate || '',
-    releaseNotes: typeof info.releaseNotes === 'string' ? info.releaseNotes : '',
+    releaseName: info.releaseName || '',
+    releaseNotes: notes,
   };
 }
 

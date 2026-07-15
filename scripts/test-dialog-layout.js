@@ -76,7 +76,7 @@ assert.doesNotMatch(iconBodies[1], /<rect/, 'PostgreSQL should use a clear stand
 assert.match(rule('.tree-icon'), /width:\s*18px/);
 assert.match(rule('.tree-icon svg'), /width:\s*18px/);
 assert.match(rule('.conn-closed > .tree-row .tree-icon svg'), /grayscale\(1\)/);
-assert.match(rule('.conn-closed > .tree-row .tree-icon svg'), /opacity:\s*0\.52/);
+assert.match(rule('.conn-closed > .tree-row .tree-icon svg'), /opacity:\s*0\.76/);
 assert.match(rule('.tree-node[data-conn] > .tree-row .tree-icon::after'), /width:\s*6px/);
 
 console.log('Dialog footer layout checks passed');

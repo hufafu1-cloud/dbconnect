@@ -218,11 +218,13 @@ body {
 .tree-row .tree-icon { position: relative; }
 .tree-row .tree-icon svg { transition: filter 0.15s, opacity 0.15s; }
 /* 未打开连接：保留数据库类型颜色（仅轻微压暗），靠状态灯+文字区分开/关 */
-.conn-closed > .tree-row .tree-icon svg { filter: grayscale(1); opacity: 0.52; }
+.conn-closed > .tree-row .tree-icon svg { filter: grayscale(1); opacity: 0.76; }
 /* 库/模式未展开：灰化压暗（这些无需类型色） */
 .tree-row.dim .tree-icon svg { filter: grayscale(1); opacity: 0.5; }
 .conn-closed > .tree-row .tree-label,
 .tree-row.dim .tree-label { color: var(--text-muted); }
+/* 未连接只用字重和状态点区分，主机名保持足够对比度，避免浅灰难以阅读。 */
+.conn-closed > .tree-row .tree-label { color: var(--text); font-weight: 500; }
 /* 已打开：文字加粗（开关状态靠状态灯 + 彩色图标区分，不加行底色） */
 .conn-open > .tree-row .tree-label { font-weight: 700; }
 /* 连接状态指示灯（连接图标右下角）：关闭=灰点，打开=绿点(辉光)，始终清晰 */
@@ -754,6 +756,12 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .form-grid input:focus, .form-grid select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-light); }
 .form-grid .row-flex { display: flex; gap: 8px; align-items: center; }
 .form-grid .row-flex input { flex: 1; }
+.form-grid .row-flex select { flex: 1 1 auto; min-width: 0; }
+.form-grid .row-flex .model-refresh {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-width: 66px; padding: 7px 10px; color: var(--accent-dark); font-weight: 500;
+}
+.form-grid .model-refresh svg { width: 15px; height: 15px; flex: 0 0 auto; }
 .form-grid .password-row > input[type="password"] { min-width: 0; }
 .form-grid .password-save-check {
   display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;

@@ -118,6 +118,7 @@ contextBridge.exposeInMainWorld('api', {
     getConfig: () => inv('ai:getConfig'),
     saveConfig: (c) => inv('ai:saveConfig', c),
     test: (c) => inv('ai:test', c),
+    listModels: (c) => inv('ai:listModels', c),
     chat: (reqId, messages) => inv('ai:chat', { reqId, messages }),
     cancel: (reqId) => inv('ai:cancel', { reqId }),
     onDelta: (cb) => {

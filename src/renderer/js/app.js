@@ -58,6 +58,17 @@ function updateVersion(info) {
   return info && info.version ? `v${info.version}` : '新版本';
 }
 
+function updateNotes(info) {
+  const notes = info && info.releaseNotes;
+  if (Array.isArray(notes)) {
+    return notes
+      .map((item) => item && item.note ? `${item.version ? `${item.version}：` : ''}${item.note}` : '')
+      .filter(Boolean)
+      .join('\n\n');
+  }
+  return typeof notes === 'string' ? notes.trim() : '';
+}
+
 async function currentAppVersion() {
   if (cachedAppVersion) return cachedAppVersion;
   try {
@@ -71,7 +82,13 @@ async function offerUpdate(info) {
   if (updatePromptOpen || updateDownloaded) return;
   updatePromptOpen = true;
   try {
-    const ok = await confirmDialog('发现新版本', `当前版本 ${await currentAppVersion()}，发现 ${updateVersion(info)}。现在下载更新吗？`, { okLabel: '下载更新' });
+    const notes = updateNotes(info);
+    const message = [
+      `当前版本 ${await currentAppVersion()}，发现 ${updateVersion(info)}。`,
+      notes ? `\n更新内容：\n${notes}` : '\n本次版本暂无更新日志。',
+      '\n现在下载更新吗？',
+    ].join('\n');
+    const ok = await confirmDialog('发现新版本', message, { okLabel: '下载更新' });
     if (!ok) return;
     updateDownloadBusy = true;
     statusbar.setLeft(`正在下载 ${updateVersion(info)}…`);
