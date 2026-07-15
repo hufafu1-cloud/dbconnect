@@ -143,6 +143,10 @@ ipcMain.handle('app:update-download', async () => {
   try { return { ok: true, data: await updater.download() }; }
   catch (error) { return { ok: false, error: error && error.message ? error.message : String(error) }; }
 });
+ipcMain.handle('app:update-cancel', () => {
+  try { return { ok: true, data: updater.cancel() }; }
+  catch (error) { return { ok: false, error: error && error.message ? error.message : String(error) }; }
+});
 ipcMain.handle('app:update-install', async () => {
   try {
     allowClose = true;
@@ -323,6 +327,8 @@ app.on('before-quit', (e) => {
   if (quitting) return;
   e.preventDefault();
   quitting = true;
+  // 退出时只取消未完成的下载，完整下载的更新由用户明确确认后安装。
+  updater.cancel();
   require('./store').clearSessionPasswords();
   Promise.race([
     dbm.closeAll(),

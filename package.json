@@ -1,7 +1,7 @@
 {
   "name": "dbpanda",
   "productName": "DBPanda",
-  "version": "2.5.5",
+  "version": "2.5.8",
   "description": "DBPanda — 专业数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
   "main": "src/main/main.js",
   "author": "DBPanda",
@@ -31,6 +31,7 @@
   "dependencies": {
     "@clickhouse/client": "^1.20.0",
     "better-sqlite3": "^12.2.0",
+    "builder-util-runtime": "9.7.0",
     "codemirror": "^5.65.16",
     "egoroof-blowfish": "^4.0.2",
     "electron-updater": "^6.8.9",

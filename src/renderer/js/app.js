@@ -89,12 +89,18 @@ async function offerUpdate(info) {
       '\n现在下载更新吗？',
     ].join('\n');
     const ok = await confirmDialog('发现新版本', message, { okLabel: '下载更新' });
-    if (!ok) return;
+    if (!ok) {
+      // 用户取消下载后，恢复检查更新前的状态提示。
+      statusbar.setLeft('就绪');
+      return;
+    }
     updateDownloadBusy = true;
     statusbar.setLeft(`正在下载 ${updateVersion(info)}…`);
     await window.api.app.updateDownload();
   } catch (e) {
-    toast.error('更新下载失败：' + (e && e.message ? e.message : e));
+    statusbar.setLeft('就绪');
+    const message = e && e.message ? e.message : String(e);
+    if (!/cancelled|canceled/i.test(message)) toast.error('更新下载失败：' + message);
   } finally {
     updateDownloadBusy = false;
     updatePromptOpen = false;
@@ -108,16 +114,25 @@ async function checkForUpdates(manual = true) {
   try {
     const result = await window.api.app.updateCheck();
     if (!result || !result.configured) {
-      if (manual) toast.info('更新服务尚未配置');
+      if (manual) {
+        statusbar.setLeft('就绪');
+        toast.info('更新服务尚未配置');
+      }
       return;
     }
     if (!result.updateAvailable) {
-      if (manual) toast.info('当前已是最新版本');
+      if (manual) {
+        statusbar.setLeft('就绪');
+        toast.info('当前已是最新版本');
+      }
       return;
     }
     await offerUpdate(result.info);
   } catch (e) {
-    if (manual) toast.error('检查更新失败：' + (e && e.message ? e.message : e));
+    if (manual) {
+      statusbar.setLeft('就绪');
+      toast.error('检查更新失败：' + (e && e.message ? e.message : e));
+    }
   } finally {
     updateCheckBusy = false;
   }
@@ -140,6 +155,10 @@ function setupUpdaterEvents() {
     } else if (payload.event === 'error') {
       updateDownloadBusy = false;
       toast.error('自动更新失败：' + (payload.message || '未知错误'));
+    } else if (payload.event === 'cancelled') {
+      updateDownloadBusy = false;
+      updateDownloaded = false;
+      statusbar.setLeft('更新下载已取消');
     }
   });
 }
@@ -376,6 +395,16 @@ function setupCloseGuard() {
     // than the main-process no-response timeout reading the warning.
     window.api.app.ackClose(requestId);
     try {
+      if (updateDownloadBusy) {
+        const cancelUpdate = await confirmDialog(
+          '更新下载中',
+          '更新尚未下载完成，退出程序将取消本次更新。是否取消下载并退出？',
+          { danger: true, okLabel: '取消下载并退出' },
+        );
+        if (!cancelUpdate) { window.api.app.cancelClose(requestId); return; }
+        try { await window.api.app.updateCancel(); } catch (e) { /* 主进程退出时会再次取消 */ }
+        updateDownloadBusy = false;
+      }
       if (anyDirty()) {
         const ok = await confirmDialog('退出 DBPanda', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
         if (!ok) { window.api.app.cancelClose(requestId); return; }

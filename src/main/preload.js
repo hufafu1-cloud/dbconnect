@@ -151,6 +151,7 @@ contextBridge.exposeInMainWorld('api', {
     winCmd: (cmd) => inv('app:winCmd', cmd),
     updateCheck: () => inv('app:update-check'),
     updateDownload: () => inv('app:update-download'),
+    updateCancel: () => inv('app:update-cancel'),
     updateInstall: () => inv('app:update-install'),
     onUpdate: (cb) => {
       const listener = (_event, payload) => cb(payload);
