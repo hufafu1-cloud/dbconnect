@@ -440,6 +440,10 @@ function rowMenu(e, it) {
       { label: isView ? '查看定义' : '设计表', icon: 'struct', onClick: () => actions.designTable(t, isView) },
       { sep: true },
       !isView && { label: '导入向导…', icon: 'importIcon', onClick: () => actions.importTable(t) },
+      !isView && { label: '转储 SQL 文件', icon: 'exportIcon', submenu: [
+        { label: '结构和数据…', onClick: () => actions.dumpTable(t, true) },
+        { label: '仅结构…', onClick: () => actions.dumpTable(t, false) },
+      ] },
       { label: '导出向导…', icon: 'exportIcon', onClick: async () => {
         const { showTableExportMenu } = await import('./exportMenu.js');
         showTableExportMenu(mx, my, t);

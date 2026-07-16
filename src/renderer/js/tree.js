@@ -878,6 +878,10 @@ function leafMenu(e, target, isView) {
     { label: '新建查询', icon: 'query', onClick: () => actions.newQuery(target, `SELECT * FROM ${target.table};`) },
     { sep: true },
     !isView && { label: '导入数据…', icon: 'importIcon', onClick: () => actions.importTable(target) },
+    !isView && { label: '转储 SQL 文件', icon: 'exportIcon', submenu: [
+      { label: '结构和数据…', onClick: () => actions.dumpTable(target, true) },
+      { label: '仅结构…', onClick: () => actions.dumpTable(target, false) },
+    ] },
     { label: '导出…', icon: 'exportIcon', onClick: async () => {
       const { showTableExportMenu } = await import('./exportMenu.js');
       showTableExportMenu(x, y, target);

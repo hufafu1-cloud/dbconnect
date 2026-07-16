@@ -411,8 +411,20 @@ function describe(operation, payload) {
       break;
     case 'dba.dump':
       target = connection(p.connId);
-      title = `即将从生产连接「${target.name}」导出数据库转储`;
-      items = genericItem('导出生产数据库完整 SQL 转储', p.file || '');
+      {
+        const tables = Array.isArray(p.tables) ? p.tables : [];
+        const singleTable = tables.length === 1 && tables[0] && tables[0].name;
+        const tableName = singleTable
+          ? `${tables[0].schema ? tables[0].schema + '.' : ''}${tables[0].name}`
+          : '';
+        title = singleTable
+          ? `即将从生产连接「${target.name}」导出表转储`
+          : `即将从生产连接「${target.name}」导出数据库转储`;
+        const label = singleTable
+          ? (p.includeData === false ? '导出生产表结构' : '导出生产表结构和数据')
+          : '导出生产数据库完整 SQL 转储';
+        items = genericItem(label, `${tableName}${tableName ? '\n' : ''}${p.file || ''}`);
+      }
       break;
     case 'db.exportTable':
       target = connection(p.connId);

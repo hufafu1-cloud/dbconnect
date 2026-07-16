@@ -20,6 +20,20 @@ export function newTable(target) {
 }
 export function importTable(target) { openImportWizard(target); }
 
+/** 导出单表 SQL：结构和数据由右键子菜单分别选择。 */
+export async function dumpTable(target, includeData = true) {
+  if (!target || !target.connId || !target.db || !target.table) {
+    toast.info('请先选择一张表');
+    return;
+  }
+  const { openDumpDialog } = await import('./dbaTools.js');
+  openDumpDialog(target, {
+    tables: [{ name: target.table, schema: target.schema || null }],
+    includeData,
+    defaultName: includeData ? target.table : `${target.table}-structure`,
+  });
+}
+
 /** 打开保存在连接下的查询（绑定保存目标） */
 export function openSavedQuery(target, sql, saved) {
   if (!target || !target.connId || !state.open.has(target.connId)) {

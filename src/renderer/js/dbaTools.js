@@ -273,22 +273,28 @@ export async function openTransferDialog(preset) {
 }
 
 // ---------------- 转储 SQL 文件 ----------------
-export async function openDumpDialog(target) {
+/**
+ * 打开 SQL 转储对话框。
+ * options.tables 传入时只转储指定表（用于表右键菜单），否则转储当前库/模式下的全部表。
+ */
+export async function openDumpDialog(target, options = {}) {
+  const presetTables = Array.isArray(options.tables) ? options.tables : null;
+  const defaultName = options.defaultName || target.db || 'dump';
   const file = await window.api.dlg.saveFile({
     title: '转储 SQL 文件',
-    defaultPath: `${target.db || 'dump'}.sql`,
+    defaultPath: `${defaultName}.sql`,
     filters: [{ name: 'SQL 文件', extensions: ['sql'] }],
   });
   if (!file) return;
 
   const chkDrop = el('input', { type: 'checkbox' }); chkDrop.checked = true;
-  const chkData = el('input', { type: 'checkbox' }); chkData.checked = true;
+  const chkData = el('input', { type: 'checkbox' }); chkData.checked = options.includeData !== false;
   const { bar, text, fill } = progressBarPair();
   let running = false;
   let preparing = false;
 
   const m = openModal({
-    title: `转储 SQL — ${connLabel(target.connId)} › ${target.db || ''}${target.schema ? ' › ' + target.schema : ''}`,
+    title: `转储 SQL — ${connLabel(target.connId)} › ${target.db || ''}${target.schema ? ' › ' + target.schema : ''}${presetTables && presetTables.length === 1 ? ' › ' + presetTables[0].name : ''}`,
     body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', width: '460px' } },
       el('div', { style: { fontSize: '12.5px' } }, el('b', {}, '输出: '), file),
       el('div', { style: { display: 'flex', gap: '16px' } },
@@ -306,7 +312,8 @@ export async function openDumpDialog(target) {
     preparing = true;
     let approvedDump;
     try {
-      const tables = (await loadTables(target.connId, target.db, target.schema)).map((t) => ({ name: t.name, schema: t.schema || null }));
+      const tables = (presetTables || (await loadTables(target.connId, target.db, target.schema)))
+        .map((t) => ({ name: t.name, schema: t.schema || null }));
       if (!tables.length) { toast.info('该库没有表'); return; }
       approvedDump = await authorizeOperation('dba.dump', {
         connId: target.connId,
@@ -329,8 +336,9 @@ export async function openDumpDialog(target) {
     });
     try {
       const r = await window.api.dba.dump(target.connId, approvedDump);
-      toast.success(`转储完成：${r.tables} 个表，${r.rows.toLocaleString()} 行\n${r.file}`, 8000);
-      text.textContent = `完成：${r.tables} 个表，${r.rows.toLocaleString()} 行`;
+      const mode = chkData.checked ? '结构和数据' : '仅结构';
+      toast.success(`转储完成（${mode}）：${r.tables} 个表，${r.rows.toLocaleString()} 行\n${r.file}`, 8000);
+      text.textContent = `完成（${mode}）：${r.tables} 个表，${r.rows.toLocaleString()} 行`;
     } catch (e) {
       toast.error('转储失败：\n' + e.message, 15000);
       text.textContent = '失败：' + e.message;

@@ -23,11 +23,13 @@ async function fetchRawPage(ad, db, schema, table, columns, pkCols, page, pageSi
 }
 
 /** 批量插入一页数据（Oracle 方言逐行 + 事务，其余多行 VALUES） */
-async function insertRows(ad, db, schema, table, colNames, rows) {
+async function insertRows(ad, db, schema, table, columns, rows) {
   if (!rows.length) return;
   const T = ad.qualify(db, schema, table);
+  const colNames = columns.map((column) => typeof column === 'string' ? column : column.name);
+  const colTypes = columns.map((column) => typeof column === 'string' ? '' : column.type || '');
   const colSql = colNames.map((c) => ad.quoteIdent(c)).join(', ');
-  const rowVals = (r) => '(' + r.map((v) => valueLiteral(ad, v)).join(', ') + ')';
+  const rowVals = (r) => '(' + r.map((v, i) => valueLiteral(ad, v, colTypes[i])).join(', ') + ')';
   if (ad.dialect === 'oracle') {
     const sqls = rows.map((r) => `INSERT INTO ${T} (${colSql}) VALUES ${rowVals(r)}`);
     await ad.execTxn(db, sqls);
@@ -82,8 +84,7 @@ async function runTransfer(srcAd, dstAd, args, progress) {
         for (;;) {
           const r = await fetchRawPage(srcAd, srcDb, sSchema, table, info.columns, pkCols, page, batchSize);
           if (!r.rows.length) break;
-          const colNames = r.columns.map((c) => c.name);
-          await insertRows(dstAd, dstDb, dSchema, table, colNames, r.rows);
+          await insertRows(dstAd, dstDb, dSchema, table, r.columns, r.rows);
           item.rows += r.rows.length;
           progress({ table, phase: '复制数据', tablesDone: done, tablesTotal: tables.length, rows: item.rows });
           if (r.rows.length < batchSize) break;
@@ -148,8 +149,9 @@ async function dumpSql(ad, args, progress) {
           const r = await fetchRawPage(ad, db, sch, table, info.columns, pkCols, page, batchSize);
           if (!r.rows.length) break;
           const colSql = r.columns.map((c) => ad.quoteIdent(c.name)).join(', ');
+          const columnTypes = r.columns.map((column) => column.type || '');
           for (const row of r.rows) {
-            w(`INSERT INTO ${T} (${colSql}) VALUES (${row.map((v) => valueLiteral(ad, v)).join(', ')});`);
+            w(`INSERT INTO ${T} (${colSql}) VALUES (${row.map((v, i) => valueLiteral(ad, v, columnTypes[i])).join(', ')});`);
           }
           totalRows += r.rows.length;
           progress({ table, phase: '数据', tablesDone: done, tablesTotal: tables.length, rows: totalRows });

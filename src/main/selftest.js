@@ -2103,6 +2103,10 @@ async function runSelfTest() {
     && transfer.valueLiteral(my, 12.5) === '12.5'
     && transfer.valueLiteral(my, buf) === '0x01abff'
     && transfer.valueLiteral(my, "a'b\\c") === "_utf8mb4 X'6127625c63'");
+  check('ClickHouse 复杂值字面量',
+    transfer.valueLiteral(ch, [1, 'x', null], 'Array(String)') === "[1, 'x', NULL]"
+    && transfer.valueLiteral(ch, { key: 'value' }, 'Map(String, String)') === "map('key', 'value')"
+    && transfer.valueLiteral(ch, { key: 1 }, 'JSON') === "'{\"key\":1}'");
 
   // 传输端到端：sqlite → sqlite（结构 + 数据 + BLOB 保真）
   const fSrc = path.join(os.tmpdir(), `dbc-tr-src-${Date.now()}.db`);
