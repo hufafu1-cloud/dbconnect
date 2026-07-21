@@ -605,6 +605,13 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   width: 100%; border: none; outline: none; background: transparent;
   color: var(--text); font: inherit; padding: 2px;
 }
+.design-table input[type="checkbox"] {
+  width: 14px; height: 14px; margin: 0; vertical-align: middle;
+}
+.design-select-head { vertical-align: middle; }
+.design-select-label {
+  display: inline-flex; align-items: center; height: 14px; line-height: 14px;
+}
 .design-table input:disabled, .design-table select:disabled { opacity: 0.7; cursor: not-allowed; }
 .design-footer {
   display: flex; align-items: center; gap: 8px;

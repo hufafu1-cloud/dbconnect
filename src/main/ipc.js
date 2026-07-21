@@ -628,6 +628,10 @@ function register(getWin) {
       ? ddl.buildAlterTable(ad, a.db, a.schema, a.original, a.model)
       : ddl.buildCreateTable(ad, a.db, a.schema, a.model);
   });
+  h('design:addColumns', (a) => {
+    const ad = dbm.get(a.connId);
+    return ddl.buildAddColumns(ad, a.db, a.schema, a.table, a.columns || []);
+  });
   h('design:apply', async (a) => {
     const ad = dbm.get(a.connId);
     if (a.original) {

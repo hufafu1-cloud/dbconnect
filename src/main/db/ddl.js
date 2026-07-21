@@ -810,6 +810,34 @@ function buildAlterTable(adapter, db, schema, original, model) {
   return { sqls: orderedSqls, warnings };
 }
 
+/** Generate portable ADD COLUMN statements for an explicitly selected set of columns. */
+function buildAddColumns(adapter, db, schema, table, columns) {
+  const dialect = adapter.dialect;
+  const T = adapter.qualify(db, schema, table);
+  const sqls = [];
+  const warnings = [];
+  for (const c of (columns || [])) {
+    if (!String(c && c.name || '').trim()) throw new Error('字段名称不能为空');
+    if (!String(c && c.type || '').trim()) throw new Error(`字段 ${c.name} 的类型不能为空`);
+    const def = columnDef(adapter, dialect, c);
+    if (dialect === 'oracle') {
+      sqls.push(`ALTER TABLE ${T} ADD (${def})`);
+      if (c.comment) sqls.push(`COMMENT ON COLUMN ${T}.${adapter.quoteIdent(c.name)} IS ${adapter.literal(c.comment)}`);
+    } else if (dialect === 'postgres') {
+      sqls.push(`ALTER TABLE ${T} ADD COLUMN ${def}`);
+      if (c.comment) sqls.push(`COMMENT ON COLUMN ${T}.${adapter.quoteIdent(c.name)} IS ${adapter.literal(c.comment)}`);
+    } else if (dialect === 'mssql') {
+      sqls.push(`ALTER TABLE ${T} ADD ${def}`);
+    } else {
+      sqls.push(`ALTER TABLE ${T} ADD COLUMN ${def}`);
+    }
+    if (dialect === 'sqlite' && c.notNull && composeDefault(adapter, c.def) === null) {
+      warnings.push(`SQLite 新增 NOT NULL 栏位 ${c.name} 需要提供默认值，否则执行可能失败`);
+    }
+  }
+  return { sqls, warnings };
+}
+
 function createIndexSql(adapter, dialect, T, ix) {
   const q = (n) => adapter.quoteIdent(n);
   if (dialect === 'mysql') {
@@ -1006,4 +1034,4 @@ function translateModel(model, fromDialect, toDialect) {
   return { model: out, warnings };
 }
 
-module.exports = { typeOptions, caps, buildCreateTable, buildAlterTable, infoToModel, composeType, composeDefault, translateModel };
+module.exports = { typeOptions, caps, buildCreateTable, buildAlterTable, buildAddColumns, infoToModel, composeType, composeDefault, translateModel };

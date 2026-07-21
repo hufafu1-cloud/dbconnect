@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld('api', {
     meta: (connId) => inv('design:meta', { connId }),
     model: (connId, t) => inv('design:model', { connId, ...t }),
     ddl: (connId, t) => inv('design:ddl', { connId, ...t }),
+    addColumns: (connId, t) => inv('design:addColumns', { connId, ...t }),
     apply: (connId, t) => inv('design:apply', { connId, ...t }),
   },
   imp: {
