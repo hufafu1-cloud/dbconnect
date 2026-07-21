@@ -4,6 +4,7 @@ import { connLabel, connColor, emit, setActiveTarget } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { openModal, toast, confirmDialog, promptDialog } from './toast.js';
 import { authorizeOperation } from './danger.js';
+import { showMenu } from './contextmenu.js';
 
 /**
  * target: {connId, db, schema, table?}  table 为空 = 新建表
@@ -32,8 +33,8 @@ export function openDesignTab(target, opts = {}) {
   let dirty = false;
   let recoveryConflictWarning = '';
   let selColIdx = -1;
-  // UI-only selection used by the "export added columns" action. Keep object
-  // references instead of row indexes so moving columns does not lose it.
+  // UI-only row selection used by the field SQL action. Keep object references
+  // instead of row indexes so moving columns does not lose the selection.
   let selectedColumns = new Set();
   let selIxIdx = -1;
   let selFkIdx = -1;
@@ -46,9 +47,6 @@ export function openDesignTab(target, opts = {}) {
   const btnSave = el('button', { class: 'pbtn success', onClick: save }, iconEl('save'), '保存');
   const btnAddCol = el('button', { class: 'pbtn', onClick: () => { addColumn(); } }, iconEl('plus'), '添加栏位');
   const btnDelCol = el('button', { class: 'pbtn', onClick: removeColumn }, iconEl('minus'), '删除栏位');
-  const btnExportAdded = el('button', {
-    class: 'pbtn', disabled: true, title: '选择字段后生成添加字段 SQL', onClick: exportSelectedColumnsSql,
-  }, iconEl('exportIcon'), '生成添加字段 SQL…');
   const btnUp = el('button', { class: 'pbtn', onClick: () => moveColumn(-1) }, '▲ 上移');
   const btnDown = el('button', { class: 'pbtn', onClick: () => moveColumn(1) }, '▼ 下移');
   const tableNameInput = el('input', { type: 'text', placeholder: '表名', style: { width: '180px', fontWeight: '600' } });
@@ -59,7 +57,7 @@ export function openDesignTab(target, opts = {}) {
     btnSave, el('span', { class: 'sep' }),
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '表名:'), tableNameInput,
     el('span', { class: 'sep' }),
-    btnAddCol, btnDelCol, btnExportAdded, btnUp, btnDown, recoveryNotice,
+    btnAddCol, btnDelCol, btnUp, btnDown, recoveryNotice,
   );
   tableNameInput.addEventListener('input', () => { if (model) { model.table = tableNameInput.value.trim(); markDirty(); } });
 
@@ -167,13 +165,6 @@ export function openDesignTab(target, opts = {}) {
     return c;
   }
 
-  function columnSelectionCheck(checked, onChange, title) {
-    const c = el('input', { type: 'checkbox', title: title || '选择字段' });
-    c.checked = !!checked;
-    c.addEventListener('change', () => { onChange(c.checked); syncExportAddedButton(); });
-    return c;
-  }
-
   function cellSelect(value, values, onChange, disabled) {
     const select = el('select', {}, ...values.map((v) => el('option', { value: v }, v)));
     select.value = values.includes(value) ? value : values[0];
@@ -199,7 +190,9 @@ export function openDesignTab(target, opts = {}) {
       }
       column.type = value;
     }, !rowEditable);
-    select.title = rowEditable ? '选择字段类型；末项可输入自定义类型' : '该字段不可编辑';
+    select.title = rowEditable
+      ? `当前类型：${column.type || '未设置'}；末项可输入自定义类型`
+      : `当前类型：${column.type || '未设置'}（该字段不可编辑）`;
     return select;
   }
 
@@ -226,36 +219,23 @@ export function openDesignTab(target, opts = {}) {
   function renderColumns() {
     colsHost.innerHTML = '';
     const cap = meta.caps;
-    const allColumns = model.columns;
-    const selectAll = el('input', { type: 'checkbox', title: '全选字段' });
-    selectAll.checked = allColumns.length > 0 && allColumns.every((c) => selectedColumns.has(c));
-    selectAll.indeterminate = allColumns.some((c) => selectedColumns.has(c)) && !selectAll.checked;
-    selectAll.addEventListener('change', () => {
-      for (const c of allColumns) {
-        if (selectAll.checked) selectedColumns.add(c);
-        else selectedColumns.delete(c);
-      }
-      renderColumns();
-    });
     const table = el('table', { class: 'design-table' });
+    const columnWidths = [
+      '24px', '22%', '16%', '70px', '64px', '64px', '34px',
+      '60px', '15%', '',
+    ];
+    table.append(el('colgroup', {}, ...columnWidths.map((width) => el('col', { style: { width } }))));
     table.append(el('thead', {}, el('tr', {},
-      el('th', { style: { width: '34px' } }, '🔑'),
+      el('th', { class: 'design-row-selector-head', style: { width: '24px' } }),
       el('th', { style: { width: '22%' } }, '名称'),
       el('th', { style: { width: '16%' } }, '类型'),
       el('th', { style: { width: '70px' } }, '长度'),
       el('th', { style: { width: '64px' } }, '小数点'),
       el('th', { style: { width: '64px' } }, '不是 null'),
-      cap.autoInc ? el('th', { style: { width: '60px' } }, '自增') : null,
+      el('th', { style: { width: '34px' } }, '🔑'),
+      el('th', { style: { width: '60px' }, title: cap.autoInc ? '自增' : '当前数据库不支持自增' }, '自增'),
       el('th', { style: { width: '15%' } }, '默认值'),
       el('th', {}, '注释'),
-      el('th', { style: { width: '64px', textAlign: 'center' }, title: '选择要生成 SQL 的字段' },
-        el('span', {
-          class: 'design-select-head',
-          style: {
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            gap: '4px', height: '16px', lineHeight: '16px', verticalAlign: 'middle',
-          },
-        }, el('span', { class: 'design-select-label' }, '选择'), selectAll)),
     )));
     const tb = el('tbody');
     model.columns.forEach((c, i) => {
@@ -263,14 +243,53 @@ export function openDesignTab(target, opts = {}) {
       const rowEditable = isNew || !c.origName || c.editSafe !== false;
       const readOnlyTitle = c.editUnsafeReason || '该栏位含设计器无法无损表示的高级属性；请使用迁移 SQL 修改';
       const inputOpts = { attrs: { disabled: !rowEditable, title: rowEditable ? '' : readOnlyTitle } };
+      const displayDefault = meta.dialect === 'clickhouse' && /^null$/i.test(String(c.def || '').trim()) ? '' : c.def;
       const tr = el('tr', { 'data-i': i, title: rowEditable ? '' : readOnlyTitle });
       if (i === selColIdx) tr.classList.add('selected');
+      const marker = el('span', { class: 'design-row-marker', 'aria-hidden': 'true' });
+      const updateRowSelection = () => {
+        for (const row of tb.querySelectorAll('tr')) {
+          const idx = Number(row.dataset.i);
+          const selected = selectedColumns.has(model.columns[idx]);
+          row.classList.toggle('selected', selected);
+          row.classList.toggle('active', idx === selColIdx);
+          const rowMarker = row.querySelector('.design-row-marker');
+          if (rowMarker) rowMarker.textContent = idx === selColIdx ? '▶' : (selected ? '•' : '');
+        }
+      };
       tr.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        const multi = e.ctrlKey || e.metaKey;
+        if (e.shiftKey && selColIdx >= 0) {
+          const start = Math.min(selColIdx, i);
+          const end = Math.max(selColIdx, i);
+          if (!multi) selectedColumns.clear();
+          for (let n = start; n <= end; n++) selectedColumns.add(model.columns[n]);
+        } else if (multi) {
+          if (selectedColumns.has(c)) selectedColumns.delete(c);
+          else selectedColumns.add(c);
+          selColIdx = i;
+        } else {
+          selectedColumns.clear();
+          selectedColumns.add(c);
+          selColIdx = i;
+        }
+        updateRowSelection();
+      });
+      tr.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (!selectedColumns.has(c)) {
+          selectedColumns.clear();
+          selectedColumns.add(c);
+        }
         selColIdx = i;
-        for (const x of tb.querySelectorAll('tr')) x.classList.toggle('selected', Number(x.dataset.i) === i);
+        updateRowSelection();
+        showMenu(e.clientX, e.clientY, [
+          { label: '生成添加字段 SQL…', icon: 'exportIcon', onClick: exportSelectedColumnsSql },
+        ]);
       });
       tr.append(
-        el('td', { style: { textAlign: 'center' } }, cellCheck(c.pk, (v) => { c.pk = v; }, !rowEditable)),
+        el('td', { class: 'design-row-selector' }, marker),
         el('td', {}, cellInput(c.name, (v) => {
           const next = v.trim();
           renameLocalColumnRefs(lastRefName, next);
@@ -281,18 +300,16 @@ export function openDesignTab(target, opts = {}) {
         el('td', {}, cellInput(c.length, (v) => { c.length = v.trim(); }, inputOpts)),
         el('td', {}, cellInput(c.scale, (v) => { c.scale = v.trim(); }, inputOpts)),
         el('td', { style: { textAlign: 'center' } }, cellCheck(c.notNull, (v) => { c.notNull = v; }, !rowEditable)),
-        cap.autoInc ? el('td', { style: { textAlign: 'center' } }, cellCheck(c.autoInc, (v) => { c.autoInc = v; }, !rowEditable)) : null,
-        el('td', {}, cellInput(c.def, (v) => { c.def = v; }, inputOpts)),
+        el('td', { style: { textAlign: 'center' } }, cellCheck(c.pk, (v) => { c.pk = v; }, !rowEditable)),
+        el('td', { style: { textAlign: 'center' }, title: cap.autoInc ? '' : '当前数据库不支持自增' },
+          cellCheck(c.autoInc, (v) => { c.autoInc = v; }, !cap.autoInc || !rowEditable)),
+        el('td', {}, cellInput(displayDefault, (v) => { c.def = v; }, { ...inputOpts, attrs: { ...inputOpts.attrs, title: c.def || '' } })),
         el('td', {}, cellInput(c.comment, (v) => { c.comment = v; }, rowEditable
           ? (cap.comments ? {} : { attrs: { placeholder: '（该库不支持）' } })
           : inputOpts)),
-        el('td', { style: { textAlign: 'center', verticalAlign: 'middle' } }, columnSelectionCheck(
-          selectedColumns.has(c),
-          (v) => { if (v) selectedColumns.add(c); else selectedColumns.delete(c); },
-          '选择导出该字段',
-        )),
       );
       tb.append(tr);
+      updateRowSelection();
     });
     table.append(tb);
     colsHost.append(table);
@@ -309,7 +326,6 @@ export function openDesignTab(target, opts = {}) {
       oInput.addEventListener('input', () => { model.options = oInput.value; markDirty(); });
       commentRow.append(el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '表选项:'), oInput);
     }
-    syncExportAddedButton();
   }
 
   function addColumn() {
@@ -342,7 +358,6 @@ export function openDesignTab(target, opts = {}) {
     renderForeignKeys();
     renderConstraints();
     markDirty();
-    syncExportAddedButton();
   }
   function moveColumn(dir) {
     const i = selColIdx;
@@ -354,12 +369,6 @@ export function openDesignTab(target, opts = {}) {
     renderColumns();
     markDirty();
     if (original) toast.info('提示：已有表的栏位顺序调整不会生成 ALTER（仅影响新建表）', 4000);
-  }
-
-  function syncExportAddedButton() {
-    const count = selectedColumns.size;
-    btnExportAdded.disabled = count === 0;
-    btnExportAdded.title = count ? `为已选择的 ${count} 个字段生成 SQL` : '选择字段后生成添加字段 SQL';
   }
 
   // ---------- 索引编辑 ----------

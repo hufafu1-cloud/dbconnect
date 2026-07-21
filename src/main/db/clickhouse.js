@@ -299,7 +299,7 @@ class ClickHouseAdapter extends BaseAdapter {
       return {
         name: r[0],
         type: r[1],
-        nullable: String(r[1]).startsWith('Nullable('),
+        nullable: /^\s*Nullable\(/i.test(String(r[1] || '')),
         def: r[2] || null,
         key: r[4] ? 'PRI' : '',
         extra: r[5] && !r[4] ? 'sorting key' : '',
@@ -333,6 +333,20 @@ class ClickHouseAdapter extends BaseAdapter {
       const r = await this._run(null, `SHOW CREATE TABLE ${this.qualify(db, null, table)}`);
       ddl = (r.rows[0] && r.rows[0][0]) || '';
     } catch (e) { /* ignore */ }
+    // Older ClickHouse versions may not expose default_kind/codec/ttl
+    // columns in system.columns. If SHOW CREATE confirms that the table has
+    // no advanced column clauses, ordinary columns are still safe to edit.
+    // Keep the conservative read-only behavior when the DDL contains any
+    // clause that the design model cannot preserve losslessly.
+    if (!advancedMetadataKnown && ddl) {
+      const hasAdvancedClause = /\b(?:MATERIALIZED|ALIAS|CODEC|TTL)\b/i.test(ddl);
+      if (!hasAdvancedClause) {
+        for (const column of columns) {
+          column.editSafe = true;
+          column.editUnsafeReason = '';
+        }
+      }
+    }
     let tableComment = '';
     try {
       const r = await this._run(null,

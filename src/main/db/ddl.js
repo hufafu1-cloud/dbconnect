@@ -871,6 +871,10 @@ function infoToModel(info, table, dialect) {
     }
     const t = parseType(full);
     let def = c.def === null || c.def === undefined ? '' : String(c.def);
+    // ClickHouse reports the implicit nullable default as the literal text
+    // "NULL"/"null". It is not an explicit default expression and should
+    // not be shown as a user-entered default in the design grid.
+    if (dialect === 'clickhouse' && /^null$/i.test(def.trim())) def = '';
     return {
       name: c.name,
       origName: c.name,
