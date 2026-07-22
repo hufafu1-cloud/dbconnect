@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const { TextDecoder } = require('util');
-const { Blowfish } = require('egoroof-blowfish');
+const BlowfishModule = require('egoroof-blowfish');
+// v3 is CommonJS (required by Electron 22 on Windows 7), while v4 exposes a
+// named export. Accept both shapes so Navicat V1 decryption remains stable.
+const Blowfish = BlowfishModule.Blowfish || BlowfishModule;
 
 const V2_KEY = Buffer.from('libcckeylibcckey', 'ascii');
 const V2_IV = Buffer.from('libcciv libcciv ', 'ascii');

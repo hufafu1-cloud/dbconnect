@@ -1,7 +1,7 @@
 {
   "name": "dbpanda",
   "productName": "DBPanda",
-  "version": "2.5.12",
+  "version": "2.5.13",
   "description": "DBPanda — 专业数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
   "main": "src/main/main.js",
   "author": "DBPanda",
@@ -32,8 +32,9 @@
     "@clickhouse/client": "^1.20.0",
     "better-sqlite3": "8.7.0",
     "builder-util-runtime": "9.7.0",
+    "call-bind-apply-helpers": "1.0.2",
     "codemirror": "^5.65.16",
-    "egoroof-blowfish": "^4.0.2",
+    "egoroof-blowfish": "3.0.0",
     "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
     "mssql": "9.3.2",
@@ -58,6 +59,20 @@
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**",
       "**/node_modules/sql.js/dist/**"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/call-bind-apply-helpers",
+        "to": "node_modules/call-bind-apply-helpers"
+      },
+      {
+        "from": "node_modules/function-bind",
+        "to": "node_modules/function-bind"
+      },
+      {
+        "from": "node_modules/es-errors",
+        "to": "node_modules/es-errors"
+      }
     ],
     "win": {
       "target": [

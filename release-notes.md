@@ -1,3 +1,8 @@
+## v2.5.13-win7 更新日志
+
+- 修复 Win7 启动时 SQL Server 驱动缺少运行时依赖，导致主进程报错的问题。
+- 修复 Win7 下 Navicat 密码解析模块的 CommonJS / ESM 兼容问题。
+
 ## v2.5.12-win7 更新日志
 
 - Win7 32 位兼容版：使用 Electron 22 和 ia32 架构构建。
