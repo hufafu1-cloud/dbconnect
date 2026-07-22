@@ -370,7 +370,7 @@ body {
   border: 2px solid var(--accent); border-radius: 0;
   font-size: 12.5px; font-family: inherit;
   padding: 2px 6px; outline: none;
-  background: var(--panel); color: var(--text); resize: none;
+  background: var(--panel); color: var(--text); resize: none; user-select: text;
   box-shadow: 0 2px 10px var(--shadow);
 }
 

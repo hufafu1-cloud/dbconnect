@@ -67,7 +67,11 @@ export class DataGrid {
     this.focus = null; // {dr: 显示行序号(含新行), c: 列序号}
     this.wrap = el('div', { class: 'grid-wrap', tabindex: '0' });
     host.append(this.wrap);
-    this.wrap.addEventListener('scroll', () => this._removeEditor(false));
+    this.wrap.addEventListener('scroll', () => {
+      // 编辑器滚动或文本选择过程中不能误关闭浮动 textarea。
+      if (this._editor && document.activeElement === this._editor.ta) return;
+      this._removeEditor(false);
+    });
     this.wrap.addEventListener('keydown', (e) => this._onKeyDown(e));
   }
 
@@ -195,7 +199,9 @@ export class DataGrid {
   }
 
   _onKeyDown(e) {
-    if (this._editor) return; // 浮动编辑器自行处理按键
+    // textarea 内的删除、退格、全选等编辑按键必须交给浏览器原生处理，
+    // 不能继续冒泡到网格快捷键层。
+    if (this._editor || (e.target && e.target.closest && e.target.closest('.cell-editor'))) return;
     const count = this.rows.length + this.newRows.length;
     if (!count || !this.columns.length) return;
     const f = this.focus;
@@ -340,6 +346,9 @@ export class DataGrid {
     ta.style.height = Math.max(rect.height + 2, 28) + 'px';
     this._editor = { ta, td, r, i, isNew, orig: cur };
     ta.addEventListener('keydown', (e) => {
+      // 阻止网格和页面级快捷键抢占编辑器按键；Delete/Backspace 不拦截，
+      // 让 textarea 原生删除当前选中的长文本。
+      e.stopPropagation();
       if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); this._removeEditor(true); this.wrap.focus(); }
       else if (e.key === 'Escape') { e.preventDefault(); this._removeEditor(false); this.wrap.focus(); }
       else if (e.key === 'Tab') {

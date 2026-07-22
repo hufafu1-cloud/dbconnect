@@ -1,13 +1,19 @@
 param(
-  [string]$ExePath = "release\win-unpacked\DBPanda.exe",
+  [string]$ExePath = "",
   [string]$IconPath = "assets\icon.ico",
-  [string]$ExpectedVersion = "2.5.2"
+  [string]$ExpectedVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
 $root = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($ExpectedVersion)) {
+  $ExpectedVersion = (Get-Content -Raw -LiteralPath (Join-Path $root "package.json") | ConvertFrom-Json).version
+}
+if ([string]::IsNullOrWhiteSpace($ExePath)) {
+  $ExePath = "release\DBPanda-Setup-$ExpectedVersion.exe"
+}
 $exe = [System.IO.Path]::GetFullPath((Join-Path $root $ExePath))
 $ico = [System.IO.Path]::GetFullPath((Join-Path $root $IconPath))
 

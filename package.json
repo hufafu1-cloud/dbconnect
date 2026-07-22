@@ -1,7 +1,7 @@
 {
   "name": "dbpanda",
   "productName": "DBPanda",
-  "version": "2.5.12",
+  "version": "2.5.13",
   "description": "DBPanda — 专业数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
   "main": "src/main/main.js",
   "author": "DBPanda",
@@ -22,7 +22,7 @@
     "predist": "npm run icon",
     "dist": "node scripts/build-release.js",
     "release:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1",
-    "postinstall": "electron-builder install-app-deps || echo skip-native-rebuild"
+    "postinstall": "node scripts/install-app-deps.js"
   },
   "devDependencies": {
     "electron": "^37.2.0",
@@ -53,8 +53,10 @@
     "files": [
       "src/**/*",
       "assets/**/*",
-      "package.json"
+      "package.json",
+      "!**/node_modules/cpu-features{,/**/*}"
     ],
+    "npmRebuild": false,
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**",
       "**/node_modules/sql.js/dist/**"
