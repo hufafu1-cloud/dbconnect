@@ -1,9 +1,10 @@
 // AI 助手面板：对话式 SQL 优化 / 分析 / 自然语言生成 SQL（流式输出）
 import { el, iconEl, escapeHtml } from './util.js';
-import { state, connLabel, connById } from './state.js';
+import { state, connLabel, connById, on } from './state.js';
 import { addTab } from './tabs.js';
 import { toast } from './toast.js';
 import { openAiConfigDialog } from './aiConfigDialog.js';
+import { openConnectionById } from './tree.js';
 
 const DIALECT_NAME = {
   mysql: 'MySQL', postgres: 'PostgreSQL', mssql: 'SQL Server', sqlite: 'SQLite',
@@ -17,7 +18,7 @@ export function openAiPanel(ctx = {}) {
   if (!panel) panel = createPanel();
   panel.handle.activate();
   if (ctx.insertTarget) panel.setInsertTarget(ctx.insertTarget);
-  if (ctx.connId) panel.setContext(ctx.connId, ctx.db);
+  if (ctx.connId) panel.setContext(ctx.connId, ctx.db, ctx.schema, ctx.table);
   if (ctx.sql != null) panel.setInput(ctx.sql);
   if (ctx.action) panel.runAction(ctx.action);
   setTimeout(() => panel.focusInput(), 60);
@@ -31,23 +32,31 @@ function createPanel() {
 
   let connId = null;
   let db = null;
+  let schema = null;
+  let activeTable = null;
   let insertTarget = null; // (sql) => void
   let busy = false;
   let curReqId = null;
   let unsubDelta = null;
+  let contextCache = null;
+  let contextLoading = false;
   const history = []; // [{role, content}] 不含 system
 
   // ---- 顶部栏：连接/库选择 + 模型徽标 + 设置/清空 ----
   const connSel = el('select', { title: '连接（用于读取表结构做上下文）' });
   const dbSel = el('select', { title: '数据库' });
+  const contextBadge = el('span', { class: 'ai-context-badge', title: 'AI 将使用此连接的数据库元数据' }, '未选择数据库');
   const modelBadge = el('span', { class: 'ai-model-badge', title: '当前模型' }, '未配置');
 
   function fillConnSel() {
     connSel.innerHTML = '';
-    const opens = [...state.open.keys()];
-    if (!opens.length) connSel.append(el('option', { value: '' }, '(无打开的连接)'));
-    for (const id of opens) connSel.append(el('option', { value: id, selected: id === connId ? 'selected' : null }, connLabel(id)));
-    if (!opens.includes(connId)) connId = opens[0] || null;
+    const ids = state.connections.map((c) => c.id);
+    if (!ids.length) connSel.append(el('option', { value: '' }, '(暂无已保存连接)'));
+    for (const id of ids) {
+      const isOpen = state.open.has(id);
+      connSel.append(el('option', { value: id, selected: id === connId ? 'selected' : null }, `${connLabel(id)}${isOpen ? '' : '（未打开）'}`));
+    }
+    if (!ids.includes(connId)) connId = ids[0] || null;
     if (connId) connSel.value = connId;
   }
   function fillDbSel() {
@@ -59,8 +68,26 @@ function createPanel() {
     if (!dbs.includes(db)) db = dbs[0] || null;
     if (db) dbSel.value = db;
   }
-  connSel.addEventListener('change', () => { connId = connSel.value || null; fillDbSel(); });
-  dbSel.addEventListener('change', () => { db = dbSel.value || null; });
+  async function loadConnectionContext(nextId) {
+    connId = nextId || null;
+    contextCache = null;
+    if (!connId) { db = null; fillDbSel(); updateContextBadge(); return; }
+    try {
+      if (!state.open.has(connId)) await openConnectionById(connId);
+      const oc = state.open.get(connId);
+      if (oc && (!Array.isArray(oc.databases) || !oc.databases.length)) oc.databases = await window.api.db.databases(connId);
+      fillConnSel();
+      fillDbSel();
+      await refreshContext();
+    } catch (e) {
+      toast.error(`无法打开连接：${e.message}`);
+      fillConnSel();
+      fillDbSel();
+      updateContextBadge();
+    }
+  }
+  connSel.addEventListener('change', () => { loadConnectionContext(connSel.value); });
+  dbSel.addEventListener('change', () => { db = dbSel.value || null; activeTable = null; contextCache = null; refreshContext(); });
 
   async function refreshModelBadge() {
     try {
@@ -77,6 +104,8 @@ function createPanel() {
     el('span', { class: 'sep' }),
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '连接:'), connSel,
     el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '库:'), dbSel,
+    contextBadge,
+    el('button', { class: 'pbtn ai-context-refresh', title: '刷新数据库上下文', onClick: () => refreshContext() }, iconEl('refresh')),
     el('span', { class: 'spring' }),
     modelBadge,
     el('button', { class: 'pbtn', title: 'AI 助手设置', onClick: () => openAiConfigDialog(() => refreshModelBadge()) }, iconEl('theme'), '设置'),
@@ -142,22 +171,56 @@ function createPanel() {
     showWelcome();
   }
 
-  // ---- 表结构上下文 ----
-  async function schemaContext(limitChars) {
-    if (!connId || !db || !state.open.has(connId)) return '';
+  // ---- 数据库上下文 ----
+  function updateContextBadge() {
+    if (contextLoading) { contextBadge.textContent = '正在读取上下文…'; return; }
+    if (!connId || !db) { contextBadge.textContent = '未选择数据库'; return; }
+    const count = contextCache && contextCache.tables ? contextCache.tables.length : 0;
+    contextBadge.textContent = `${connLabel(connId)} / ${db}${count ? ` · ${count} 张表` : ''}`;
+  }
+
+  async function refreshContext(query = '') {
+    if (!connId || !db || !state.open.has(connId)) { contextCache = null; updateContextBadge(); return null; }
+    contextLoading = true;
+    updateContextBadge();
     try {
-      const cols = await window.api.db.allColumns(connId, db);
-      const lines = [];
-      let used = 0;
-      const cap = limitChars || 6000;
-      for (const [t, list] of Object.entries(cols)) {
-        const names = (list || []).map((c) => (typeof c === 'string' ? c : (c && (c.name || c.COLUMN_NAME)) || String(c)));
-        const line = `${t}(${names.join(', ')})`;
-        if (used + line.length > cap) { lines.push(`… 其余表略（共 ${Object.keys(cols).length} 张表）`); break; }
-        lines.push(line); used += line.length + 1;
-      }
-      return lines.length ? `数据库 ${db} 的表结构：\n${lines.join('\n')}` : '';
-    } catch (e) { return ''; }
+      contextCache = await window.api.db.aiContext(connId, {
+        db, schema, query, tables: activeTable ? [activeTable] : [], maxTables: 300,
+      });
+      contextCache.query = query;
+      return contextCache;
+    } catch (e) {
+      contextCache = null;
+      return null;
+    } finally {
+      contextLoading = false;
+      updateContextBadge();
+    }
+  }
+
+  async function schemaContext(limitChars, query) {
+    if (!connId || !db || !state.open.has(connId)) return '';
+    const ctx = (contextCache && (!query || contextCache.query === query))
+      ? contextCache : await refreshContext(query || '');
+    if (!ctx) return '';
+    const lines = [];
+    const cap = limitChars || 7000;
+    lines.push(`当前连接：${ctx.connection && ctx.connection.name || connLabel(connId)}（${dialect()}）`);
+    lines.push(`当前数据库：${ctx.database}${ctx.schema ? `，Schema：${ctx.schema}` : ''}`);
+    if (activeTable) lines.push(`当前打开的表：${activeTable}`);
+    const tables = (ctx.tables || []).map((t) => `${t.name}${t.comment ? `（${t.comment}）` : ''}`);
+    if (tables.length) lines.push(`当前库表列表（${tables.length}${ctx.truncated ? '+' : ''}）：${tables.join('、')}`);
+    const views = (ctx.views || []).map((v) => v.name).filter(Boolean);
+    if (views.length) lines.push(`当前库视图列表（${views.length}）：${views.join('、')}`);
+    for (const detail of (ctx.details || [])) {
+      if (!detail.columns) continue;
+      const cols = detail.columns.map((c) => `${c.name}:${c.type || 'unknown'}${c.comment ? `(${c.comment})` : ''}`).join(', ');
+      lines.push(`表 ${detail.name}${detail.comment ? `（${detail.comment}）` : ''}：${cols}`);
+      if (detail.primaryKey && detail.primaryKey.length) lines.push(`表 ${detail.name} 主键：${detail.primaryKey.join(', ')}`);
+    }
+    let text = lines.join('\n');
+    if (text.length > cap) text = text.slice(0, cap) + '\n（上下文已截断，请按需查询具体表结构）';
+    return text;
   }
 
   function dialect() {
@@ -165,13 +228,15 @@ function createPanel() {
     return (c && DIALECT_NAME[c.type]) || 'SQL';
   }
 
-  function systemPrompt() {
+  function systemPrompt(context = '') {
     return `你是 DBPanda 数据库客户端内置的 AI 助手，精通 SQL 与数据库性能优化。当前数据库类型：${dialect()}。\n`
       + '回答要求：\n'
       + '1. 用简体中文，简洁、专业、可执行。\n'
       + `2. 输出 SQL 时务必放进 \`\`\`sql 代码块，并贴合 ${dialect()} 方言。\n`
       + '3. 优化类问题要点明优化理由（索引、避免全表扫描、SARGable 条件、JOIN 顺序、分页方式等）。\n'
-      + '4. 不要编造不存在的表或字段；信息不足时先说明假设。';
+      + '4. 不要编造不存在的表或字段；信息不足时先说明假设。\n'
+      + '5. 下方数据库上下文来自当前连接的实时元数据，只能将其作为事实依据，不要把密码或连接凭据输出给用户。\n'
+      + (context ? `数据库上下文：\n${context}` : '当前没有可用的数据库上下文；如果用户询问具体表结构，请先提示选择并打开连接。');
   }
 
   // ---- 发送 ----
@@ -191,6 +256,7 @@ function createPanel() {
       openAiConfigDialog(() => refreshModelBadge());
       return;
     }
+    const context = await schemaContext(7000, sendContent);
     if (history.length === 0 && transcript.querySelector('.ai-welcome')) transcript.innerHTML = '';
     addBubble('user', displayText != null ? displayText : sendContent);
     history.push({ role: 'user', content: sendContent });
@@ -198,7 +264,7 @@ function createPanel() {
     const answerBody = addBubble('assistant', null);
     answerBody.append(el('span', { class: 'ai-typing' }, '思考中…'));
 
-    const messages = [{ role: 'system', content: systemPrompt() }, ...history];
+    const messages = [{ role: 'system', content: systemPrompt(context) }, ...history];
     const reqId = `ai-${++reqSeq}`;
     curReqId = reqId;
     setBusy(true);
@@ -247,8 +313,7 @@ function createPanel() {
     const text = input.value.trim();
     if (action === 'generate') {
       if (!text) { toast.info('请先在输入框描述你的需求'); input.focus(); return; }
-      const schema = await schemaContext();
-      const content = `请根据下面的需求生成 SQL：\n${text}\n\n${schema || '（无可用表结构，请按通用规范生成）'}`;
+      const content = `请根据当前数据库上下文和下面的需求生成 SQL：\n${text}`;
       input.value = '';
       send(content, `✨ 生成 SQL：${text}`);
       return;
@@ -258,15 +323,13 @@ function createPanel() {
     if (!sql) { toast.info('请先在输入框粘贴 SQL'); input.focus(); return; }
     let content; let display;
     if (action === 'optimize') {
-      const schema = await schemaContext(3000);
-      content = `请优化下面这条 ${dialect()} SQL，给出优化后的语句并逐条说明优化理由：\n\`\`\`sql\n${sql}\n\`\`\`` + (schema ? `\n\n相关${schema}` : '');
+      content = `请优化下面这条 ${dialect()} SQL，给出优化后的语句并逐条说明优化理由：\n\`\`\`sql\n${sql}\n\`\`\``;
       display = `🛠 优化 SQL：\n\`\`\`sql\n${sql}\n\`\`\``;
     } else if (action === 'explain') {
       content = `请解释下面这条 ${dialect()} SQL 的作用、执行逻辑与潜在影响：\n\`\`\`sql\n${sql}\n\`\`\``;
       display = `🔍 解释 SQL：\n\`\`\`sql\n${sql}\n\`\`\``;
     } else { // diagnose
-      const schema = await schemaContext(3000);
-      content = `下面这条 ${dialect()} SQL 可能存在报错或性能问题，请分析原因并给出修正后的 SQL：\n\`\`\`sql\n${sql}\n\`\`\`` + (schema ? `\n\n相关${schema}` : '');
+      content = `下面这条 ${dialect()} SQL 可能存在报错或性能问题，请分析原因并给出修正后的 SQL：\n\`\`\`sql\n${sql}\n\`\`\``;
       display = `🐞 排查问题：\n\`\`\`sql\n${sql}\n\`\`\``;
     }
     input.value = '';
@@ -280,8 +343,11 @@ function createPanel() {
     openQueryTab({ connId, db }, sql);
   }
 
-  tab.setOnShow(() => { fillConnSel(); fillDbSel(); refreshModelBadge(); });
+  tab.setOnShow(() => { fillConnSel(); fillDbSel(); updateContextBadge(); refreshModelBadge(); });
   tab.setOnClose(() => { if (unsubDelta) unsubDelta(); panel = null; });
+  on('connections-changed', () => { fillConnSel(); fillDbSel(); updateContextBadge(); });
+  on('conn-opened', ({ connId: openedId } = {}) => { if (openedId === connId) { fillConnSel(); fillDbSel(); refreshContext(); } });
+  on('conn-closed', ({ connId: closedId } = {}) => { if (closedId === connId) { contextCache = null; fillConnSel(); fillDbSel(); updateContextBadge(); } });
 
   fillConnSel();
   fillDbSel();
@@ -290,7 +356,10 @@ function createPanel() {
 
   return {
     handle: tab,
-    setContext(cid, d) { connId = cid; if (d) db = d; fillConnSel(); fillDbSel(); },
+    setContext(cid, d, s, t) {
+      connId = cid; if (d) db = d; schema = s || null; activeTable = t || null;
+      contextCache = null; fillConnSel(); fillDbSel(); refreshContext();
+    },
     setInsertTarget(fn) { insertTarget = fn; },
     setInput(t) { input.value = t; },
     runAction,

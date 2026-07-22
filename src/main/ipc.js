@@ -478,6 +478,65 @@ function register(getWin) {
     return dbm.get(a.connId).rollbackTransaction(rendererTransactionId(event, a.transactionId));
   }, null, true);
   h('db:allColumns', (a) => dbm.get(a.connId).listAllColumns(a.db, a.schema));
+  // AI 使用的数据库上下文：只返回元数据，不读取业务数据，也不会返回密码等连接凭据。
+  h('db:aiContext', async (a) => {
+    const conn = store.getById(a.connId);
+    const adapter = dbm.get(a.connId);
+    const db = a.db || '';
+    const schema = a.schema || null;
+    const objects = await adapter.listObjects(db, schema);
+    const tables = Array.isArray(objects && objects.tables) ? objects.tables : [];
+    const views = Array.isArray(objects && objects.views) ? objects.views : [];
+    const q = String(a.query || '').trim().toLocaleLowerCase();
+    const searchTerms = [...new Set([
+      q,
+      q.replace(/当前(?:连接|数据库|库)?|有哪些|列出|查询|查下|查看|请|帮我|一下|表结构|表列表/g, '').trim(),
+      q.replace(/表(?:结构|列表)?$/g, '').trim(),
+    ].filter(Boolean))];
+    let columnMap = {};
+    if (q) {
+      try { columnMap = await adapter.listAllColumns(db, schema) || {}; } catch (e) { columnMap = {}; }
+    }
+    const score = (item) => {
+      if (!q) return 0;
+      const text = `${item.name || ''} ${item.comment || ''} ${(columnMap[item.name] || []).join(' ')}`.toLocaleLowerCase();
+      if (searchTerms.some((term) => text === term)) return 100;
+      if (searchTerms.some((term) => term.length > 1 && text.includes(term))) return 60;
+      const parts = searchTerms.flatMap((term) => term.split(/\s+/)).filter((part) => part.length > 1);
+      return parts.reduce((n, part) => n + (text.includes(part) ? 10 : 0), 0);
+    };
+    const ranked = tables
+      .map((t) => ({ ...t, _score: score(t) }))
+      .sort((x, y) => y._score - x._score || String(x.name).localeCompare(String(y.name)))
+      .map(({ _score, ...t }) => t);
+    const requested = Array.isArray(a.tables) ? a.tables.map((t) => String(t)).filter(Boolean) : [];
+    const matched = q ? ranked.filter((t) => score(t) > 0).slice(0, 5).map((t) => t.name) : [];
+    const names = [...new Set([...requested, ...matched])];
+    const details = [];
+    for (const name of names.slice(0, 5)) {
+      try {
+        const info = await adapter.tableInfo(db, schema, name);
+        details.push({
+          name,
+          comment: (ranked.find((t) => t.name === name) || {}).comment || '',
+          columns: (info && info.columns || []).slice(0, 120).map((c) => ({
+            name: c.name, type: c.type, nullable: c.nullable,
+            default: c.def, comment: c.comment, key: c.key,
+          })),
+          primaryKey: info && info.pk || [],
+        });
+      } catch (e) {
+        details.push({ name, error: e && e.message ? e.message : String(e) });
+      }
+    }
+    return {
+      connection: { id: conn.id, name: conn.name, type: conn.type },
+      database: db, schema,
+      tables: ranked.slice(0, Math.max(1, Math.min(Number(a.maxTables) || 300, 500))),
+      views: views.slice(0, 100), details,
+      truncated: tables.length > (Number(a.maxTables) || 300),
+    };
+  });
   h('db:foreignKeys', (a) => dbm.get(a.connId).listForeignKeys(a.db, a.schema, a.table));
   h('db:erModel', (a) => dbm.get(a.connId).erModel(a.db, a.schema, a.opts || {}));
   h('db:explain', (a) => {

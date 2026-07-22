@@ -31,7 +31,7 @@ async function openHistory() {
 async function openAiPanelFromToolbar() {
   const { openAiPanel } = await import('./aiPanel.js');
   const t = firstOpenTarget();
-  openAiPanel(t ? { connId: t.connId, db: t.db } : {});
+  openAiPanel(t || {});
 }
 
 function showConnMenu(anchor) {

@@ -71,9 +71,31 @@ function prepareWinCodeSignCache(env = process.env) {
   if (!fs.existsSync(signTool)) throw new Error(`winCodeSign cache is incomplete: ${signTool}`);
 }
 
+function cleanReleaseOutput() {
+  const releaseDir = path.join(__dirname, '..', 'release');
+  fs.mkdirSync(releaseDir, { recursive: true });
+  const keep = new Set();
+  for (const name of fs.readdirSync(releaseDir)) {
+    if (keep.has(name)) continue;
+    // 发布目录只保存当前构建产物；旧安装包、旧 blockmap、旧 zip 和构建临时目录均可安全清理。
+    if (/^DBPanda-Setup-\d+\.\d+\.\d+(?:\.exe(?:\.blockmap)?|\.zip)$/.test(name)
+      || name === 'latest.yml' || name === 'builder-debug.yml' || name === 'win-unpacked') {
+      fs.rmSync(path.join(releaseDir, name), { recursive: true, force: true });
+    }
+  }
+}
+
+function cleanReleaseTemp() {
+  const releaseDir = path.join(__dirname, '..', 'release');
+  for (const name of ['win-unpacked', 'builder-debug.yml', '__uninstaller-nsis-dbpanda.exe']) {
+    fs.rmSync(path.join(releaseDir, name), { recursive: true, force: true });
+  }
+}
+
 function buildRelease() {
   const cli = require.resolve('electron-builder/out/cli/cli.js');
   const env = createBuildEnv();
+  cleanReleaseOutput();
   prepareWinCodeSignCache(env);
   const result = spawnSync(process.execPath, [cli, ...getBuilderArgs()], {
     cwd: path.join(__dirname, '..'),
@@ -82,6 +104,7 @@ function buildRelease() {
   });
   if (result.error) throw result.error;
   if (result.signal) throw new Error(`electron-builder terminated by ${result.signal}`);
+  if (result.status === 0) cleanReleaseTemp();
   process.exitCode = result.status == null ? 1 : result.status;
 }
 
@@ -94,4 +117,6 @@ module.exports = {
   getWinCodeSignCachePaths,
   getWinCodeSignUrl,
   prepareWinCodeSignCache,
+  cleanReleaseOutput,
+  cleanReleaseTemp,
 };

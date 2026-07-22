@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('api', {
     commitTransaction: (connId, transactionId) => inv('db:transactionCommit', { connId, transactionId }),
     rollbackTransaction: (connId, transactionId) => inv('db:transactionRollback', { connId, transactionId }),
     allColumns: (connId, db, schema) => inv('db:allColumns', { connId, db, schema }),
+    aiContext: (connId, opts) => inv('db:aiContext', { connId, ...(opts || {}) }),
     foreignKeys: (connId, t) => inv('db:foreignKeys', { connId, ...t }),
     erModel: (connId, db, schema, opts) => inv('db:erModel', { connId, db, schema, opts }),
     explain: (connId, db, sql) => inv('db:explain', { connId, db, sql }),
