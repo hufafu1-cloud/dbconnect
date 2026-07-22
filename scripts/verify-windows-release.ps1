@@ -70,8 +70,8 @@ if ($meanDifference -gt 8) {
   throw ("Packaged EXE icon does not match assets/icon.ico (mean channel difference: {0:N2})" -f $meanDifference)
 }
 
-$installer = Join-Path $root "release\DBPanda-Setup-$ExpectedVersion.exe"
-$portable = Join-Path $root "release\DBPanda-Setup-$ExpectedVersion.zip"
+$installer = Join-Path $root "release\DBPanda-Setup-$ExpectedVersion-win7.exe"
+$portable = Join-Path $root "release\DBPanda-Setup-$ExpectedVersion-win7.zip"
 if (-not (Test-Path -LiteralPath $installer)) { throw "Installer missing: $installer" }
 if (-not (Test-Path -LiteralPath $portable)) { throw "Portable ZIP missing: $portable" }
 

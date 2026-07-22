@@ -25,18 +25,18 @@
     "postinstall": "electron-builder install-app-deps || echo skip-native-rebuild"
   },
   "devDependencies": {
-    "electron": "^37.2.0",
+    "electron": "22.3.27",
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
     "@clickhouse/client": "^1.20.0",
-    "better-sqlite3": "^12.2.0",
+    "better-sqlite3": "8.7.0",
     "builder-util-runtime": "9.7.0",
     "codemirror": "^5.65.16",
     "egoroof-blowfish": "^4.0.2",
     "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
-    "mssql": "^11.0.1",
+    "mssql": "9.3.2",
     "mysql2": "^3.14.1",
     "pg": "^8.16.0",
     "sax": "^1.6.0",
@@ -45,7 +45,7 @@
     "ssh2": "^1.17.0"
   },
   "build": {
-    "appId": "com.dbpanda.app",
+    "appId": "com.dbpanda.app.win7",
     "productName": "DBPanda",
     "directories": {
       "output": "release"
@@ -64,16 +64,16 @@
         {
           "target": "nsis",
           "arch": [
-            "x64"
+            "ia32"
           ]
         }
       ],
       "icon": "assets/icon.ico",
-      "artifactName": "${productName}-Setup-${version}.${ext}"
+      "artifactName": "${productName}-Setup-${version}-win7.${ext}"
     },
     "publish": {
       "provider": "generic",
-      "url": "http://172.16.35.63/download/"
+      "url": "http://172.16.35.63/download/win7/"
     },
     "releaseInfo": {
       "releaseNotesFile": "release-notes.md"

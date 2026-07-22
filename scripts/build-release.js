@@ -14,7 +14,7 @@ function createBuildEnv(baseEnv = process.env) {
 }
 
 function getBuilderArgs() {
-  return ['--win', 'nsis', 'zip'];
+  return ['--win', 'nsis', 'zip', '--ia32'];
 }
 
 function getWinCodeSignCachePaths(env = process.env) {
@@ -78,7 +78,7 @@ function cleanReleaseOutput() {
   for (const name of fs.readdirSync(releaseDir)) {
     if (keep.has(name)) continue;
     // 发布目录只保存当前构建产物；旧安装包、旧 blockmap、旧 zip 和构建临时目录均可安全清理。
-    if (/^DBPanda-Setup-\d+\.\d+\.\d+(?:\.exe(?:\.blockmap)?|\.zip)$/.test(name)
+    if (/^DBPanda-Setup-\d+\.\d+\.\d+(?:-win7)?(?:\.exe(?:\.blockmap)?|\.zip)$/.test(name)
       || name === 'latest.yml' || name === 'builder-debug.yml' || name === 'win-unpacked') {
       fs.rmSync(path.join(releaseDir, name), { recursive: true, force: true });
     }
@@ -87,9 +87,26 @@ function cleanReleaseOutput() {
 
 function cleanReleaseTemp() {
   const releaseDir = path.join(__dirname, '..', 'release');
-  for (const name of ['win-unpacked', 'builder-debug.yml', '__uninstaller-nsis-dbpanda.exe']) {
+  for (const name of ['win-unpacked', 'win-ia32-unpacked', 'builder-debug.yml', '__uninstaller-nsis-dbpanda.exe']) {
     fs.rmSync(path.join(releaseDir, name), { recursive: true, force: true });
   }
+}
+
+// ssh2 的 cpu-features 是可选增强模块，Electron 22/Win7 ia32 没有可用预编译包；
+// 构建时暂时隐藏它，让 ssh2 自动回退到纯 JS 实现，构建结束后恢复开发依赖目录。
+function hideCpuFeatures() {
+  const root = path.join(__dirname, '..', 'node_modules');
+  const source = path.join(root, 'cpu-features');
+  const hidden = path.join(root, 'cpu-features.disabled');
+  if (!fs.existsSync(source) && fs.existsSync(hidden)) {
+    return () => { if (fs.existsSync(hidden) && !fs.existsSync(source)) fs.renameSync(hidden, source); };
+  }
+  if (!fs.existsSync(source)) return () => {};
+  fs.rmSync(hidden, { recursive: true, force: true });
+  fs.renameSync(source, hidden);
+  return () => {
+    if (fs.existsSync(hidden) && !fs.existsSync(source)) fs.renameSync(hidden, source);
+  };
 }
 
 function buildRelease() {
@@ -97,11 +114,17 @@ function buildRelease() {
   const env = createBuildEnv();
   cleanReleaseOutput();
   prepareWinCodeSignCache(env);
-  const result = spawnSync(process.execPath, [cli, ...getBuilderArgs()], {
-    cwd: path.join(__dirname, '..'),
-    env,
-    stdio: 'inherit',
-  });
+  const restoreCpuFeatures = hideCpuFeatures();
+  let result;
+  try {
+    result = spawnSync(process.execPath, [cli, ...getBuilderArgs()], {
+      cwd: path.join(__dirname, '..'),
+      env,
+      stdio: 'inherit',
+    });
+  } finally {
+    restoreCpuFeatures();
+  }
   if (result.error) throw result.error;
   if (result.signal) throw new Error(`electron-builder terminated by ${result.signal}`);
   if (result.status === 0) cleanReleaseTemp();
@@ -119,4 +142,5 @@ module.exports = {
   prepareWinCodeSignCache,
   cleanReleaseOutput,
   cleanReleaseTemp,
+  hideCpuFeatures,
 };
