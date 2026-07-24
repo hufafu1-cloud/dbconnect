@@ -14,7 +14,9 @@ function createBuildEnv(baseEnv = process.env) {
 }
 
 function getBuilderArgs() {
-  return ['--win', 'nsis', 'zip'];
+  // 安装包由 CI 的 softprops/action-gh-release 上传；此处禁止 electron-builder 自行 publish，
+  // 避免在 GitHub Actions（CI=true）下因 publish.provider=github 重复发 Release。
+  return ['--win', 'nsis', 'zip', '--publish', 'never'];
 }
 
 function getWinCodeSignCachePaths(env = process.env) {

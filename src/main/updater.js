@@ -1,7 +1,7 @@
 const { app } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { CancellationToken } = require('builder-util-runtime');
-const { getUpdateUrl, isConfigured } = require('./updateConfig');
+const { getFeedOptions, isConfigured } = require('./updateConfig');
 
 let targetWindow = null;
 let configured = false;
@@ -31,17 +31,17 @@ function send(event, payload = {}) {
 
 function setup(win) {
   targetWindow = win;
-  const url = getUpdateUrl();
+  const feed = getFeedOptions();
   configured = !!(app.isPackaged && !process.argv.includes('--smoke')
     && !process.argv.includes('--selftest') && !process.argv.includes('--demo')
-    && isConfigured(url));
+    && isConfigured(feed));
   if (!configured) return false;
 
   autoUpdater.autoDownload = false;
   // 下载未完成时退出不能触发安装，避免把临时包当成完整安装包。
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowDowngrade = false;
-  autoUpdater.setFeedURL({ provider: 'generic', url });
+  autoUpdater.setFeedURL(feed);
   autoUpdater.removeAllListeners('checking-for-update');
   autoUpdater.removeAllListeners('update-available');
   autoUpdater.removeAllListeners('update-not-available');

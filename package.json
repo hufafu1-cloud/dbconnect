@@ -75,7 +75,7 @@
     },
     "publish": {
       "provider": "generic",
-      "url": "http://172.16.35.63/download/"
+      "url": "https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/"
     },
     "releaseInfo": {
       "releaseNotesFile": "release-notes.md"
