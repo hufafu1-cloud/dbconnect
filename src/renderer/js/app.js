@@ -8,7 +8,7 @@ import { initObjectsTab } from './objectsTab.js';
 import {
   addTab, closeActive, anyDirty, getActiveTab, activateRelative,
   getStoredWorkspace, restoreWorkspaceTabs, retryDeferredWorkspaceTabs,
-  setWorkspaceContextProvider, touchWorkspacePersistence, persistWorkspaceNow,
+  setWorkspaceContextProvider, touchWorkspacePersistence, persistWorkspaceNow, runBeforeCloseGuards,
 } from './tabs.js';
 import { openConnDialog } from './connDialog.js';
 import * as actions from './actions.js';
@@ -409,6 +409,8 @@ function setupCloseGuard() {
         const ok = await confirmDialog('退出 DBPanda', '有未保存/未应用的更改，确定退出吗？', { danger: true, okLabel: '退出' });
         if (!ok) { window.api.app.cancelClose(requestId); return; }
       }
+      const tabsReady = await runBeforeCloseGuards({ reason: 'app-close' });
+      if (!tabsReady) { window.api.app.cancelClose(requestId); return; }
       let timer = null;
       const saved = await Promise.race([
         persistWorkspaceNow(),

@@ -395,6 +395,16 @@ export function anyDirty() {
   return false;
 }
 
+/** 在应用退出前运行标签级资源保护（例如活动事务的提交/回滚选择）。 */
+export async function runBeforeCloseGuards(context = {}) {
+  for (const t of tabs.values()) {
+    if (!t.beforeClose) continue;
+    const allowed = await t.beforeClose({ ...context, appClose: true });
+    if (allowed === false) return false;
+  }
+  return true;
+}
+
 export function closeActive() {
   if (activeId) closeTab(activeId);
 }

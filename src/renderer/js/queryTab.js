@@ -3,7 +3,7 @@ import { el, iconEl, fmtCount } from './util.js';
 import { state, connLabel, connColor, objectsCacheKey, emit, setActiveTarget } from './state.js';
 import { addTab, uid } from './tabs.js';
 import { DataGrid } from './grid.js';
-import { toast, promptDialog } from './toast.js';
+import { toast, promptDialog, openModal } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { showMenu } from './contextmenu.js';
 import { openEditorSearch, closeEditorSearch, editorSearchNext } from './editorSearch.js';
@@ -70,6 +70,16 @@ export function openQueryTab(target, initialSql, opts) {
     class: 'tb-context-badge',
     style: { display: 'none', color: 'var(--text-muted)', fontSize: '12px', whiteSpace: 'nowrap' },
   });
+  const schemaLabel = el('span', {
+    class: 'query-schema-label',
+    style: { display: 'none', color: 'var(--text-muted)', fontSize: '12px', whiteSpace: 'nowrap' },
+  }, '模式:');
+  const schemaSel = el('select', {
+    class: 'query-schema-select',
+    title: '当前模式（Schema）；未限定对象名将在此模式中解析',
+    style: { display: 'none' },
+  });
+  let schemaLoadSeq = 0;
   function updateEnvBadge() {
     const c = state.connections.find((x) => x.id === connId);
     const env = c && c.env;
@@ -82,11 +92,61 @@ export function openQueryTab(target, initialSql, opts) {
     if (connId) setActiveTarget({ connId, db, schema }, 'query-tab');
   }
   function updateSchemaBadge() {
-    schemaBadge.style.display = schema ? '' : 'none';
+    const switchable = connTypeOf(connId) === 'postgres';
+    schemaLabel.style.display = switchable ? '' : 'none';
+    schemaSel.style.display = switchable ? '' : 'none';
+    schemaBadge.style.display = !switchable && schema ? '' : 'none';
     schemaBadge.textContent = schema ? `模式: ${schema}` : '';
     schemaBadge.title = connTypeOf(connId) === 'mssql'
       ? 'SQL Server 不支持会话级搜索路径；对象补全会使用模式限定名'
       : '未限定对象名将优先在此模式中解析';
+  }
+  async function fillSchemaSel() {
+    const seq = ++schemaLoadSeq;
+    const expectedConnId = connId;
+    const expectedDb = db;
+    schemaSel.innerHTML = '';
+    updateSchemaBadge();
+    if (connTypeOf(connId) !== 'postgres' || !connId || !db || !state.open.has(connId)) {
+      schemaSel.dataset.loading = 'false';
+      return;
+    }
+    schemaSel.dataset.loading = 'true';
+    schemaSel.disabled = true;
+    schemaSel.append(el('option', { value: '' }, '正在加载…'));
+    try {
+      const schemas = await window.api.db.schemas(connId, db);
+      if (seq !== schemaLoadSeq || connId !== expectedConnId || db !== expectedDb) return;
+      const available = Array.isArray(schemas) ? schemas.filter(Boolean) : [];
+      if (!schema || !available.includes(schema)) {
+        schema = available.includes('public') ? 'public' : (available[0] || null);
+      }
+      schemaSel.innerHTML = '';
+      if (!available.length) {
+        schemaSel.append(el('option', { value: '' }, '（无可用模式）'));
+      } else {
+        for (const item of available) {
+          schemaSel.append(el('option', {
+            value: item,
+            selected: item === schema ? 'selected' : null,
+          }, item));
+        }
+        schemaSel.value = schema || '';
+      }
+      schemaSel.title = '当前模式（Schema）；未限定对象名将在此模式中解析';
+    } catch (e) {
+      if (seq !== schemaLoadSeq || connId !== expectedConnId || db !== expectedDb) return;
+      schema = null;
+      schemaSel.innerHTML = '';
+      schemaSel.append(el('option', { value: '' }, '模式加载失败'));
+      schemaSel.title = `模式加载失败：${e && e.message ? e.message : e}`;
+    } finally {
+      if (seq === schemaLoadSeq) {
+        schemaSel.dataset.loading = 'false';
+        updateSchemaBadge();
+        syncTransactionUi();
+      }
+    }
   }
   function fillConnSel() {
     connSel.innerHTML = '';
@@ -131,6 +191,14 @@ export function openQueryTab(target, initialSql, opts) {
   connSel.addEventListener('change', async () => {
     const nextConnId = connSel.value || null;
     const previousConnId = connId;
+    if (!(await finishResultEditsBefore('切换连接'))) {
+      connSel.value = previousConnId || '';
+      return;
+    }
+    if (!(await finishTransactionBefore('切换连接'))) {
+      connSel.value = previousConnId || '';
+      return;
+    }
     if (nextConnId && !state.open.has(nextConnId)) {
       connSel.disabled = true;
       try {
@@ -150,22 +218,53 @@ export function openQueryTab(target, initialSql, opts) {
     db = null;
     schema = null;
     fillDbSel();
+    await fillSchemaSel();
     loadHintColumns();
     updateEnvBadge();
     if (cm) cm.setOption('mode', CM_MODES[connTypeOf(connId)] || 'text/x-sql');
     syncActiveContext();
     refreshTransactionSupport();
     syncTransactionUi();
+    clearResults();
     touchRecovery();
   });
-  dbSel.addEventListener('change', () => {
+  dbSel.addEventListener('change', async () => {
+    const previousDb = db;
+    if (!(await finishResultEditsBefore('切换数据库'))) {
+      dbSel.value = previousDb || '';
+      return;
+    }
+    if (!(await finishTransactionBefore('切换数据库'))) {
+      dbSel.value = previousDb || '';
+      return;
+    }
     db = dbSel.value || null;
     dbUnavailable = false;
     schema = null;
+    await fillSchemaSel();
     loadHintColumns();
     syncActiveContext();
     updateSchemaBadge();
     syncTransactionUi();
+    clearResults();
+    touchRecovery();
+  });
+  schemaSel.addEventListener('change', async () => {
+    const previousSchema = schema;
+    if (!(await finishResultEditsBefore('切换模式'))) {
+      schemaSel.value = previousSchema || '';
+      return;
+    }
+    if (!(await finishTransactionBefore('切换模式'))) {
+      schemaSel.value = previousSchema || '';
+      return;
+    }
+    schema = schemaSel.value || null;
+    loadHintColumns();
+    syncActiveContext();
+    updateSchemaBadge();
+    syncTransactionUi();
+    clearResults();
     touchRecovery();
   });
 
@@ -198,32 +297,17 @@ export function openQueryTab(target, initialSql, opts) {
   });
   btnStop.disabled = true;
 
-  const autoCommitInput = el('input', { type: 'checkbox', title: '关闭后，查询将在当前标签的显式事务中执行' });
-  autoCommitInput.checked = true;
-  if (restoreState && restoreState.autoCommit === false) autoCommitInput.checked = false;
-  const autoCommitControl = el('label', {
-    class: 'form-check',
-    title: '自动提交关闭后，首条查询会自动开始事务；请使用提交或回滚结束事务',
-    style: { whiteSpace: 'nowrap', margin: '0' },
-  }, autoCommitInput, '自动提交');
   const txStatus = el('span', {
     title: '',
     style: { color: 'var(--text-muted)', fontSize: '12px', whiteSpace: 'nowrap' },
   }, '自动提交');
-  const btnTxBegin = mkBtn('run', '开始', beginTransaction);
+  const btnTxBegin = mkBtn('run', '开始事务', beginTransaction);
   const btnTxCommit = mkBtn('save', '提交', commitTransaction);
   const btnTxRollback = mkBtn('cross', '回滚', rollbackTransaction);
-  const transactionControls = el('div', { class: 'transaction-controls', title: '关闭自动提交后，可在这里管理当前标签页的事务' },
-    el('span', { class: 'transaction-label' }, '事务'), autoCommitControl, btnTxBegin, btnTxCommit, btnTxRollback, txStatus);
-  autoCommitInput.addEventListener('change', () => {
-    if (autoCommitInput.checked && transactionState !== 'idle') {
-      autoCommitInput.checked = false;
-      toast.info('请先提交或回滚当前事务，再开启自动提交');
-      return;
-    }
-    syncTransactionUi();
-    touchRecovery();
-  });
+  const transactionControls = el('div', {
+    class: 'transaction-controls',
+    title: '默认自动提交；点击“开始事务”或在 SQL 中执行 BEGIN 可进入显式事务',
+  }, el('span', { class: 'transaction-label' }, '事务'), btnTxBegin, btnTxCommit, btnTxRollback, txStatus);
 
   const btnAi = mkBtn('ai', 'AI ▾', () => showAiMenu(btnAi));
 
@@ -243,7 +327,7 @@ export function openQueryTab(target, initialSql, opts) {
     const { openAiPanel } = await import('./aiPanel.js');
     let sql = (cm.getSelection() || cm.getValue()).trim().replace(/;\s*$/, '');
     openAiPanel({
-      connId, db,
+      connId, db, schema,
       sql: action === 'generate' ? '' : sql,
       action: action || undefined,
       insertTarget: (text) => { cm.replaceSelection(text); cm.focus(); },
@@ -254,7 +338,8 @@ export function openQueryTab(target, initialSql, opts) {
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '执行'), btnRun, btnRunSel, btnRunAll, btnStop),
     el('span', { class: 'sep' }),
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '连接'), connSel, prodBadge,
-      el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel, schemaBadge),
+      el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel,
+      schemaLabel, schemaSel, schemaBadge),
     el('span', { class: 'sep' }),
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '工具'), mkBtn('explain', '解释', explainSql), mkBtn('format', '美化', formatSql), btnAi),
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '文件'), mkBtn('openFile', '打开', openFile), mkBtn('save', '保存', () => saveQuery()), mkBtn('exportIcon', '另存文件', () => saveAsFile())),
@@ -271,7 +356,7 @@ export function openQueryTab(target, initialSql, opts) {
     sql = sql.trim().replace(/;\s*$/, '');
     if (!sql) { toast.info('没有可解释的 SQL'); return; }
     const { openExplainTab } = await import('./explainTab.js');
-    openExplainTab({ connId, db }, sql);
+    openExplainTab({ connId, db, schema }, sql);
   }
 
   const FORMAT_LANGS = { mysql: 'mysql', oceanbase: 'mysql', clickhouse: 'mysql', postgres: 'postgresql', mssql: 'transactsql', sqlite: 'sqlite', oboracle: 'plsql' };
@@ -336,7 +421,7 @@ export function openQueryTab(target, initialSql, opts) {
     hintOptions: { completeSingle: false },
   });
   cm.on('change', () => {
-    tab.setDirty(cm.getValue() !== savedText || transactionState !== 'idle');
+    syncTabDirty();
     touchRecovery();
   });
   setTimeout(() => {
@@ -519,10 +604,20 @@ export function openQueryTab(target, initialSql, opts) {
 
   // ---- 结果渲染 ----
   let pages = [];
+  let resultEditors = [];
+  function hasDirtyResultEdits() {
+    return resultEditors.some((editor) => editor.grid.isDirty());
+  }
+  function syncTabDirty() {
+    if (!cm) return;
+    tab.setDirty(cm.getValue() !== savedText || transactionState !== 'idle' || hasDirtyResultEdits());
+  }
   function clearResults() {
     rtabs.innerHTML = '';
     rbody.innerHTML = '';
     pages = [];
+    resultEditors = [];
+    syncTabDirty();
   }
   function addResultPage(title, contentEl, isError) {
     const idx = pages.length;
@@ -552,9 +647,11 @@ export function openQueryTab(target, initialSql, opts) {
           ` · ${r.ms} ms` + (r.truncated ? ' · 仅显示前面部分' : '')));
       } else {
         const note = r.message && r.message.includes('不返回影响行数');
+        const summary = r.message || (note ? '执行成功' : `影响 ${fmtCount(r.affected)} 行`);
         list.append(el('div', { class: 'msg-item' },
           el('span', { class: 'msg-sql' }, r.sql + '  →  '),
-          el('b', {}, note ? '执行成功' : `影响 ${fmtCount(r.affected)} 行`),
+          el('b', {}, summary),
+          r.warning ? ` · ${r.warning}` : '',
           (r.insertId ? ` · 新ID ${r.insertId}` : '') + ` · ${r.ms} ms`));
       }
     }
@@ -564,18 +661,18 @@ export function openQueryTab(target, initialSql, opts) {
   }
 
   function syncTransactionUi() {
-    const active = ['starting', 'active', 'failed', 'committing', 'rolling-back'].includes(transactionState);
-    connSel.disabled = active;
-    dbSel.disabled = active;
+    const stateChanging = ['starting', 'committing', 'rolling-back'].includes(transactionState);
+    connSel.disabled = running || stateChanging;
+    dbSel.disabled = running || stateChanging;
+    schemaSel.disabled = running || stateChanging || schemaSel.dataset.loading === 'true'
+      || connTypeOf(connId) !== 'postgres' || !schema || !schemaSel.options.length;
     btnRun.disabled = running || dbUnavailable;
     btnRunSel.disabled = running || dbUnavailable;
     btnRunAll.disabled = running || dbUnavailable;
-    autoCommitInput.disabled = !transactionSupported;
     btnTxBegin.disabled = running || !transactionSupported || transactionState !== 'idle';
     btnTxCommit.disabled = running || transactionState !== 'active';
     btnTxRollback.disabled = running || !['active', 'failed'].includes(transactionState);
     if (!transactionSupported) {
-      autoCommitInput.checked = true;
       txStatus.textContent = '仅自动提交';
     } else if (transactionState === 'failed') {
       txStatus.textContent = '事务异常 · 请回滚';
@@ -588,24 +685,24 @@ export function openQueryTab(target, initialSql, opts) {
     } else if (transactionState === 'rolling-back') {
       txStatus.textContent = '正在回滚…';
     } else {
-      txStatus.textContent = autoCommitInput.checked ? '自动提交' : '手动提交 · 未开始';
+      txStatus.textContent = '自动提交';
     }
     txStatus.title = transactionWarning || '';
-    txStatus.style.display = transactionSupported && transactionState === 'idle' && autoCommitInput.checked ? 'none' : '';
+    txStatus.style.display = '';
     if (queryStatus) {
       const main = queryStatus.querySelector('.query-status-main');
       const detail = queryStatus.querySelector('.query-status-detail');
       const dot = queryStatus.querySelector('.query-status-dot');
       if (main) main.textContent = running ? '正在执行' : (transactionState === 'active' ? '事务进行中' : '准备执行');
-      if (detail) detail.textContent = `${connId ? connLabel(connId) : '未选择连接'}${db ? ` › ${db}` : ''}${transactionState === 'active' ? ' · 手动提交模式' : ' · 自动提交'}`;
+      if (detail) detail.textContent = `${connId ? connLabel(connId) : '未选择连接'}${db ? ` › ${db}` : ''}${schema ? ` › ${schema}` : ''}${transactionState === 'active' ? ' · 手动提交模式' : ' · 自动提交'}`;
       if (dot) dot.style.background = transactionState === 'failed' ? 'var(--danger)' : (running ? 'var(--orange)' : 'var(--green)');
     }
     if (cm) {
-      tab.setDirty(cm.getValue() !== savedText || transactionState !== 'idle');
+      syncTabDirty();
     }
   }
 
-  async function refreshTransactionSupport() {
+  async function refreshTransactionSupport(force = false) {
     if (!connId || !state.open.has(connId)) {
       transactionSupported = true;
       transactionWarning = '';
@@ -613,7 +710,7 @@ export function openQueryTab(target, initialSql, opts) {
       syncTransactionUi();
       return;
     }
-    if (transactionState !== 'idle') return;
+    if (!force && transactionState !== 'idle') return;
     const expectedConnId = connId;
     try {
       const status = await window.api.db.transactionStatus(connId, transactionId);
@@ -636,7 +733,6 @@ export function openQueryTab(target, initialSql, opts) {
     if (!transactionSupported) { toast.info(transactionWarning || '当前数据库仅支持自动提交'); return false; }
     if (transactionState === 'active') return true;
     if (transactionState === 'failed') { toast.info('当前事务已发生错误，请先回滚'); return false; }
-    autoCommitInput.checked = false;
     transactionState = 'starting';
     syncTransactionUi();
     try {
@@ -710,20 +806,16 @@ export function openQueryTab(target, initialSql, opts) {
 
   async function run(mode = 'current') {
     if (running) return;
+    if (!(await finishResultEditsBefore('重新执行查询'))) return;
     if (!connId || !state.open.has(connId)) { toast.info('请先打开一个连接'); return; }
     if (dbUnavailable) { toast.info('保存的数据库当前不可用，请先明确选择新的数据库'); return; }
     const sql = await sqlForRunMode(mode);
     if (!sql.trim()) { toast.info('没有可执行的 SQL'); return; }
-    if (!autoCommitInput.checked && transactionState === 'failed') {
-      toast.info('当前事务已发生错误，请先回滚');
-      return;
-    }
     const queryConnId = connId;
     const requestId = uid('query-request');
-    const manualCommit = !autoCommitInput.checked;
     const queryPayload = {
       connId: queryConnId, db, schema, sql, maxRows: Number(maxRowsSel.value), requestId,
-      ...(manualCommit ? { transactionId } : {}),
+      transactionId,
     };
     let approvedQuery;
     try {
@@ -734,7 +826,6 @@ export function openQueryTab(target, initialSql, opts) {
       return;
     }
     if (!approvedQuery) { statusbar.setLeft('已取消（生产库危险操作未确认）'); return; }
-    if (manualCommit && transactionState === 'idle' && !(await startTransaction(false))) return;
     running = true;
     activeRequest = { connId: queryConnId, requestId };
     btnRun.disabled = true;
@@ -752,21 +843,61 @@ export function openQueryTab(target, initialSql, opts) {
       const totalMs = Date.now() - t0;
       clearResults();
       const hasError = results.some((r) => r.error);
-      if (manualCommit && hasError) transactionState = 'failed';
       addResultPage(hasError ? '信息 ✗' : '信息', renderMessages(results, totalMs), hasError);
       let n = 0;
       for (const r of results) {
         if (!r.columns) continue;
         n++;
         const host = el('div', { style: { flex: '1', minHeight: '0', display: 'flex', flexDirection: 'column' } });
+        const editTarget = r.editTarget || null;
+        let editor = null;
         const grid = new DataGrid(host, {
-          editable: false,
-          copyContext: { table: 'result_table', connType: connTypeOf(queryConnId) },
+          editable: !!editTarget,
+          onChange: () => {
+            if (editor && editor.saveButton) editor.saveButton.disabled = !grid.isDirty() || editor.saving;
+            syncTabDirty();
+          },
+          onSave: editTarget ? () => { if (editor) void saveResultEditor(editor); } : null,
+          copyContext: {
+            table: editTarget ? editTarget.table : 'result_table',
+            connId: queryConnId,
+            db: editTarget ? editTarget.db : db,
+            schema: editTarget ? editTarget.schema : schema,
+            connType: connTypeOf(queryConnId),
+          },
         });
-        grid.setData({ columns: r.columns, rows: r.rows, pk: [] });
+        grid.setData({ columns: r.columns, rows: r.rows, pk: editTarget ? editTarget.pk : [] });
+        const saveButton = editTarget
+          ? el('button', {
+              class: 'pbtn success',
+              disabled: true,
+              title: '应用查询结果中的数据修改（Ctrl+S）',
+              onClick: () => { if (editor) void saveResultEditor(editor); },
+            }, iconEl('save'), '保存修改 (Ctrl+S)')
+          : null;
+        if (editTarget) {
+          editor = {
+            grid,
+            connId: queryConnId,
+            target: editTarget,
+            saveButton,
+            saving: false,
+          };
+          resultEditors.push(editor);
+        }
         const bar = el('div', { class: 'pane-info' },
           el('span', {}, `${formatQueryRowCount(r)} · ${r.ms} ms` + (r.truncated ? `（仅显示前 ${r.rows.length} 行）` : '')),
+          editTarget
+            ? el('span', {
+                title: `可编辑：${editTarget.schema ? editTarget.schema + '.' : ''}${editTarget.table}；Ctrl+S 应用修改`,
+                style: { color: 'var(--green)' },
+              }, '可编辑')
+            : el('span', {
+                title: r.editReadonlyReason || '该查询结果为只读',
+                style: { color: 'var(--text-muted)' },
+              }, '只读'),
           el('span', { class: 'spring' }),
+          saveButton,
           el('button', { class: 'pbtn', onClick: async (ev) => {
             const { showRowsExportMenu } = await import('./exportMenu.js');
             showRowsExportMenu(ev.clientX, ev.clientY, {
@@ -788,7 +919,6 @@ export function openQueryTab(target, initialSql, opts) {
       addResultPage('信息 ✗', el('div', { class: 'msg-list' }, el('div', { class: 'msg-item error' }, e.message)), true);
       activatePage(0);
       statusbar.setLeft('执行失败');
-      if (manualCommit) transactionState = 'failed';
       emit('history-changed');
     } finally {
       if (activeRequest && activeRequest.requestId === requestId) activeRequest = null;
@@ -797,6 +927,7 @@ export function openQueryTab(target, initialSql, opts) {
       btnRunSel.disabled = dbUnavailable;
       btnRunAll.disabled = dbUnavailable;
       btnStop.disabled = true;
+      await refreshTransactionSupport(true);
       syncTransactionUi();
     }
   }
@@ -809,7 +940,7 @@ export function openQueryTab(target, initialSql, opts) {
     savedPath = p;
     savedQuery = null;
     savedText = text;
-    tab.setDirty(transactionState !== 'idle');
+    syncTabDirty();
     tab.setTitle(p.split(/[\\/]/).pop());
     touchRecovery();
   }
@@ -819,7 +950,7 @@ export function openQueryTab(target, initialSql, opts) {
     if (savedPath) {
       await window.api.file.write(savedPath, cm.getValue());
       savedText = cm.getValue();
-      tab.setDirty(transactionState !== 'idle');
+      syncTabDirty();
       toast.success('已保存 ' + savedPath);
       touchRecovery();
       return;
@@ -837,7 +968,7 @@ export function openQueryTab(target, initialSql, opts) {
       });
       savedQuery = { id: rec.id, name: rec.name };
       savedText = cm.getValue();
-      tab.setDirty(transactionState !== 'idle');
+      syncTabDirty();
       tab.setTitle(rec.name);
       emit('queries-changed', { connId });
       toast.success(`查询 “${rec.name}” 已保存到连接`);
@@ -854,16 +985,25 @@ export function openQueryTab(target, initialSql, opts) {
     savedPath = p;
     savedQuery = null;
     savedText = cm.getValue();
-    tab.setDirty(transactionState !== 'idle');
+    syncTabDirty();
     tab.setTitle(p.split(/[\\/]/).pop());
     toast.success('已保存 ' + p);
     touchRecovery();
   }
 
-  tab.setIsDirty(() => cm.getValue() !== savedText || transactionState !== 'idle');
+  // 未保存 SQL 仍走通用关闭确认；活动事务使用下方的提交/回滚三选一，
+  // 避免连续弹出两个含义不同的“确定关闭”对话框。
+  // SQL 草稿继续使用通用关闭确认；结果集修改由 beforeClose 提供
+  // “应用 / 放弃 / 取消”三选一，避免连续出现两个含义重叠的弹窗。
+  tab.setIsDirty(() => cm.getValue() !== savedText);
   tab.setOnShow(() => {
     fillConnSel();
     fillDbSel();
+    void fillSchemaSel().then(() => {
+      syncActiveContext();
+      loadHintColumns();
+      syncTransactionUi();
+    });
     syncActiveContext();
     updateSchemaBadge();
     refreshTransactionSupport();
@@ -878,33 +1018,139 @@ export function openQueryTab(target, initialSql, opts) {
       ? `${connLabel(connId)}${db ? ' › ' + db : ''}${schema ? ' › ' + schema : ''}${dbUnavailable ? '（数据库不可用）' : ''}`
       : '');
   });
-  if (tab.setBeforeClose) {
-    tab.setBeforeClose(async () => {
-      if (['starting', 'committing', 'rolling-back'].includes(transactionState)) {
-        toast.info('事务状态正在切换，请稍候再关闭标签页');
-        return false;
-      }
-      if (['active', 'failed'].includes(transactionState) && connId) {
-        if (!state.open.has(connId)) {
-          // 关闭连接时主进程会先回滚该适配器上的全部事务。
-          transactionState = 'idle';
-          return true;
-        }
-        const request = activeRequest;
-        if (request) await window.api.db.cancel(request.connId, request.requestId).catch(() => {});
-        transactionState = 'rolling-back';
-        syncTransactionUi();
-        try {
-          await window.api.db.rollbackTransaction(connId, transactionId);
-          transactionState = 'idle';
-        } catch (e) {
-          transactionState = 'failed';
-          syncTransactionUi();
-          toast.error('关闭前回滚事务失败: ' + e.message);
-          return false;
-        }
+  function chooseTransactionEndAction(purpose) {
+    const closing = purpose === '关闭查询';
+    const suffix = closing ? '并关闭' : '后继续';
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (choice) => {
+        done = true;
+        resolve(choice);
+      };
+      openModal({
+        title: '当前查询存在未结束事务',
+        body: el('div', { class: 'confirm-body' },
+          el('div', {}, transactionState === 'failed'
+            ? `事务已经发生错误，必须回滚后才能${purpose}。`
+            : `${purpose}前，请选择提交或回滚当前事务。`)),
+        buttons: [
+          { label: '取消', onClick: () => finish(null) },
+          { label: `回滚${suffix}`, danger: true, onClick: () => finish('rollback') },
+          transactionState === 'active'
+            ? { label: `提交${suffix}`, primary: true, onClick: () => finish('commit') }
+            : null,
+        ].filter(Boolean),
+        onClose: () => { if (!done) resolve(null); },
+      });
+    });
+  }
+
+  async function saveResultEditor(editor) {
+    if (!editor || editor.saving) return false;
+    editor.grid.commitEditor();
+    const edits = editor.grid.getPendingEdits();
+    if (!edits.length) {
+      if (editor.saveButton) editor.saveButton.disabled = true;
+      syncTabDirty();
+      return true;
+    }
+    editor.saving = true;
+    if (editor.saveButton) editor.saveButton.disabled = true;
+    try {
+      const payload = {
+        connId: editor.connId,
+        db: editor.target.db,
+        schema: editor.target.schema,
+        table: editor.target.table,
+        edits,
+        transactionId,
+      };
+      const { authorizeOperation } = await import('./danger.js');
+      const approved = await authorizeOperation('db.applyEdits', payload);
+      if (!approved) return false;
+      const result = await window.api.db.applyEdits(editor.connId, approved);
+      editor.grid.acceptChanges();
+      if (result && result.pendingTransaction) {
+        toast.success(`已应用 ${result.count} 处修改，等待提交当前事务`);
+      } else {
+        toast.success(`已保存 ${result.count} 处数据修改`);
       }
       return true;
+    } catch (e) {
+      toast.error('保存查询结果修改失败：' + e.message, 12000);
+      return false;
+    } finally {
+      editor.saving = false;
+      if (editor.saveButton) editor.saveButton.disabled = !editor.grid.isDirty();
+      await refreshTransactionSupport(true);
+      syncTabDirty();
+    }
+  }
+
+  function chooseResultEditAction(purpose, count) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (choice) => { done = true; resolve(choice); };
+      openModal({
+        title: '查询结果存在未保存修改',
+        body: el('div', { class: 'confirm-body' },
+          el('div', {}, `${purpose}前，${count} 个结果集存在待应用的数据修改。`)),
+        buttons: [
+          { label: '取消', onClick: () => finish(null) },
+          { label: '放弃修改', danger: true, onClick: () => finish('discard') },
+          { label: '应用后继续', primary: true, onClick: () => finish('apply') },
+        ],
+        onClose: () => { if (!done) resolve(null); },
+      });
+    });
+  }
+
+  async function finishResultEditsBefore(purpose) {
+    const dirty = resultEditors.filter((editor) => editor.grid.isDirty());
+    if (!dirty.length) return true;
+    const action = await chooseResultEditAction(purpose, dirty.length);
+    if (!action) return false;
+    if (action === 'discard') return true;
+    for (const editor of dirty) {
+      if (!(await saveResultEditor(editor))) return false;
+    }
+    return true;
+  }
+
+  async function finishTransactionBefore(purpose) {
+    if (['starting', 'committing', 'rolling-back'].includes(transactionState)) {
+      toast.info('事务状态正在切换，请稍候再操作');
+      return false;
+    }
+    if (!['active', 'failed'].includes(transactionState) || !connId) return true;
+    if (!state.open.has(connId)) {
+      transactionState = 'idle';
+      syncTransactionUi();
+      return true;
+    }
+    const action = await chooseTransactionEndAction(purpose);
+    if (!action) return false;
+    const request = activeRequest;
+    if (request) await window.api.db.cancel(request.connId, request.requestId).catch(() => {});
+    transactionState = action === 'commit' ? 'committing' : 'rolling-back';
+    syncTransactionUi();
+    try {
+      if (action === 'commit') await window.api.db.commitTransaction(connId, transactionId);
+      else await window.api.db.rollbackTransaction(connId, transactionId);
+      transactionState = 'idle';
+      syncTransactionUi();
+      return true;
+    } catch (e) {
+      await refreshTransactionSupport(true);
+      toast.error(`${purpose}前${action === 'commit' ? '提交' : '回滚'}事务失败: ${e.message}`);
+      return false;
+    }
+  }
+
+  if (tab.setBeforeClose) {
+    tab.setBeforeClose(async () => {
+      if (!(await finishResultEditsBefore('关闭查询'))) return false;
+      return finishTransactionBefore('关闭查询');
     });
   }
   tab.setOnClose(() => {
@@ -923,7 +1169,6 @@ export function openQueryTab(target, initialSql, opts) {
       savedPath,
       savedText,
       maxRows: Number(maxRowsSel.value),
-      autoCommit: autoCommitInput.checked,
       splitterHeight: Math.round(splitterHeight || 240),
       title: savedQuery ? savedQuery.name : (savedPath ? savedPath.split(/[\\/]/).pop() : initialTitle),
     }));
@@ -951,11 +1196,16 @@ export function openQueryTab(target, initialSql, opts) {
 
   fillConnSel();
   fillDbSel();
+  void fillSchemaSel().then(() => {
+    syncActiveContext();
+    loadHintColumns();
+    syncTransactionUi();
+  });
   syncActiveContext();
   loadHintColumns();
   refreshTransactionSupport();
   syncTransactionUi();
-  addResultPage('信息', el('div', { class: 'msg-list' }, 'Ctrl+R / F5 / Ctrl+Enter：有选区运行选区，否则运行光标所在语句；Ctrl+Shift+R 运行选中；Ctrl+F 查找 / Ctrl+H 替换。关闭自动提交后可显式提交或回滚。'), false);
+  addResultPage('信息', el('div', { class: 'msg-list' }, 'Ctrl+R / F5 / Ctrl+Enter：有选区运行选区，否则运行光标所在语句；Ctrl+Shift+R 运行选中；简单单表查询包含完整主键时可直接编辑结果，Ctrl+S 应用修改。默认自动提交，可点击“开始事务”或直接执行 BEGIN / COMMIT / ROLLBACK。'), false);
   activatePage(0);
   setTimeout(() => cm.focus(), 50);
 

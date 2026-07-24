@@ -6,6 +6,12 @@ const invalidSessions = new WeakSet();
 class MySQLAdapter extends BaseAdapter {
   get dialect() { return 'mysql'; }
 
+  // Keep manual mode active even when MySQL implicitly commits a DDL
+  // statement. COMMIT/ROLLBACK ends the logical query-tab transaction and
+  // restores the pooled session to normal autocommit mode before release.
+  _transactionBeginSqls() { return ['SET AUTOCOMMIT = 0']; }
+  _transactionCleanupSqls() { return ['SET AUTOCOMMIT = 1']; }
+
   async connect() {
     const c = this.cfg;
     this.pool = mysql.createPool({

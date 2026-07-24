@@ -83,7 +83,7 @@ export function openExplainTab(target, sql) {
     body.innerHTML = '';
     body.append(el('div', { style: { padding: '12px', color: 'var(--text-muted)' } }, '解析中…'));
     try {
-      const plan = await window.api.db.explain(target.connId, target.db, sql);
+      const plan = await window.api.db.explain(target.connId, target.db, sql, target.schema);
       body.innerHTML = '';
       if (plan.format === 'tree') body.append(renderTree(plan.root));
       else if (plan.format === 'table') body.append(renderTable(plan));

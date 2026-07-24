@@ -1,7 +1,7 @@
 // 适配器基类：定义统一接口与通用实现（分页查询、脚本执行、应用编辑等）
 const {
   splitSql, sanitizeRows, sanitizeValue, excerpt, limitQueryRows, statementKind,
-  transactionControlKind, unsafeSessionMutationKind,
+  transactionControlKind, unsafeSessionMutationKind, simpleEditableSelect,
 } = require('./sqlutil');
 
 class BaseAdapter {
@@ -324,7 +324,79 @@ class BaseAdapter {
     return splitSql(sql, this.dialect);
   }
 
-  async _runScriptStatements(run, stmts, maxRows, requestId) {
+  _resolveEditableTable(db, schema, parts) {
+    if (!Array.isArray(parts) || !parts.length || parts.length > 3) return null;
+    const dialect = this.dialect;
+    if (dialect === 'mysql') {
+      if (parts.length > 2) return null;
+      return { db: parts.length === 2 ? parts[0] : db, schema: null, table: parts[parts.length - 1] };
+    }
+    if (dialect === 'postgres') {
+      if (parts.length > 2) return null;
+      return { db, schema: parts.length === 2 ? parts[0] : schema, table: parts[parts.length - 1] };
+    }
+    if (dialect === 'mssql') {
+      if (parts.length === 3) return { db: parts[0], schema: parts[1], table: parts[2] };
+      return { db, schema: parts.length === 2 ? parts[0] : schema, table: parts[parts.length - 1] };
+    }
+    if (dialect === 'sqlite') {
+      if (parts.length > 2) return null;
+      return { db, schema: parts.length === 2 ? parts[0] : schema, table: parts[parts.length - 1] };
+    }
+    if (dialect === 'oracle' || dialect === 'oracle12') {
+      if (parts.length > 2) return null;
+      return { db: parts.length === 2 ? parts[0] : db, schema: null, table: parts[parts.length - 1] };
+    }
+    return null;
+  }
+
+  async _queryResultEditability(db, schema, sql, resultColumns) {
+    if (this.dialect === 'clickhouse') return { reason: 'ClickHouse 查询结果暂不支持直接修改' };
+    const parsed = simpleEditableSelect(sql, this.dialect);
+    if (!parsed) return { reason: '仅简单单表查询中的原始字段可编辑，JOIN、聚合、表达式或别名列为只读' };
+    const target = this._resolveEditableTable(db, schema, parsed.parts);
+    if (!target || !target.db || !target.table) return { reason: '无法可靠识别查询对应的表' };
+    try {
+      const info = await this.tableInfo(target.db, target.schema, target.table);
+      const pk = Array.isArray(info && info.pk) ? info.pk.filter(Boolean) : [];
+      if (!pk.length) return { reason: '结果表没有主键，无法可靠定位要修改的记录' };
+      const tableColumns = new Map((info.columns || []).map((column) => [column.name, column]));
+      const names = (resultColumns || []).map((column) => column.name);
+      if (!names.length || new Set(names).size !== names.length || names.some((name) => !tableColumns.has(name))) {
+        return { reason: '结果列与原表字段无法一一对应' };
+      }
+      if (pk.some((name) => !names.includes(name))) {
+        return { reason: '查询结果未包含完整主键，无法可靠定位要修改的记录' };
+      }
+      return {
+        target: { db: target.db, schema: target.schema, table: target.table, pk },
+        columns: resultColumns.map((column) => {
+          const metadata = tableColumns.get(column.name) || {};
+          return {
+            ...column,
+            type: metadata.type || column.type || '',
+            comment: metadata.comment || '',
+          };
+        }),
+      };
+    } catch (error) {
+      return { reason: `读取表结构失败：${this._errMsg(error)}` };
+    }
+  }
+
+  async _decorateQueryResult(db, schema, sql, result) {
+    if (!result || !result.columns) return result;
+    const editability = await this._queryResultEditability(db, schema, sql, result.columns);
+    if (editability.target) {
+      result.editTarget = editability.target;
+      result.columns = editability.columns || result.columns;
+    } else {
+      result.editReadonlyReason = editability.reason || '该查询结果为只读';
+    }
+    return result;
+  }
+
+  async _runScriptStatements(run, stmts, maxRows, requestId, context = {}) {
     const out = [];
     for (const s of stmts) {
       const t0 = Date.now();
@@ -335,7 +407,8 @@ class BaseAdapter {
         this._assertRequestOutcomeKnown(requestId);
         const results = r && r.multi ? r.multi : [r];
         for (const one of results) {
-          out.push(this._normalizeResult(s, one, maxRows, Date.now() - t0));
+          const normalized = this._normalizeResult(s, one, maxRows, Date.now() - t0);
+          out.push(await this._decorateQueryResult(context.db, context.schema, s, normalized));
         }
       } catch (err) {
         out.push({ sql: excerpt(s), ms: Date.now() - t0, error: this._errMsg(err) });
@@ -354,7 +427,7 @@ class BaseAdapter {
     const requestId = this._beginRequest(opts);
     try {
       return await this.withSession(db,
-        (run) => this._runScriptStatements(run, stmts, maxRows, requestId),
+        (run) => this._runScriptStatements(run, stmts, maxRows, requestId, { db, schema: opts && opts.schema }),
         { requestId, schema: opts && opts.schema });
     } finally {
       this._endRequest(requestId);
@@ -367,7 +440,7 @@ class BaseAdapter {
     const implicitCommit = this.dialect === 'mysql' || this.dialect === 'oracle';
     return {
       supported: true,
-      warning: implicitCommit ? '该数据库的 DDL 可能隐式提交；手动提交模式下已禁止执行 DDL' : '',
+      warning: implicitCommit ? '该数据库的部分 DDL 会按数据库原生规则隐式提交' : '',
     };
   }
 
@@ -391,7 +464,9 @@ class BaseAdapter {
     };
   }
 
-  _transactionBeginSqls() { return [this.beginSql()]; }
+  _transactionBeginSqls(sessionOpts = {}) {
+    return [sessionOpts.beginSql || this.beginSql()];
+  }
 
   _transactionEndSqls(action) { return [action === 'commit' ? 'COMMIT' : 'ROLLBACK']; }
 
@@ -432,7 +507,7 @@ class BaseAdapter {
     const task = Promise.resolve().then(() => this.withSession(db, async (run) => {
       runner = run;
       try {
-        for (const sql of this._transactionBeginSqls()) await run(sql);
+        for (const sql of this._transactionBeginSqls(sessionOpts)) await run(sql);
         readySettled = true;
         resolveReady();
         await hold;
@@ -522,36 +597,48 @@ class BaseAdapter {
     return pending;
   }
 
-  _assertQueryPageSql(stmts) {
+  _assertQueryPageSql(stmts, { allowTransactionControl = false, allowSessionMutation = false } = {}) {
     for (const sql of stmts) {
       const control = transactionControlKind(sql, this.dialect);
-      if (control) {
-        throw new Error(`查询页不支持在 SQL 中手写事务边界（${control}）；请使用“自动提交”和“开始 / 提交 / 回滚”按钮`);
+      if (control && !allowTransactionControl) {
+        throw new Error(`事务语句（${control}）必须通过查询标签会话执行`);
       }
       const mutation = unsafeSessionMutationKind(sql, this.dialect);
-      if (mutation) {
+      if (mutation && !allowSessionMutation) {
         throw new Error(`当前驱动不能安全保留或重置该会话状态（${mutation}）；请改为单个完整批次，或使用专用管理功能`);
       }
     }
   }
 
   _assertTransactionSql(stmts) {
-    this._assertQueryPageSql(stmts);
+    // 显式事务始终占用当前查询标签的固定物理会话；保存点、SET 和
+    // 临时对象不会泄漏到其他查询。终态语句由 runQuerySessionScript
+    // 统一处理，按钮与手写 SQL 因而共享同一个状态机。
+    this._assertQueryPageSql(stmts, { allowTransactionControl: true, allowSessionMutation: true });
     for (const sql of stmts) {
       if (this.dialect === 'mysql' && /\/\*(?:!|M!)/i.test(sql)) {
         throw new Error('手动提交模式下禁止执行 MySQL/MariaDB 可执行注释，请展开为普通 SQL 后单独执行');
       }
       const kind = statementKind(sql, this.dialect);
-      const implicitCommitKinds = this.dialect === 'mysql'
-        ? ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'GRANT', 'REVOKE', 'ANALYZE', 'CHECK', 'OPTIMIZE', 'REPAIR', 'CACHE', 'FLUSH', 'LOAD', 'RESET', 'STOP', 'CHANGE', 'LOCK', 'UNLOCK', 'INSTALL', 'UNINSTALL']
-        : ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'GRANT', 'REVOKE', 'COMMENT', 'AUDIT', 'NOAUDIT'];
-      if ((this.dialect === 'mysql' || this.dialect === 'oracle') && implicitCommitKinds.includes(kind)) {
-        throw new Error('该数据库的 DDL 或管理语句会隐式提交，请开启自动提交后单独执行此语句');
+      // 常规 DDL 交给数据库按原生语义处理。复制、锁表、账号等管理
+      // 命令可能结束事务并永久改变会话，仍保持 fail-closed。
+      const unsafeAdminKinds = ['RESET', 'STOP', 'CHANGE', 'LOCK', 'UNLOCK', 'INSTALL', 'UNINSTALL', 'FLUSH', 'CACHE', 'LOAD', 'CHECK', 'OPTIMIZE', 'REPAIR'];
+      if (this.dialect === 'mysql' && unsafeAdminKinds.includes(kind)) {
+        throw new Error('该管理语句可能隐式提交或改变会话状态，请结束当前事务后单独执行');
       }
       if (this.dialect === 'mysql' && kind === 'SET' && /\bPASSWORD\b/i.test(sql)) {
         throw new Error('该数据库的账户管理语句会隐式提交，请开启自动提交后单独执行此语句');
       }
     }
+  }
+
+  _implicitCommitWarning(sql) {
+    if (this.dialect !== 'mysql' && this.dialect !== 'oracle' && this.dialect !== 'oracle12') return '';
+    const kind = statementKind(sql, this.dialect);
+    const implicitKinds = ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'GRANT', 'REVOKE', 'COMMENT', 'AUDIT', 'NOAUDIT'];
+    return implicitKinds.includes(kind)
+      ? '该语句可能按数据库原生规则隐式提交此前更改；当前标签仍保持手动事务会话'
+      : '';
   }
 
   async beginTransaction(transactionId, db, sessionOpts = {}) {
@@ -571,7 +658,10 @@ class BaseAdapter {
       activeRequestIds: new Set(),
     };
     this._transactions.set(id, state);
-    state.opening = this._openExplicitTransaction(db, { schema: state.schema || null });
+    state.opening = this._openExplicitTransaction(db, {
+      schema: state.schema || null,
+      beginSql: sessionOpts.beginSql || null,
+    });
     try {
       state.session = await state.opening;
       state.status = 'active';
@@ -587,26 +677,41 @@ class BaseAdapter {
     const state = this._transactions.get(id);
     if (!state) throw new Error('事务不存在或已结束，请重新开始事务');
     if (state.status === 'starting') state.session = await state.opening;
-    if (state.status === 'failed') throw new Error('事务已发生错误，请先回滚');
-    if (state.status !== 'active') throw new Error('事务当前不可执行查询');
+    const stmts = this._scriptStatements(sql);
+    const rollbackToSavepoint = stmts.length === 1
+      && transactionControlKind(stmts[0], this.dialect) === 'ROLLBACK TO';
+    if (state.status === 'failed' && !rollbackToSavepoint) throw new Error('事务已发生错误，请先回滚');
+    if (state.status !== 'active' && !(state.status === 'failed' && rollbackToSavepoint)) {
+      throw new Error('事务当前不可执行查询');
+    }
     const selectedDb = db === undefined || db === null ? '' : String(db);
     if (selectedDb !== state.db) throw new Error('活动事务期间不能切换数据库');
     const selectedSchema = opts && opts.schema !== undefined && opts.schema !== null ? String(opts.schema) : '';
     if (selectedSchema !== state.schema) throw new Error('活动事务期间不能切换模式（Schema）');
-    const stmts = this._scriptStatements(sql);
     if (!stmts.length) return [];
     this._assertTransactionSql(stmts);
     return this._enqueueTransaction(state, async () => {
-      if (state.status !== 'active') throw new Error(state.status === 'failed'
-        ? '事务已发生错误，请先回滚' : '事务状态已改变，无法继续执行查询');
+      if (state.status !== 'active' && !(state.status === 'failed' && rollbackToSavepoint)) {
+        throw new Error(state.status === 'failed'
+          ? '事务已发生错误，请先回滚' : '事务状态已改变，无法继续执行查询');
+      }
       const maxRows = this._scriptMaxRows(opts);
       const requestId = this._beginRequest(opts);
       if (requestId) state.activeRequestIds.add(requestId);
       const handle = state.session.requestHandle;
       if (handle) this._trackRequestHandle(handle, requestId);
       try {
-        const results = await this._runScriptStatements(state.session.run, stmts, maxRows, requestId);
-        if (results.some((item) => item.error)) state.status = 'failed';
+        const results = await this._runScriptStatements(
+          state.session.run, stmts, maxRows, requestId, { db: state.db, schema: state.schema },
+        );
+        const implicitCommitWarning = stmts.map((stmt) => this._implicitCommitWarning(stmt)).find(Boolean);
+        if (implicitCommitWarning) {
+          for (const result of results) {
+            if (!result.error) result.warning = implicitCommitWarning;
+          }
+        }
+        if (results.some((item) => item.error) && this.transactionFailureAborts) state.status = 'failed';
+        else if (rollbackToSavepoint && !results.some((item) => item.error)) state.status = 'active';
         return results;
       } finally {
         if (handle) this._untrackRequestHandle(handle, requestId);
@@ -614,6 +719,142 @@ class BaseAdapter {
         this._endRequest(requestId);
       }
     });
+  }
+
+  /** PostgreSQL 在任意语句错误后必须回滚；SQLite 保持原有的保守处理。 */
+  get transactionFailureAborts() {
+    return this.dialect === 'postgres' || this.dialect === 'sqlite';
+  }
+
+  _queryTransactionAction(sql) {
+    const control = transactionControlKind(sql, this.dialect);
+    if (!control) return null;
+    if (this.dialect === 'mssql') {
+      const text = String(sql || '').trim();
+      if (control === 'BEGIN TRANSACTION'
+          && !/^BEGIN\s+(?:DISTRIBUTED\s+)?TRAN(?:SACTION)?(?:\s+[\[\]A-Za-z0-9_#$@]+)?\s*$/i.test(text)) {
+        return 'ambiguous-batch';
+      }
+      if (control === 'COMMIT'
+          && !/^COMMIT(?:\s+TRAN(?:SACTION)?)?(?:\s+[\[\]A-Za-z0-9_#$@]+)?\s*$/i.test(text)) {
+        return 'ambiguous-batch';
+      }
+      if (control === 'ROLLBACK'
+          && !/^ROLLBACK(?:\s+TRAN(?:SACTION)?)?\s*$/i.test(text)) {
+        return 'ambiguous-batch';
+      }
+    }
+    if (control === 'PREPARE') return 'unsupported';
+    if (['BEGIN', 'START', 'BEGIN TRANSACTION'].includes(control)) return 'begin';
+    if (control === 'SET TRANSACTION' && (this.dialect === 'oracle' || this.dialect === 'oracle12')) return 'begin';
+    if (control === 'COMMIT' || control === 'END') return 'commit';
+    if (control === 'ROLLBACK') return 'rollback';
+    if (this.dialect === 'mysql' && control === 'SET') {
+      if (/\bAUTOCOMMIT\s*(?:=|TO)?\s*(?:0|OFF)\b/i.test(sql)) return 'begin';
+      if (/\bAUTOCOMMIT\s*(?:=|TO)?\s*(?:1|ON)\b/i.test(sql)) return 'commit';
+    }
+    return 'session-control';
+  }
+
+  _transactionControlResult(sql, message, ms, warning) {
+    return {
+      sql: excerpt(sql),
+      ms: Number(ms) || 0,
+      affected: 0,
+      message,
+      ...(warning ? { warning } : {}),
+    };
+  }
+
+  async _runStandaloneQueryControl(db, sql, opts) {
+    const maxRows = this._scriptMaxRows(opts);
+    const requestId = this._beginRequest(opts);
+    try {
+      return await this.withSession(db,
+        (run) => this._runScriptStatements(run, [sql], maxRows, requestId, { db, schema: opts && opts.schema }),
+        { requestId, schema: opts && opts.schema });
+    } finally {
+      this._endRequest(requestId);
+    }
+  }
+
+  /**
+   * 查询标签统一入口。无事务时普通 SQL 仍自动提交；遇到 BEGIN 后固定
+   * 当前物理会话，直到 COMMIT/ROLLBACK。按钮与手写边界共用 transactionId。
+   */
+  async runQuerySessionScript(transactionId, db, sql, opts = {}) {
+    const id = this._normalizeTransactionId(transactionId);
+    // Query editor statement boundaries are dialect-aware (SQL Server GO,
+    // Oracle slash blocks, MySQL routine bodies). Adapter-specific runScript
+    // overrides may intentionally keep a whole driver batch together, which
+    // is too coarse for synchronizing explicit transaction boundaries.
+    const stmts = splitSql(sql, this.dialect);
+    if (!stmts.length) return [];
+    const actions = stmts.map((stmt) => this._queryTransactionAction(stmt));
+    const hasBoundary = actions.some(Boolean);
+    if (!hasBoundary) {
+      return this._transactions.has(id)
+        ? this.runTransactionScript(id, db, sql, opts)
+        : this.runScript(db, sql, opts);
+    }
+
+    const support = this.transactionSupport || { supported: false };
+    if (!support.supported) {
+      throw new Error(support.warning || '当前数据库不支持显式事务');
+    }
+
+    const out = [];
+    for (let i = 0; i < stmts.length; i++) {
+      const stmt = stmts[i];
+      const action = actions[i];
+      const startedAt = Date.now();
+      try {
+        if (action === 'ambiguous-batch') {
+          throw new Error('SQL Server 事务边界必须使用分号或 GO 与其他语句分开；命名回滚暂不托管，请使用普通 ROLLBACK 结束事务');
+        }
+        if (action === 'unsupported') {
+          throw new Error('查询页暂不托管 PREPARE TRANSACTION，请使用数据库专用管理工具处理两阶段事务');
+        }
+        if (action === 'begin') {
+          if (this._transactions.has(id)) throw new Error('当前查询标签已经处于事务中');
+          await this.beginTransaction(id, db, { schema: opts.schema, beginSql: stmt });
+          out.push(this._transactionControlResult(stmt, '事务已开始', Date.now() - startedAt));
+          continue;
+        }
+        if (action === 'commit') {
+          if (!this._transactions.has(id)) {
+            out.push(...await this._runStandaloneQueryControl(db, stmt, opts));
+          } else {
+            const result = await this.commitTransaction(id);
+            out.push(this._transactionControlResult(
+              stmt, '事务已提交', Date.now() - startedAt, result && result.warning,
+            ));
+          }
+          continue;
+        }
+        if (action === 'rollback') {
+          if (!this._transactions.has(id)) {
+            out.push(...await this._runStandaloneQueryControl(db, stmt, opts));
+          } else {
+            const result = await this.rollbackTransaction(id);
+            out.push(this._transactionControlResult(
+              stmt, '事务已回滚', Date.now() - startedAt, result && result.warning,
+            ));
+          }
+          continue;
+        }
+
+        const results = this._transactions.has(id)
+          ? await this.runTransactionScript(id, db, stmt, opts)
+          : await this.runScript(db, stmt, opts);
+        out.push(...results);
+        if (results.some((item) => item.error)) break;
+      } catch (error) {
+        out.push({ sql: excerpt(stmt), ms: Date.now() - startedAt, error: this._errMsg(error) });
+        break;
+      }
+    }
+    return out;
   }
 
   async commitTransaction(transactionId) {
@@ -759,10 +1000,17 @@ class BaseAdapter {
       cols = cols.slice(0, idIdx);
       rows = rows.map((row) => row.slice(0, idIdx));
     }
-    const typeByName = {};
-    for (const c of info.columns) typeByName[c.name] = c.type;
+    const metadataByName = {};
+    for (const c of info.columns) metadataByName[c.name] = c;
     return {
-      columns: cols.map((c) => ({ name: c.name, type: typeByName[c.name] || c.type || '' })),
+      columns: cols.map((c) => {
+        const metadata = metadataByName[c.name] || {};
+        return {
+          name: c.name,
+          type: metadata.type || c.type || '',
+          comment: metadata.comment || '',
+        };
+      }),
       rows: sanitizeRows(rows),
       total,
       pk,
@@ -808,7 +1056,23 @@ class BaseAdapter {
     const sqls = this.buildEditSql(db, schema, table, edits);
     if (!sqls.length) return { count: 0, sqls: [] };
     await this.execTxn(db, sqls);
-    return { count: sqls.length, sqls };
+    return { count: sqls.length, sqls, pendingTransaction: false };
+  }
+
+  /**
+   * 查询结果编辑：自动提交状态下使用独立原子事务；查询标签已有显式事务时，
+   * 在同一固定会话内应用但不替用户提交，由事务工具栏继续控制最终 COMMIT/ROLLBACK。
+   */
+  async applyQueryEdits(transactionId, db, payload) {
+    const id = this._normalizeTransactionId(transactionId);
+    const sqls = this.buildEditSql(db, payload.schema, payload.table, payload.edits || []);
+    if (!sqls.length) return { count: 0, sqls: [], pendingTransaction: this._transactions.has(id) };
+    if (!this._transactions.has(id)) return this.applyEdits(db, payload);
+    const state = this._transactions.get(id);
+    const results = await this.runTransactionScript(id, db, sqls.join(';\n'), { schema: state.schema });
+    const failed = results.find((result) => result.error);
+    if (failed) throw new Error(failed.error);
+    return { count: sqls.length, sqls, pendingTransaction: true };
   }
 
   /** 顺序执行一组 DDL（无事务包装，出错即停并报告进度） */

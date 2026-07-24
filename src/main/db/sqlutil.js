@@ -247,7 +247,14 @@ function mssqlControlFlowBatch(batch) {
   const tokens = structuralTokens(batch, 'mssql').filter((token) => token.depth === 0 && token.value !== ';');
   if (!tokens.length) return false;
   const controls = new Set(['BEGIN', 'IF', 'WHILE']);
-  if (controls.has(tokens[0].value)) return true;
+  if (controls.has(tokens[0].value)) {
+    // BEGIN TRANSACTION is a client-visible transaction boundary rather than
+    // a T-SQL BEGIN...END block. Keep its semicolon-delimited statements
+    // separate so the query-session state machine can synchronize the UI.
+    if (tokens[0].value === 'BEGIN'
+        && ['TRAN', 'TRANSACTION', 'DISTRIBUTED'].includes(tokens[1] && tokens[1].value)) return false;
+    return true;
+  }
   // Variable setup commonly precedes IF/WHILE in the same executable batch.
   return ['DECLARE', 'SET'].includes(tokens[0].value)
     && tokens.some((token) => controls.has(token.value));
@@ -612,6 +619,157 @@ function statementKind(sql, dialect) {
   return main ? main.value : 'WITH';
 }
 
+function unquoteSimpleIdentifier(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  if (text[0] === '"' && text[text.length - 1] === '"') return text.slice(1, -1).replace(/""/g, '"');
+  if (text[0] === '`' && text[text.length - 1] === '`') return text.slice(1, -1).replace(/``/g, '`');
+  if (text[0] === '[' && text[text.length - 1] === ']') return text.slice(1, -1).replace(/]]/g, ']');
+  return /^[\p{L}\p{N}_$#]+$/u.test(text) ? text : null;
+}
+
+function readSimpleIdentifier(text, start) {
+  let i = start;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  const begin = i;
+  const quote = text[i];
+  if (quote === '"' || quote === '`' || quote === '[') {
+    const close = quote === '[' ? ']' : quote;
+    i++;
+    while (i < text.length) {
+      if (text[i] === close) {
+        if (text[i + 1] === close) { i += 2; continue; }
+        i++;
+        const value = unquoteSimpleIdentifier(text.slice(begin, i));
+        return value === null ? null : { value, end: i };
+      }
+      i++;
+    }
+    return null;
+  }
+  while (i < text.length && /[\p{L}\p{N}_$#]/u.test(text[i])) i++;
+  if (i === begin) return null;
+  return { value: text.slice(begin, i), end: i };
+}
+
+function parseSimpleTableReference(text) {
+  let at = 0;
+  const parts = [];
+  while (true) {
+    const ident = readSimpleIdentifier(text, at);
+    if (!ident) return null;
+    parts.push(ident.value);
+    at = ident.end;
+    while (at < text.length && /\s/.test(text[at])) at++;
+    if (text[at] !== '.') break;
+    at++;
+    if (parts.length >= 3) return null;
+  }
+  while (at < text.length && /\s/.test(text[at])) at++;
+  let alias = null;
+  if (/^AS(?:\s|$)/i.test(text.slice(at))) {
+    at += 2;
+    const parsedAlias = readSimpleIdentifier(text, at);
+    if (!parsedAlias) return null;
+    alias = parsedAlias.value;
+    at = parsedAlias.end;
+  } else if (at < text.length) {
+    const parsedAlias = readSimpleIdentifier(text, at);
+    if (!parsedAlias) return null;
+    alias = parsedAlias.value;
+    at = parsedAlias.end;
+  }
+  while (at < text.length && /\s/.test(text[at])) at++;
+  return at === text.length ? { parts, alias } : null;
+}
+
+function parseSimpleIdentifierPath(text) {
+  let at = 0;
+  const parts = [];
+  while (true) {
+    const ident = readSimpleIdentifier(text, at);
+    if (!ident) return null;
+    parts.push(ident.value);
+    at = ident.end;
+    while (at < text.length && /\s/.test(text[at])) at++;
+    if (text[at] !== '.') break;
+    at++;
+    if (parts.length >= 3) return null;
+  }
+  while (at < text.length && /\s/.test(text[at])) at++;
+  return at === text.length ? parts : null;
+}
+
+function simpleProjectionColumns(text, dialect, owner) {
+  const projection = String(text || '').trim();
+  const allMatch = /^(?:(.+)\s*\.\s*)?\*$/.exec(projection);
+  if (allMatch) {
+    const projectionOwner = allMatch[1] ? unquoteSimpleIdentifier(allMatch[1]) : null;
+    if (allMatch[1] && !projectionOwner) return null;
+    if (projectionOwner && projectionOwner.toLocaleLowerCase() !== owner.toLocaleLowerCase()) return null;
+    return { all: true, columns: [] };
+  }
+  const tokens = structuralTokens(projection, dialect);
+  if (!tokens.complete) return null;
+  const commas = tokens.filter((token) => token.depth === 0 && token.value === ',');
+  const ranges = [];
+  let start = 0;
+  for (const comma of commas) {
+    ranges.push(projection.slice(start, comma.start));
+    start = comma.end;
+  }
+  ranges.push(projection.slice(start));
+  const columns = [];
+  for (const range of ranges) {
+    const parts = parseSimpleIdentifierPath(range.trim());
+    if (!parts || !parts.length || parts.length > 2) return null;
+    if (parts.length === 2 && parts[0].toLocaleLowerCase() !== owner.toLocaleLowerCase()) return null;
+    columns.push(parts[parts.length - 1]);
+  }
+  return columns.length ? { all: false, columns } : null;
+}
+
+/**
+ * 识别可安全回写的最小查询形态。只接受 SELECT * 或直接字段列表 FROM 单表；
+ * 表达式/别名列、JOIN、CTE、聚合和集合操作全部 fail closed。
+ */
+function simpleEditableSelect(sql, dialect) {
+  const text = String(sql || '');
+  const tokens = structuralTokens(text, dialect);
+  if (!tokens.complete) return null;
+  const top = tokens.filter((token) => token.depth === 0 && token.value !== ';');
+  if (!top.length || top[0].value !== 'SELECT') return null;
+  const fromAt = top.findIndex((token, index) => index > 0 && token.value === 'FROM');
+  if (fromAt < 2 || top.findIndex((token, index) => index > fromAt && token.value === 'FROM') >= 0) return null;
+
+  const projection = text.slice(top[0].end, top[fromAt].start).trim();
+
+  const clauseWords = new Set([
+    'WHERE', 'ORDER', 'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'FETCH', 'FOR',
+    'UNION', 'INTERSECT', 'EXCEPT', 'WINDOW', 'QUALIFY', 'SETTINGS', 'FORMAT',
+    'PREWHERE', 'SAMPLE', 'FINAL',
+  ]);
+  let refEnd = text.length;
+  for (let i = fromAt + 1; i < top.length; i++) {
+    if (clauseWords.has(top[i].value)) { refEnd = top[i].start; break; }
+  }
+  const referenceText = text.slice(top[fromAt].end, refEnd).trim().replace(/;\s*$/, '').trim();
+  const reference = parseSimpleTableReference(referenceText);
+  if (!reference) return null;
+  const owner = reference.alias || reference.parts[reference.parts.length - 1];
+  const selected = simpleProjectionColumns(projection, dialect, owner);
+  if (!selected) return null;
+
+  const forbidden = new Set(['JOIN', 'UNION', 'INTERSECT', 'EXCEPT', 'GROUP', 'HAVING', 'WINDOW', 'INTO']);
+  if (top.some((token) => forbidden.has(token.value))) return null;
+  return {
+    parts: reference.parts,
+    alias: reference.alias,
+    allColumns: selected.all,
+    columns: selected.columns,
+  };
+}
+
 function topLevelStatementTokens(sql, dialect) {
   const tokens = structuralTokens(String(sql || ''), dialect);
   if (!tokens.complete) return [];
@@ -694,6 +852,7 @@ function transactionControlKind(sql, dialect) {
     if (first === 'START' && second !== 'TRANSACTION') return null;
     if (first === 'RELEASE' && second !== 'SAVEPOINT') return null;
     if (first === 'SET' && !top.some((token) => token.value === 'AUTOCOMMIT')) return null;
+    if (first === 'ROLLBACK' && second === 'TO') return 'ROLLBACK TO';
     return ['BEGIN', 'START', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'RELEASE', 'SET'].includes(first) ? first : null;
   }
   if (dialect === 'postgres') {
@@ -701,10 +860,15 @@ function transactionControlKind(sql, dialect) {
     if (first === 'RELEASE' && second !== 'SAVEPOINT') return null;
     if (first === 'PREPARE' && second !== 'TRANSACTION') return null;
     if (first === 'SET' && second !== 'TRANSACTION' && second !== 'CONSTRAINTS') return null;
+    if (first === 'ROLLBACK' && second === 'TO') return 'ROLLBACK TO';
     return ['BEGIN', 'START', 'COMMIT', 'END', 'ROLLBACK', 'SAVEPOINT', 'RELEASE', 'PREPARE', 'SET'].includes(first) ? first : null;
   }
   if (dialect === 'sqlite') {
+    if (first === 'ROLLBACK' && second === 'TO') return 'ROLLBACK TO';
     return ['BEGIN', 'COMMIT', 'END', 'ROLLBACK', 'SAVEPOINT', 'RELEASE'].includes(first) ? first : null;
+  }
+  if (dialect === 'clickhouse') {
+    return ['BEGIN', 'START', 'COMMIT', 'ROLLBACK'].includes(first) ? first : null;
   }
   return null;
 }
@@ -953,5 +1117,5 @@ function limitQueryRows(sql, dialect, maxRows) {
 module.exports = {
   splitSql, splitSqlRanges, statementAt, sanitizeValue, sanitizeRows, formatDate, excerpt, csvCell, synthesizeDDL,
   limitQueryRows, statementKind, transactionControlKind, unsafeSessionMutationKind,
-  hasClickHouseFormatClause, hasSQLiteExternalFileClause,
+  hasClickHouseFormatClause, hasSQLiteExternalFileClause, simpleEditableSelect,
 };

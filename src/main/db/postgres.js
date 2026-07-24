@@ -98,10 +98,10 @@ class PostgresAdapter extends BaseAdapter {
         ]);
         if (!found.rows || !found.rows.length) throw new Error(`PostgreSQL 模式不存在或不可访问：${selectedSchema}`);
         await Promise.race([
-          // Keep pg_catalog first so an untrusted application schema cannot
-          // shadow built-in functions or operators; ordinary tables still
-          // resolve from the selected schema next.
-          client.query(`SET search_path TO pg_catalog, ${this.quoteIdent(selectedSchema)}`), sessionLost,
+          // Do not list pg_catalog explicitly: PostgreSQL already searches it
+          // implicitly before user schemas. Keeping only the selected schema
+          // here makes it the current/default schema for unqualified DDL.
+          client.query(`SET search_path TO ${this.quoteIdent(selectedSchema)}`), sessionLost,
         ]);
       }
       result = await Promise.race([Promise.resolve().then(() => fn(run)), sessionLost]);
@@ -379,9 +379,13 @@ class PostgresAdapter extends BaseAdapter {
     return [...map.values()];
   }
 
-  async explainPlan(db, sql) {
-    const res = await this._getPool(db).query('EXPLAIN (FORMAT JSON, VERBOSE FALSE, COSTS TRUE) ' + sql);
-    let plan = res.rows[0] && Object.values(res.rows[0])[0];
+  async explainPlan(db, sql, opts) {
+    const res = await this.withSession(
+      db,
+      (run) => run('EXPLAIN (FORMAT JSON, VERBOSE FALSE, COSTS TRUE) ' + sql),
+      { schema: opts && opts.schema },
+    );
+    let plan = res.rows && res.rows[0] && res.rows[0][0];
     if (typeof plan === 'string') plan = JSON.parse(plan);
     const arr = Array.isArray(plan) ? plan : [plan];
     const conv = (p) => {

@@ -437,7 +437,9 @@ function register(getWin) {
       };
       let results;
       if (a.transactionId) {
-        results = await adapter.runTransactionScript(rendererTransactionId(event, a.transactionId), a.db, a.sql, runOptions);
+        results = await adapter.runQuerySessionScript(
+          rendererTransactionId(event, a.transactionId), a.db, a.sql, runOptions,
+        );
       } else {
         results = await adapter.runScript(a.db, a.sql, runOptions);
       }
@@ -541,7 +543,7 @@ function register(getWin) {
   h('db:erModel', (a) => dbm.get(a.connId).erModel(a.db, a.schema, a.opts || {}));
   h('db:explain', (a) => {
     safety.assertReadOnlyQuery(a.sql);
-    return dbm.get(a.connId).explainPlan(a.db, a.sql);
+    return dbm.get(a.connId).explainPlan(a.db, a.sql, { schema: a.schema });
   });
   h('db:cellBlob', async (a) => {
     const buf = await dbm.get(a.connId).cellBlob(a.db, a);
@@ -669,7 +671,12 @@ function register(getWin) {
     const { statementAt } = require('./db/sqlutil');
     return statementAt(a && a.sql, a && a.dialect, a && a.cursor);
   });
-  h('db:applyEdits', (a) => dbm.get(a.connId).applyEdits(a.db, a), 'db.applyEdits');
+  h('db:applyEdits', async (event, a) => {
+    const adapter = dbm.get(a.connId);
+    if (!a.transactionId) return adapter.applyEdits(a.db, a);
+    await transactionOwnerReady(event);
+    return adapter.applyQueryEdits(rendererTransactionId(event, a.transactionId), a.db, a);
+  }, 'db.applyEdits', true);
   h('db:action', (a) => dbm.get(a.connId).action(a.db, a), 'db.action');
 
   // ---- 表设计器 ----

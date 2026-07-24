@@ -48,7 +48,7 @@ contextBridge.exposeInMainWorld('api', {
     aiContext: (connId, opts) => inv('db:aiContext', { connId, ...(opts || {}) }),
     foreignKeys: (connId, t) => inv('db:foreignKeys', { connId, ...t }),
     erModel: (connId, db, schema, opts) => inv('db:erModel', { connId, db, schema, opts }),
-    explain: (connId, db, sql) => inv('db:explain', { connId, db, sql }),
+    explain: (connId, db, sql, schema) => inv('db:explain', { connId, db, sql, schema }),
     cellBlob: (connId, t) => inv('db:cellBlob', { connId, ...t }),
     search: (connId, t) => inv('db:search', { connId, ...t }),
     onSearchProgress: (cb) => {

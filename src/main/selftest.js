@@ -4,7 +4,7 @@ const path = require('path');
 const os = require('os');
 const {
   splitSql, statementAt, sanitizeValue, limitQueryRows, statementKind, hasClickHouseFormatClause,
-  hasSQLiteExternalFileClause, transactionControlKind, unsafeSessionMutationKind,
+  hasSQLiteExternalFileClause, transactionControlKind, unsafeSessionMutationKind, simpleEditableSelect,
 } = require('./db/sqlutil');
 const { SQLiteAdapter } = require('./db/sqlite');
 const { MySQLAdapter } = require('./db/mysql');
@@ -175,6 +175,13 @@ async function runSelfTest() {
     && !transactionControlKind('CREATE PROCEDURE p AS BEGIN TRAN; ROLLBACK; RETURN;', 'mssql')
     && !transactionControlKind('BEGIN NULL; END;', 'oracle')
     && transactionControlKind('BEGIN', 'mysql') === 'BEGIN');
+  check('保存点回滚不会被误判为结束整个事务',
+    transactionControlKind('ROLLBACK TO SAVEPOINT before_update', 'postgres') === 'ROLLBACK TO'
+    && transactionControlKind('ROLLBACK TO before_update', 'sqlite') === 'ROLLBACK TO'
+    && transactionControlKind('ROLLBACK TO SAVEPOINT before_update', 'mysql') === 'ROLLBACK TO');
+  check('SQL Server 分号事务脚本可按边界逐句同步状态',
+    splitSql('BEGIN TRAN; UPDATE t SET x = 1; COMMIT;', 'mssql').length === 3,
+    splitSql('BEGIN TRAN; UPDATE t SET x = 1; COMMIT;', 'mssql'));
   check('MSSQL/SQLite 会话污染语句识别', unsafeSessionMutationKind('SET NOCOUNT ON', 'mssql') === 'SET NOCOUNT'
     && unsafeSessionMutationKind('SELECT 1; SET NOCOUNT ON', 'mssql') === 'SET NOCOUNT'
     && unsafeSessionMutationKind('DECLARE @x int; SET XACT_ABORT ON', 'mssql') === 'SET XACT_ABORT'
@@ -253,6 +260,17 @@ async function runSelfTest() {
   check('statementKind 跳过注释', statementKind('/* head */\nSELECT 1', 'clickhouse') === 'SELECT');
   check('statementKind 识别 CTE 主查询', statementKind('WITH x AS (SELECT 1) SELECT * FROM x', 'clickhouse') === 'SELECT');
   check('statementKind 识别 WITH INSERT', statementKind('WITH 1 AS x INSERT INTO t SELECT x', 'clickhouse') === 'INSERT');
+  check('可编辑查询识别简单单表 SELECT *',
+    simpleEditableSelect('SELECT * FROM users WHERE id = 1 ORDER BY id', 'sqlite').parts[0] === 'users');
+  check('可编辑查询识别限定表和别名',
+    simpleEditableSelect('SELECT u.* FROM "tenant"."users" AS u WHERE u.id = 1', 'postgres').alias === 'u');
+  check('可编辑查询识别直接字段列表',
+    simpleEditableSelect('SELECT u.id, u.name FROM users u WHERE u.id = 1', 'postgres').columns.join(',') === 'id,name');
+  check('可编辑查询拒绝 JOIN',
+    simpleEditableSelect('SELECT * FROM users u JOIN roles r ON r.id = u.role_id', 'postgres') === null);
+  check('可编辑查询拒绝表达式和别名列',
+    simpleEditableSelect('SELECT COUNT(*) FROM users', 'postgres') === null
+      && simpleEditableSelect('SELECT id AS user_id FROM users', 'postgres') === null);
   check('clickhouse 识别末尾 FORMAT 子句', hasClickHouseFormatClause('SELECT 1 FORMAT JSONEachRow'));
   check('clickhouse 不把 format 列误判为子句', !hasClickHouseFormatClause('SELECT format FROM t'));
   check('sqlite 识别外部文件 SQL', hasSQLiteExternalFileClause("ATTACH DATABASE 'other.db' AS other")
@@ -280,6 +298,13 @@ async function runSelfTest() {
   check('mysql literal', my.literal("a'b\\c") === "'a''b\\\\c'");
   check('mysql 连接归池前启用 COM_RESET_CONNECTION', /resetOnRelease:\s*true/.test(
     fs.readFileSync(path.join(__dirname, 'db', 'mysql.js'), 'utf8')));
+  check('mysql 查询事务使用 AUTOCOMMIT=0 并在归池前恢复',
+    my._transactionBeginSqls()[0] === 'SET AUTOCOMMIT = 0'
+    && my._transactionCleanupSqls('commit')[0] === 'SET AUTOCOMMIT = 1');
+  let mysqlDdlAllowedInTransaction = true;
+  try { my._assertTransactionSql(['ALTER TABLE t ADD COLUMN x INT']); }
+  catch (e) { mysqlDdlAllowedInTransaction = false; }
+  check('mysql 显式事务按原生规则允许 DDL', mysqlDdlAllowedInTransaction);
   let mysqlImplicitCommitDenied = false;
   try { my._assertTransactionSql(['LOCK TABLES t WRITE']); } catch (e) { mysqlImplicitCommitDenied = /隐式提交/.test(e.message); }
   check('mysql 手动事务拒绝隐式提交管理语句', mysqlImplicitCommitDenied);
@@ -299,18 +324,21 @@ async function runSelfTest() {
   check('mysql 手动事务拒绝可执行注释和隐式提交管理语句', mysqlUnsafeTransactionSql.every((sql) => {
     try { my._assertTransactionSql([sql]); return false; } catch (e) { return /可执行注释|隐式提交/.test(e.message); }
   }), mysqlUnsafeTransactionSql);
-  let autoTransactionBoundaryDenied = false;
+  let unboundTransactionBoundaryDenied = false;
   try { my._assertQueryPageSql(['BEGIN']); }
-  catch (e) { autoTransactionBoundaryDenied = /手写事务边界|开始 \/ 提交 \/ 回滚/.test(e.message); }
-  check('自动提交模式同样拒绝手写事务边界', autoTransactionBoundaryDenied);
+  catch (e) { unboundTransactionBoundaryDenied = /必须通过查询标签会话/.test(e.message); }
+  check('未绑定查询标签的底层入口仍拒绝事务边界', unboundTransactionBoundaryDenied);
   const { MSSQLAdapter: MSSQLGuardAdapter } = require('./db/mssql');
   const mssqlGuard = new MSSQLGuardAdapter({});
   let mssqlBlockAllowed = true;
   try { mssqlGuard._assertTransactionSql(['BEGIN\n SELECT 1;\nEND']); } catch (e) { mssqlBlockAllowed = false; }
-  let mssqlBeginTransactionDenied = false;
+  let mssqlBeginTransactionAllowed = true;
   try { mssqlGuard._assertTransactionSql(['BEGIN TRANSACTION']); }
-  catch (e) { mssqlBeginTransactionDenied = /手写事务边界/.test(e.message); }
-  check('MSSQL 手动事务允许 BEGIN 控制块但拒绝 BEGIN TRAN', mssqlBlockAllowed && mssqlBeginTransactionDenied);
+  catch (e) { mssqlBeginTransactionAllowed = false; }
+  check('MSSQL 固定事务会话允许 BEGIN 控制块和事务控制语句',
+    mssqlBlockAllowed && mssqlBeginTransactionAllowed);
+  check('MSSQL 未分隔事务批次不会被误当成单独 BEGIN',
+    mssqlGuard._queryTransactionAction('BEGIN TRAN\nUPDATE t SET x = 1') === 'ambiguous-batch');
   const mysqlAdvancedColumnMeta = new MySQLAdapter({});
   mysqlAdvancedColumnMeta._q = async (sql) => {
     if (/SHOW FULL COLUMNS/i.test(sql)) return [{
@@ -549,10 +577,33 @@ async function runSelfTest() {
   pgSchemaClient.release = () => {};
   pgSchemaAdapter._getPool = () => ({ connect: async () => pgSchemaClient });
   await pgSchemaAdapter.withSession('db1', async () => true, { schema: 'tenant "one' });
-  check('PG 查询执行会话应用并转义选中的 search_path', pgSchemaQueries.some((item) =>
-    item.text === 'SET search_path TO pg_catalog, "tenant ""one"')
+  check('PG 查询执行会话应用并转义选中的 search_path',
+    pgSchemaQueries.some((item) => item.text === 'SET search_path TO "tenant ""one"')
     && pgSchemaQueries.some((item) => item.text.includes('FROM pg_namespace')
       && item.params && item.params[0] === 'tenant "one'), pgSchemaQueries);
+  const pgExplainAdapter = new PostgresAdapter({});
+  const pgExplainClient = new EventEmitter();
+  const pgExplainQueries = [];
+  pgExplainClient.query = async (sql, params) => {
+    const text = typeof sql === 'string' ? sql : sql.text;
+    pgExplainQueries.push({ text, params });
+    if (text.includes('FROM pg_namespace')) return { rows: [{ ok: 1 }] };
+    if (text.startsWith('EXPLAIN ')) {
+      return {
+        fields: [{ name: 'QUERY PLAN' }],
+        rows: [[[{ Plan: { 'Node Type': 'Seq Scan', 'Relation Name': 'orders', 'Plan Rows': 2, 'Total Cost': 3 } }]]],
+        rowCount: 1,
+        command: 'EXPLAIN',
+      };
+    }
+    return { rows: [], fields: [], rowCount: 0, command: 'OK' };
+  };
+  pgExplainClient.release = () => {};
+  pgExplainAdapter._getPool = () => ({ connect: async () => pgExplainClient });
+  const pgExplain = await pgExplainAdapter.explainPlan('db1', 'SELECT * FROM orders', { schema: 'tenant' });
+  check('PG 执行计划沿用查询页选中的模式', pgExplain.format === 'tree'
+    && pgExplain.root && pgExplain.root.title === 'Seq Scan'
+    && pgExplainQueries.some((item) => item.text === 'SET search_path TO "tenant"'), { pgExplain, pgExplainQueries });
   const pgCleanupAdapter = new PostgresAdapter({});
   const pgCleanupClient = new EventEmitter();
   let pgCleanupReleasedWith = null;
@@ -1243,12 +1294,43 @@ async function runSelfTest() {
   const capped = await ad.runScript('main', 'SELECT * FROM users ORDER BY id', { maxRows: 1 });
   check('runScript 数据库侧限额', capped[0].rows.length === 1 && capped[0].truncated === true
     && capped[0].rowCount === 1 && capped[0].rowCountExact === false, capped[0]);
+  check('单表 SELECT * 结果携带可编辑目标',
+    capped[0].editTarget && capped[0].editTarget.table === 'users'
+      && capped[0].editTarget.pk[0] === 'id', capped[0].editTarget);
+  const directColumnsResult = await ad.runScript('main', 'SELECT id, name FROM users ORDER BY id');
+  check('包含主键的直接字段列表可编辑',
+    directColumnsResult[0].editTarget && directColumnsResult[0].editTarget.pk[0] === 'id');
+  const missingPkResult = await ad.runScript('main', 'SELECT name FROM users ORDER BY id');
+  check('缺少主键的查询结果保守只读',
+    !missingPkResult[0].editTarget && /完整主键/.test(missingPkResult[0].editReadonlyReason || ''));
   const explicitLimit = await ad.runScript('main', 'SELECT * FROM users ORDER BY id LIMIT 2', { maxRows: 1 });
   check('runScript 已有 LIMIT 结果精确', explicitLimit[0].rows.length === 1 && explicitLimit[0].truncated === true
     && explicitLimit[0].rowCount === 2 && explicitLimit[0].rowCountExact === true, explicitLimit[0]);
   check('查询返回行', sel && sel.rowCount === 2);
   check('查询返回中文', sel && sel.rows[0][1] === '张三');
   check('NULL 透传', sel && sel.rows[0][3] === null);
+
+  const autoEdit = await ad.applyQueryEdits('query-tx:auto-edit', 'main', {
+    schema: null,
+    table: 'users',
+    edits: [{ kind: 'update', where: { id: 1 }, set: { note: '查询结果编辑' } }],
+  });
+  const autoEditValue = await ad.runScript('main', 'SELECT note FROM users WHERE id = 1');
+  check('查询结果 Ctrl+S 自动提交修改', autoEdit.count === 1 && autoEdit.pendingTransaction === false
+    && autoEditValue[0].rows[0][0] === '查询结果编辑');
+  const resultEditTxId = 'query-tx:result-edit';
+  await ad.beginTransaction(resultEditTxId, 'main');
+  const pendingEdit = await ad.applyQueryEdits(resultEditTxId, 'main', {
+    schema: null,
+    table: 'users',
+    edits: [{ kind: 'update', where: { id: 1 }, set: { note: '事务内结果编辑' } }],
+  });
+  const pendingValue = await ad.runTransactionScript(resultEditTxId, 'main', 'SELECT note FROM users WHERE id = 1');
+  await ad.rollbackTransaction(resultEditTxId);
+  const rolledBackEditValue = await ad.runScript('main', 'SELECT note FROM users WHERE id = 1');
+  check('查询结果修改沿用当前显式事务', pendingEdit.pendingTransaction === true
+    && pendingValue[0].rows[0][0] === '事务内结果编辑'
+    && rolledBackEditValue[0].rows[0][0] === '查询结果编辑');
 
   // 查询标签显式事务：同一固定会话中执行，提交/回滚后释放。
   const txId = 'selftest-explicit-tx';
@@ -1270,6 +1352,59 @@ async function runSelfTest() {
   const committedRow = await ad.runScript('main', "SELECT age FROM users WHERE name = '事务提交'");
   check('显式事务提交持久化数据', Number(committedRow[0].rows[0][0]) === 44, committedRow);
 
+  const handwrittenTxId = 'query-handwritten';
+  const handwrittenBegin = await ad.runQuerySessionScript(
+    handwrittenTxId, 'main', 'BEGIN;', { requestId: 'handwritten-begin' },
+  );
+  check('查询页手写 BEGIN 开始固定会话事务', handwrittenBegin[0].message === '事务已开始'
+    && ad.transactionStatus(handwrittenTxId).state === 'active', handwrittenBegin);
+  await ad.runQuerySessionScript(
+    handwrittenTxId, 'main',
+    "INSERT INTO users (name, age) VALUES ('手写提交', 51);",
+    { requestId: 'handwritten-insert' },
+  );
+  const handwrittenCommit = await ad.runQuerySessionScript(
+    handwrittenTxId, 'main', 'COMMIT;', { requestId: 'handwritten-commit' },
+  );
+  const handwrittenCommittedRow = await ad.runScript(
+    'main', "SELECT age FROM users WHERE name = '手写提交'",
+  );
+  check('查询页手写 COMMIT 与工具栏状态同步', handwrittenCommit[0].message === '事务已提交'
+    && ad.transactionStatus(handwrittenTxId).state === 'idle'
+    && Number(handwrittenCommittedRow[0].rows[0][0]) === 51,
+  { handwrittenCommit, handwrittenCommittedRow });
+
+  const mixedTxId = 'query-mixed-boundaries';
+  const mixedRollback = await ad.runQuerySessionScript(
+    mixedTxId, 'main',
+    "BEGIN; INSERT INTO users (name, age) VALUES ('整段回滚', 52); ROLLBACK;",
+    { requestId: 'mixed-rollback' },
+  );
+  const mixedRolledBackRow = await ad.runScript(
+    'main', "SELECT age FROM users WHERE name = '整段回滚'",
+  );
+  check('运行全部支持 BEGIN/语句/ROLLBACK 并保持同一会话',
+    mixedRollback.length === 3
+    && mixedRollback[0].message === '事务已开始'
+    && mixedRollback[2].message === '事务已回滚'
+    && mixedRolledBackRow[0].rows.length === 0
+    && ad.transactionStatus(mixedTxId).state === 'idle',
+  { mixedRollback, mixedRolledBackRow });
+
+  const buttonSqlMixedId = 'query-button-sql-mixed';
+  await ad.beginTransaction(buttonSqlMixedId, 'main');
+  await ad.runQuerySessionScript(
+    buttonSqlMixedId, 'main',
+    "INSERT INTO users (name, age) VALUES ('按钮开始SQL提交', 53); COMMIT;",
+    { requestId: 'button-sql-mixed' },
+  );
+  const buttonSqlMixedRow = await ad.runScript(
+    'main', "SELECT age FROM users WHERE name = '按钮开始SQL提交'",
+  );
+  check('工具栏开始与手写 COMMIT 共用同一事务状态',
+    ad.transactionStatus(buttonSqlMixedId).state === 'idle'
+    && Number(buttonSqlMixedRow[0].rows[0][0]) === 53, buttonSqlMixedRow);
+
   await ad.beginTransaction(txId, 'main');
   const txBad = await ad.runTransactionScript(txId, 'main', 'SELECT * FROM table_does_not_exist', { requestId: 'tx-bad' });
   check('事务语句失败进入 failed 状态', txBad.some((item) => item.error)
@@ -1281,6 +1416,10 @@ async function runSelfTest() {
   const clickhouseTx = new ClickHouseAdapter({ type: 'clickhouse' });
   check('ClickHouse 显式事务安全降级', clickhouseTx.transactionStatus('tx-check').supported === false,
     clickhouseTx.transactionStatus('tx-check'));
+  let clickhouseBoundaryDenied = false;
+  try { await clickhouseTx.runQuerySessionScript('tx-check', 'default', 'BEGIN'); }
+  catch (e) { clickhouseBoundaryDenied = /不支持跨语句显式事务|仅支持自动提交/.test(e.message); }
+  check('ClickHouse 手写事务边界给出明确降级提示', clickhouseBoundaryDenied);
 
   const { BaseAdapter } = require('./db/base');
   class FakeTransactionAdapter extends BaseAdapter {
@@ -1295,6 +1434,7 @@ async function runSelfTest() {
       const run = async (sql) => {
         this.log.push(sql);
         if (this.options.failTerminal === sql) throw new Error(`terminal failed: ${sql}`);
+        if (this.options.failSql === sql) throw new Error(`statement failed: ${sql}`);
         if (this.options.failCleanup && sql === 'SESSION CLEANUP') throw new Error('cleanup failed');
         return { affected: 0 };
       };
@@ -1303,6 +1443,30 @@ async function runSelfTest() {
     }
     _transactionCleanupSqls() { return this.options.cleanup ? ['SESSION CLEANUP'] : []; }
   }
+
+  class FakeMySQLTransactionAdapter extends FakeTransactionAdapter {
+    get dialect() { return 'mysql'; }
+  }
+  const mysqlStatementError = new FakeMySQLTransactionAdapter({ failSql: 'BAD SQL' });
+  await mysqlStatementError.beginTransaction('mysql-statement-error', 'db');
+  const mysqlStatementErrorResult = await mysqlStatementError.runQuerySessionScript(
+    'mysql-statement-error', 'db', 'BAD SQL',
+  );
+  check('MySQL 单条语句失败不伪报整个事务已中止',
+    mysqlStatementErrorResult.some((item) => item.error)
+    && mysqlStatementError.transactionStatus('mysql-statement-error').state === 'active',
+  mysqlStatementErrorResult);
+  await mysqlStatementError.rollbackTransaction('mysql-statement-error');
+  const mysqlDdlTransaction = new FakeMySQLTransactionAdapter();
+  await mysqlDdlTransaction.beginTransaction('mysql-ddl-warning', 'db');
+  const mysqlDdlResult = await mysqlDdlTransaction.runQuerySessionScript(
+    'mysql-ddl-warning', 'db', 'ALTER TABLE t ADD COLUMN x INT',
+  );
+  check('MySQL 事务内 DDL 保留原生执行并提示隐式提交风险',
+    /隐式提交/.test(mysqlDdlResult[0].warning || '')
+    && mysqlDdlTransaction.transactionStatus('mysql-ddl-warning').state === 'active',
+  mysqlDdlResult);
+  await mysqlDdlTransaction.rollbackTransaction('mysql-ddl-warning');
 
   const commitFirst = new FakeTransactionAdapter();
   await commitFirst.beginTransaction('race-commit-first', 'db');
@@ -1409,7 +1573,8 @@ async function runSelfTest() {
     && /QUERY_OUTCOME_UNKNOWN/.test(cancelRaceResult[0].error || '')
     && /结果未知|可能已经生效/.test(cancelRaceResult[0].error || ''), cancelRaceResult);
 
-  await ad.runScript('main', "DELETE FROM users WHERE name = '事务提交'");
+  await ad.runScript('main',
+    "DELETE FROM users WHERE name IN ('事务提交', '手写提交', '整段回滚', '按钮开始SQL提交')");
 
   const objs = await ad.listObjects('main');
   check('listObjects', objs.tables.length === 1 && objs.tables[0].name === 'users' && Number(objs.tables[0].rows) === 2);
@@ -1422,6 +1587,8 @@ async function runSelfTest() {
   const data = await ad.tableData('main', { table: 'users', page: 1, pageSize: 10 });
   check('tableData 总数', data.total === 2);
   check('tableData 主键', data.pk[0] === 'id');
+  check('tableData 列元数据包含 COMMENT', data.columns.every((column) =>
+    Object.prototype.hasOwnProperty.call(column, 'comment')));
 
   const dataW = await ad.tableData('main', { table: 'users', page: 1, pageSize: 10, where: 'age > 26', orderBy: 'id', orderDir: 'desc' });
   check('tableData where', dataW.total === 1 && dataW.rows[0][1] === '张三');
@@ -1899,34 +2066,35 @@ async function runSelfTest() {
   };
   const hostKey1 = fakeHostKey('ssh-ed25519', 'selftest-key-one');
   const hostKey2 = fakeHostKey('ssh-ed25519', 'selftest-key-two');
+  const selftestSshHost = `selftest-${process.pid}.invalid`;
   const hostFp = sshHostKeys.fingerprintKey(hostKey1);
   check('ssh 主机密钥生成 OpenSSH 风格 SHA256 指纹', hostFp.algorithm === 'ssh-ed25519'
     && /^SHA256:[A-Za-z0-9+/]+$/.test(hostFp.fingerprint), hostFp);
   check('ssh known-host 规范化主机名', sshHostKeys.endpointId('EXAMPLE.INVALID.', 22022)
     === sshHostKeys.endpointId('example.invalid', 22022));
   let firstPrompt = null;
-  const firstTrust = await sshHostKeys.verifyHostKey('selftest.invalid', 22022, hostKey1, {
+  const firstTrust = await sshHostKeys.verifyHostKey(selftestSshHost, 22022, hostKey1, {
     confirm: async (details) => { firstPrompt = details; return true; },
   });
   check('ssh 首次连接须确认后才持久信任', firstTrust.accepted && firstTrust.status === 'new'
     && firstPrompt && firstPrompt.status === 'new'
-    && sshHostKeys.getKnownHost('selftest.invalid', 22022).fingerprint === hostFp.fingerprint);
+    && sshHostKeys.getKnownHost(selftestSshHost, 22022).fingerprint === hostFp.fingerprint);
   let repeatedPrompt = false;
-  const repeatedTrust = await sshHostKeys.verifyHostKey('SELFTEST.INVALID.', 22022, hostKey1, {
+  const repeatedTrust = await sshHostKeys.verifyHostKey(selftestSshHost.toUpperCase() + '.', 22022, hostKey1, {
     confirm: async () => { repeatedPrompt = true; return false; },
   });
   check('ssh 已知相同指纹自动校验', repeatedTrust.accepted && repeatedTrust.status === 'trusted' && !repeatedPrompt);
-  const changedRejected = await sshHostKeys.verifyHostKey('selftest.invalid', 22022, hostKey2, {
+  const changedRejected = await sshHostKeys.verifyHostKey(selftestSshHost, 22022, hostKey2, {
     confirm: async (details) => details.status !== 'changed',
   });
   check('ssh 已变更指纹默认拒绝且不覆盖旧记录', !changedRejected.accepted
     && changedRejected.status === 'changed'
-    && sshHostKeys.getKnownHost('selftest.invalid', 22022).fingerprint === hostFp.fingerprint);
-  const changedAccepted = await sshHostKeys.verifyHostKey('selftest.invalid', 22022, hostKey2, {
+    && sshHostKeys.getKnownHost(selftestSshHost, 22022).fingerprint === hostFp.fingerprint);
+  const changedAccepted = await sshHostKeys.verifyHostKey(selftestSshHost, 22022, hostKey2, {
     confirm: async (details) => details.status === 'changed',
   });
   check('ssh 已核验的变更指纹可显式更新', changedAccepted.accepted && changedAccepted.status === 'changed'
-    && sshHostKeys.getKnownHost('selftest.invalid', 22022).fingerprint
+    && sshHostKeys.getKnownHost(selftestSshHost, 22022).fingerprint
       === sshHostKeys.fingerprintKey(hostKey2).fingerprint);
 
   const { openTunnel } = require('./tunnel');

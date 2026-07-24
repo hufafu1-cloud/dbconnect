@@ -455,11 +455,12 @@ class MSSQLAdapter extends BaseAdapter {
           } else {
             for (const rs of sets) {
               const colsMeta = Array.isArray(rs.columns) ? rs.columns : Object.values(rs.columns || {});
-              out.push(this._normalizeResult(batch, {
+              const normalized = this._normalizeResult(batch, {
                 columns: colsMeta.map((c) => ({ name: c.name || '', type: (c.type && (c.type.declaration || c.type.name)) || '' })),
                 rows: rs,
                 rowLimitApplied: limited.applied,
-              }, maxRows, ms));
+              }, maxRows, ms);
+              out.push(await this._decorateQueryResult(db, opts && opts.schema, batch, normalized));
             }
           }
         } catch (err) {

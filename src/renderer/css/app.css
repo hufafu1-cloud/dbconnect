@@ -389,6 +389,7 @@ body {
 .query-toolbar { gap: 7px; padding: 7px 9px; }
 .query-toolbar-group { display: inline-flex; align-items: center; gap: 4px; padding-right: 7px; border-right: 1px solid var(--border-light); }
 .query-toolbar-label { font-size: 10.5px; color: var(--text-muted); letter-spacing: .4px; margin-right: 2px; }
+.query-schema-select { min-width: 108px; max-width: 180px; }
 .query-toolbar .pbtn.success { background: color-mix(in srgb, var(--green) 11%, transparent); border-color: color-mix(in srgb, var(--green) 24%, var(--border)); font-weight: 600; }
 .query-status-strip { display: flex; align-items: center; gap: 8px; min-height: 29px; padding: 5px 12px; border-bottom: 1px solid var(--border-light); background: var(--panel); font-size: 12px; }
 .query-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 12%, transparent); }

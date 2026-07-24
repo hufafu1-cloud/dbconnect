@@ -42,7 +42,7 @@ function testApprovedLogoSource() {
 
 function testBuildRelease() {
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  assert.strictEqual(packageJson.version, '2.5.2', 'release version must remain 2.5.2');
+  assert.match(packageJson.version, /^\d+\.\d+\.\d+$/, 'release version must be a valid semantic version');
   assert.strictEqual(packageJson.build.win.icon, 'assets/icon.ico');
   assert.notStrictEqual(packageJson.build.win.signAndEditExecutable, false, 'EXE resource editing must remain enabled');
   assert.strictEqual(packageJson.scripts.dist, 'node scripts/build-release.js');

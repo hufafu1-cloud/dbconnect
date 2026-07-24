@@ -126,7 +126,12 @@ export class DataGrid {
       if (this.sort.col === c.name) {
         inner.append(el('span', { class: 'sort-mark' }, this.sort.dir === 'desc' ? '▼' : '▲'));
       }
-      const th = el('th', { title: c.type ? `${c.name} : ${c.type}` : c.name }, inner);
+      // 打开表时后端会附带栏位 COMMENT；有注释时优先按 Navicat 的方式
+      // 直接显示注释，没有注释时保留原有的“栏位名 : 类型”提示。
+      const headerTip = c.comment
+        ? String(c.comment)
+        : (c.type ? `${c.name} : ${c.type}` : c.name);
+      const th = el('th', { title: headerTip }, inner);
       if (this.opts.onSort) {
         th.addEventListener('click', (e) => {
           if (e.target.classList.contains('col-resizer')) return;
@@ -207,6 +212,13 @@ export class DataGrid {
     const f = this.focus;
     const key = e.key;
     const NAV = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Home', 'End'];
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && key.toLowerCase() === 's') {
+      if (this.opts.onSave) {
+        e.preventDefault();
+        this.opts.onSave();
+      }
+      return;
+    }
     if (!f) {
       if (NAV.includes(key)) { e.preventDefault(); this._setFocus(0, 0); }
       return;
@@ -296,9 +308,14 @@ export class DataGrid {
     });
     td.addEventListener('click', (e) => {
       this._selectRow(r, isNew, e);
-      // 单击即获得单元格焦点（Navicat 式）；多选时不重置行选择
+      // Navicat 式操作：普通单击选中后立即进入编辑，用户可以直接输入；
+      // Ctrl/Shift 多选时只调整选择，不弹出编辑器。
       this._setFocus(isNew ? this.rows.length + r : r, i, { scroll: false, select: false });
-      this.wrap.focus();
+      if (!e.ctrlKey && !e.metaKey && !e.shiftKey && (this.editable || isNew)) {
+        this._beginEdit(td, r, i, isNew);
+      } else {
+        this.wrap.focus();
+      }
     });
     return td;
   }
@@ -331,10 +348,11 @@ export class DataGrid {
   }
 
   _beginEdit(td, r, i, isNew, initialText) {
+    // 从一个单元格单击切换到另一个单元格时，先提交前一个编辑值。
+    this._removeEditor(true);
     const cur = this._currentVal(r, i, isNew);
     if (cur && typeof cur === 'object' && cur.__blob) { toast.info('BLOB 字段不支持在网格中编辑'); return; }
     if (!isNew && this.deletedRows.has(r)) return;
-    this._removeEditor(false);
     this._setFocus(isNew ? this.rows.length + r : r, i, { scroll: false, select: false });
     const rect = td.getBoundingClientRect();
     const wrapRect = this.wrap.getBoundingClientRect();
@@ -349,7 +367,12 @@ export class DataGrid {
       // 阻止网格和页面级快捷键抢占编辑器按键；Delete/Backspace 不拦截，
       // 让 textarea 原生删除当前选中的长文本。
       e.stopPropagation();
-      if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); this._removeEditor(true); this.wrap.focus(); }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's' && this.opts.onSave) {
+        e.preventDefault();
+        this._removeEditor(true);
+        this.wrap.focus();
+        this.opts.onSave();
+      } else if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); this._removeEditor(true); this.wrap.focus(); }
       else if (e.key === 'Escape') { e.preventDefault(); this._removeEditor(false); this.wrap.focus(); }
       else if (e.key === 'Tab') {
         e.preventDefault();
@@ -388,6 +411,29 @@ export class DataGrid {
     const newVal = val; // 空字符串就是空字符串；设 NULL 走右键菜单
     if (newVal === origStr || (origStr === null && newVal === '' && !isNew)) return; // 无变化
     this._setCell(r, i, newVal, isNew, td);
+  }
+
+  commitEditor() {
+    this._removeEditor(true);
+  }
+
+  acceptChanges() {
+    this.commitEditor();
+    for (const [r, changes] of this.cellEdits) {
+      if (!this.rows[r]) continue;
+      for (const [i, value] of changes) this.rows[r][i] = value;
+    }
+    const deleted = [...this.deletedRows].sort((a, b) => b - a);
+    for (const r of deleted) {
+      this.rows.splice(r, 1);
+      if (this.rowIds) this.rowIds.splice(r, 1);
+    }
+    for (const row of this.newRows) this.rows.push(row.values.map((value) => value === undefined ? null : value));
+    this.clearPending();
+    this.selection.clear();
+    this.lastSel = null;
+    this.render();
+    if (this.opts.onChange) this.opts.onChange();
   }
 
   _setCell(r, i, val, isNew, td) {
