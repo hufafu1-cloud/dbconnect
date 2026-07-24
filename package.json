@@ -1,7 +1,7 @@
 {
   "name": "dbpanda",
   "productName": "DBPanda",
-  "version": "2.5.13",
+  "version": "2.5.14",
   "description": "DBPanda — 专业数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / OceanBase)",
   "main": "src/main/main.js",
   "author": "DBPanda",

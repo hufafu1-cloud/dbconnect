@@ -53,7 +53,7 @@ function testBuildRelease() {
   const env = createBuildEnv({ SAMPLE: 'preserved' });
   assert.strictEqual(env.SAMPLE, 'preserved');
   assert.strictEqual(env.ELECTRON_BUILDER_DISABLE_BUILD_CACHE, 'true');
-  assert.deepStrictEqual(getBuilderArgs(), ['--win', 'nsis', 'zip']);
+  assert.deepStrictEqual(getBuilderArgs(), ['--win', 'nsis', 'zip', '--publish', 'never']);
   const cache = getWinCodeSignCachePaths({ ELECTRON_BUILDER_CACHE: 'C:\\builder-cache' });
   assert.strictEqual(cache.targetDir, path.win32.join('C:\\builder-cache', 'winCodeSign', 'winCodeSign-2.6.0'));
   assert.strictEqual(cache.archivePath, path.win32.join('C:\\builder-cache', 'winCodeSign', 'winCodeSign-2.6.0.7z'));
