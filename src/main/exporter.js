@@ -121,7 +121,11 @@ function tableProjection(adapter, columns) {
     } else if (/^(money|smallmoney)\b/.test(type)) {
       expression = `CONVERT(varchar(100), ${ident}, 2)`;
     } else if (/^datetimeoffset\b/.test(type)) {
-      expression = `CONVERT(varchar(50), ${ident}, 127)`;
+      // SQL Server's default datetimeoffset text keeps both seven fractional
+      // digits and the stored source offset (for example +08:00). The style
+      // 127 projection used previously did not retain that source offset in
+      // the SQL Server 2022 integration export.
+      expression = `CONVERT(varchar(50), ${ident})`;
     } else if (/^datetime2\b/.test(type)) {
       expression = `CONVERT(varchar(50), ${ident}, 126)`;
     } else if (/^time\b/.test(type)) {

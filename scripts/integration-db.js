@@ -382,7 +382,9 @@ async function exportCheck(adapter, type, database, tableName) {
     } else if (type === 'mssql') {
       assert(String(findField(first, 'exact_num')) === '12345678901234567890.123456789012345678', 'SQL Server DECIMAL export lost precision');
       assert(String(findField(first, 'exact_time')).includes('1234567'), 'SQL Server DATETIME2 export lost precision');
-      assert(String(findField(first, 'offset_at')).includes('+08:00'), 'SQL Server DATETIMEOFFSET export lost its source offset');
+      const offsetAt = String(findField(first, 'offset_at'));
+      assert(offsetAt.includes('1234567'), 'SQL Server DATETIMEOFFSET export lost precision');
+      assert(offsetAt.includes('+08:00'), 'SQL Server DATETIMEOFFSET export lost its source offset');
     } else if (type === 'clickhouse') {
       assert(String(findField(first, 'exact_num')) === '12345678901234567890.123456789012345678', 'ClickHouse Decimal export lost precision');
       assert(String(findField(first, 'wide_id')) === '9007199254740993', 'ClickHouse UInt64 export lost precision');

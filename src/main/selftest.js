@@ -1207,7 +1207,7 @@ async function runSelfTest() {
     && /CONVERT\(varchar\(100\), \[ratio\]\) AS \[ratio\]/.test(msSqls[0])
     && /CONVERT\(varchar\(100\), \[cash\], 2\) AS \[cash\]/.test(msSqls[0])
     && /CONVERT\(varchar\(50\), \[id\], 126\) AS \[id\]/.test(msSqls[0])
-    && /CONVERT\(varchar\(50\), \[offset_at\], 127\) AS \[offset_at\]/.test(msSqls[0])
+    && /CONVERT\(varchar\(50\), \[offset_at\]\) AS \[offset_at\]/.test(msSqls[0])
     && /CONVERT\(varchar\(30\), \[clock_at\]\) AS \[clock_at\]/.test(msSqls[0]), msSqls[0]);
   check('MSSQL 数值/高精度时间复合主键保持精确 keyset 分页', msMeta.pagination === 'keyset'
     && msMeta.orderedBy.join(',') === 'seq,id' && msSqls.length === 2
