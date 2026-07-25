@@ -1083,3 +1083,47 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .generated-sql-option input {
   margin: 0;
 }
+.tree-row.sql-file-drop-target {
+  background: var(--accent-light);
+  color: var(--accent-dark);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.sql-file-runner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 460px;
+}
+
+.sql-file-options,
+.sql-file-transaction {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.sql-file-log-label {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.sql-file-log {
+  width: 100%;
+  min-height: 280px;
+  flex: 1 1 280px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 9px 11px;
+  background: var(--bg);
+  color: var(--text);
+  font: 12px/1.55 var(--mono);
+  outline: none;
+  white-space: pre;
+}
+
+.sql-file-log:focus {
+  border-color: var(--accent);
+}

@@ -1,5 +1,5 @@
 // 预加载脚本：以最小面暴露 IPC API
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const inv = (channel, ...args) =>
   ipcRenderer.invoke(channel, ...args).then((r) => {
@@ -72,11 +72,14 @@ contextBridge.exposeInMainWorld('api', {
     transfer: (t) => inv('dba:transfer', t),
     dump: (connId, t) => inv('dba:dump', { connId, ...t }),
     runSqlFile: (connId, t) => inv('dba:runSqlFile', { connId, ...t }),
+    cancelSqlFile: (connId, taskId) => inv('dba:cancelSqlFile', { connId, taskId }),
     structDiff: (t) => inv('dba:structDiff', t),
     execSqls: (connId, db, sqls, approvalToken) => inv('dba:execSqls', { connId, db, sqls, approvalToken }),
     dataSync: (t) => inv('dba:dataSync', t),
-    onProgress: (cb) => {
-      const listener = (_e, p) => cb(p);
+    onProgress: (cb, taskId) => {
+      const listener = (_e, p) => {
+        if (!taskId || !p || p.taskId === taskId) cb(p);
+      };
       ipcRenderer.on('dba:progress', listener);
       return () => ipcRenderer.removeListener('dba:progress', listener);
     },
@@ -116,6 +119,10 @@ contextBridge.exposeInMainWorld('api', {
     read: (p) => inv('file:read', p),
     write: (p, content) => inv('file:write', p, content),
     writeBase64: (p, b64) => inv('file:writeBase64', p, b64),
+    droppedSqlFile: (file) => {
+      const droppedPath = webUtils.getPathForFile(file);
+      return inv('file:grantDroppedSql', { path: droppedPath, name: file && file.name });
+    },
   },
   ai: {
     getConfig: () => inv('ai:getConfig'),

@@ -10,6 +10,8 @@ const tree = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js',
 const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'preload.js'), 'utf8');
 const ipc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ipc.js'), 'utf8');
 const util = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'util.js'), 'utf8');
+const queryTab = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'queryTab.js'), 'utf8');
+const dbaTools = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'dbaTools.js'), 'utf8');
 
 function rule(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -63,6 +65,20 @@ assert.match(connDialog, /const shouldOpen\s*=\s*!state\.open\.has\(saved\.id\)/
 assert.match(connDialog, /openConnectionById\(saved\.id\)/);
 assert.match(ipc, /const result\s*=\s*await dbm\.open\(store\.getById\(connId\)\)/);
 assert.match(ipc, /store\.clearSessionPassword\(connId\)/);
+assert.match(queryTab, /打开 SQL 文件到编辑器/);
+assert.match(queryTab, /直接运行 SQL 文件…/);
+assert.match(queryTab, /openRunSqlFileDialog\(\{\s*connId,\s*db,\s*schema\s*\}\)/);
+assert.match(tree, /runDroppedSqlFile/);
+assert.match(tree, /onSqlFileDrop:\s*\(file\)\s*=>\s*runDroppedSqlFile\(\{\s*connId:\s*conn\.id,\s*db,\s*schema\s*\}/);
+assert.match(tree, /openRunSqlFileDialog\(\{\s*connId:\s*conn\.id,\s*db,\s*schema\s*\}\)/);
+assert.match(preload, /webUtils\.getPathForFile\(file\)/);
+assert.match(preload, /cancelSqlFile/);
+assert.match(dbaTools, /事务方式:/);
+assert.match(dbaTools, /单一事务/);
+assert.match(dbaTools, /复制日志/);
+assert.match(dbaTools, /保存日志…/);
+assert.match(dbaTools, /label:\s*'停止'/);
+assert.match(rule('.sql-file-log'), /min-height:\s*280px/);
 
 const databaseIcons = ['mysql', 'postgres', 'sqlite', 'mssql', 'clickhouse', 'oceanbase', 'oboracle'];
 const iconBodies = databaseIcons.map((name) => {

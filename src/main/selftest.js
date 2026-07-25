@@ -2346,12 +2346,58 @@ async function runSelfTest() {
   const fRt = path.join(os.tmpdir(), `dbc-rt-${Date.now()}.db`);
   const adRt = new SQLiteAdapter({ id: 'r', type: 'sqlite', file: fRt });
   await adRt.connect();
-  const runRes = await transfer.runSqlFile(adRt, { db: 'main', file: dumpFile, stopOnError: false }, () => {});
+  let runFileSessionOptions = null;
+  const originalRunFileSession = adRt.withSession.bind(adRt);
+  adRt.withSession = (database, fn, options) => {
+    runFileSessionOptions = options;
+    return originalRunFileSession(database, fn, options);
+  };
+  const runRes = await transfer.runSqlFile(adRt, {
+    db: 'main', schema: 'selected_schema', file: dumpFile, stopOnError: false,
+  }, () => {});
   check('SQL 文件执行', runRes.failed === 0 && runRes.executed >= 4, runRes);
+  check('SQL 文件执行继承当前模式',
+    runFileSessionOptions && runFileSessionOptions.schema === 'selected_schema', runFileSessionOptions);
+  const mssqlFileTransaction = new (require('./db/mssql').MSSQLAdapter)({}).sqlFileTransactionPlan();
+  check('SQL Server 文件事务使用 BEGIN TRANSACTION',
+    mssqlFileTransaction.begin.length === 1 && mssqlFileTransaction.begin[0] === 'BEGIN TRANSACTION',
+    mssqlFileTransaction);
   const rtCount = await adRt.exec('main', 'SELECT COUNT(*) FROM goods');
   check('回环行数', Number(rtCount.rows[0][0]) === 2);
+  await adRt.exec('main', 'CREATE TABLE file_tx_test (id INTEGER PRIMARY KEY, note TEXT)');
+  const txFile = path.join(os.tmpdir(), `dbc-file-tx-${Date.now()}.sql`);
+  fs.writeFileSync(txFile, [
+    "INSERT INTO file_tx_test VALUES (1, 'will rollback');",
+    'INSERT INTO missing_file_table VALUES (1);',
+    "INSERT INTO file_tx_test VALUES (2, 'must not run');",
+  ].join('\n'), 'utf8');
+  const txRun = await transfer.runSqlFile(adRt, {
+    db: 'main', file: txFile, stopOnError: false, transactionMode: 'single', taskId: 'file-tx-test',
+  }, () => {});
+  const txRows = await adRt.exec('main', 'SELECT COUNT(*) FROM file_tx_test');
+  check('SQL 文件单一事务遇错回滚',
+    txRun.failed === 1 && txRun.rolledBack && Number(txRows.rows[0][0]) === 0, txRun);
+  check('SQL 文件返回每条语句完整日志',
+    txRun.logs.length === 2 && txRun.logs[0].status === 'success' && txRun.logs[1].status === 'error', txRun.logs);
+
+  const cancelFile = path.join(os.tmpdir(), `dbc-file-cancel-${Date.now()}.sql`);
+  fs.writeFileSync(cancelFile, [
+    "INSERT INTO file_tx_test VALUES (3, 'cancel and rollback');",
+    "INSERT INTO file_tx_test VALUES (4, 'must not run');",
+  ].join('\n'), 'utf8');
+  const cancelTaskId = 'file-cancel-test';
+  const cancelRun = await transfer.runSqlFile(adRt, {
+    db: 'main', file: cancelFile, stopOnError: true, transactionMode: 'single', taskId: cancelTaskId,
+  }, (event) => {
+    if (event.done === 1) adRt.cancelOperation(cancelTaskId).catch(() => {});
+  });
+  const cancelRows = await adRt.exec('main', 'SELECT COUNT(*) FROM file_tx_test');
+  check('SQL 文件停止后不再执行后续语句',
+    cancelRun.cancelled && cancelRun.executed === 1 && cancelRun.logs.length === 2, cancelRun);
+  check('SQL 文件单一事务停止后回滚',
+    cancelRun.rolledBack && Number(cancelRows.rows[0][0]) === 0, cancelRun);
   await adSrc.close(); await adDst.close(); await adRt.close();
-  for (const f of [fSrc, fDst, fRt, dumpFile]) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
+  for (const f of [fSrc, fDst, fRt, dumpFile, txFile, cancelFile]) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } }
 
   // 进程监控能力
   check('processes caps', my.objectCaps.processes === true && pgA.objectCaps.processes === true

@@ -310,6 +310,35 @@ export function openQueryTab(target, initialSql, opts) {
   }, el('span', { class: 'transaction-label' }, '事务'), btnTxBegin, btnTxCommit, btnTxRollback, txStatus);
 
   const btnAi = mkBtn('ai', 'AI ▾', () => showAiMenu(btnAi));
+  const btnOpenFile = mkBtn('openFile', '打开 ▾', () => showFileMenu(btnOpenFile));
+
+  function showFileMenu(anchor) {
+    const r = anchor.getBoundingClientRect();
+    const canRunFile = !!connId && !!db && state.open.has(connId) && !dbUnavailable;
+    showMenu(r.left, r.bottom + 4, [
+      { label: '打开 SQL 文件到编辑器', icon: 'openFile', onClick: openFile },
+      {
+        label: '直接运行 SQL 文件…',
+        icon: 'run',
+        disabled: !canRunFile,
+        hint: canRunFile ? '使用当前连接' : '请先选择连接和数据库',
+        onClick: runSqlFileDirectly,
+      },
+    ]);
+  }
+
+  async function runSqlFileDirectly() {
+    if (!connId || !state.open.has(connId)) {
+      toast.info('请先选择并打开连接');
+      return;
+    }
+    if (!db || dbUnavailable) {
+      toast.info('请先选择可用的数据库');
+      return;
+    }
+    const { openRunSqlFileDialog } = await import('./dbaTools.js');
+    openRunSqlFileDialog({ connId, db, schema });
+  }
 
   function showAiMenu(anchor) {
     const r = anchor.getBoundingClientRect();
@@ -342,7 +371,7 @@ export function openQueryTab(target, initialSql, opts) {
       schemaLabel, schemaSel, schemaBadge),
     el('span', { class: 'sep' }),
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '工具'), mkBtn('explain', '解释', explainSql), mkBtn('format', '美化', formatSql), btnAi),
-    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '文件'), mkBtn('openFile', '打开', openFile), mkBtn('save', '保存', () => saveQuery()), mkBtn('exportIcon', '另存文件', () => saveAsFile())),
+    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '文件'), btnOpenFile, mkBtn('save', '保存', () => saveQuery()), mkBtn('exportIcon', '另存文件', () => saveAsFile())),
     el('span', { class: 'sep' }),
     maxRowsSel,
     el('span', { class: 'sep' }),

@@ -11,7 +11,7 @@ import { authorizeOperation } from './danger.js';
 let treeRoot = null;
 const connNodes = new Map(); // connId -> node element记录
 
-function nodeRow({ depth, icon, label, meta, twisty, onToggle, onSelect, onDblClick, onMenu, cls }) {
+function nodeRow({ depth, icon, label, meta, twisty, onToggle, onSelect, onDblClick, onMenu, onSqlFileDrop, cls }) {
   const tw = el('span', { class: 'tree-twisty' + (twisty ? '' : ' leaf') }, '▶');
   const row = el('div', { class: 'tree-row' + (cls ? ' ' + cls : ''), style: { paddingLeft: depth * 16 + 6 + 'px' } },
     tw, iconEl(icon, 'tree-icon'),
@@ -26,7 +26,37 @@ function nodeRow({ depth, icon, label, meta, twisty, onToggle, onSelect, onDblCl
   }
   if (onDblClick) row.addEventListener('dblclick', onDblClick);
   if (onMenu) row.addEventListener('contextmenu', (e) => { e.preventDefault(); selectRow(row); onMenu(e); });
+  if (onSqlFileDrop) {
+    const hasSqlFile = (event) => [...(event.dataTransfer && event.dataTransfer.files || [])]
+      .some((file) => /\.(?:sql|txt)$/i.test(file.name || ''));
+    row.addEventListener('dragover', (e) => {
+      if (!hasSqlFile(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      row.classList.add('sql-file-drop-target');
+    });
+    row.addEventListener('dragleave', (e) => {
+      if (!row.contains(e.relatedTarget)) row.classList.remove('sql-file-drop-target');
+    });
+    row.addEventListener('drop', async (e) => {
+      row.classList.remove('sql-file-drop-target');
+      if (!hasSqlFile(e)) return;
+      e.preventDefault();
+      const file = [...e.dataTransfer.files].find((item) => /\.(?:sql|txt)$/i.test(item.name || ''));
+      try { await onSqlFileDrop(file); } catch (error) { toast.error(`无法运行拖入的 SQL 文件：${error.message}`); }
+    });
+  }
   return { row, tw };
+}
+
+async function runDroppedSqlFile(target, file) {
+  if (!target || !target.connId || !state.open.has(target.connId)) {
+    toast.info('请先打开连接，再拖入 SQL 文件');
+    return;
+  }
+  const grantedFile = await window.api.file.droppedSqlFile(file);
+  const { openRunSqlFileDialog } = await import('./dbaTools.js');
+  openRunSqlFileDialog(target, { file: grantedFile });
 }
 
 function selectRow(row) {
@@ -138,6 +168,10 @@ function renderConnNode(conn) {
     onSelect: () => { setActiveTarget({ connId: conn.id }, 'tree-connection'); },
     onDblClick: () => toggle(),
     onMenu: (e) => connMenu(e, conn, isOpenNow(), toggle),
+    onSqlFileDrop: (file) => runDroppedSqlFile({
+      connId: conn.id,
+      db: conn.type === 'sqlite' ? 'main' : (conn.database || null),
+    }, file),
   });
 
   if (conn.color) row.style.setProperty('--conn-color', conn.color);
@@ -302,6 +336,7 @@ function renderDbNode(conn, db) {
     onSelect: () => {
       setActiveTarget({ connId: conn.id, db }, 'tree-database');
     },
+    onSqlFileDrop: (file) => runDroppedSqlFile({ connId: conn.id, db }, file),
     onMenu: (e) => {
       showMenu(e.clientX, e.clientY, [
         { label: '新建查询', icon: 'query', onClick: () => actions.newQuery({ connId: conn.id, db }) },
@@ -411,9 +446,14 @@ function renderSchemaNode(conn, db, schema) {
           const { openDumpDialog } = await import('./dbaTools.js');
           openDumpDialog({ connId: conn.id, db, schema });
         } },
+        { label: '运行 SQL 文件…', icon: 'openFile', onClick: async () => {
+          const { openRunSqlFileDialog } = await import('./dbaTools.js');
+          openRunSqlFileDialog({ connId: conn.id, db, schema });
+        } },
         { label: '刷新', icon: 'refresh', onClick: reload },
       ]);
     },
+    onSqlFileDrop: (file) => runDroppedSqlFile({ connId: conn.id, db, schema }, file),
   });
 
   async function toggle() {

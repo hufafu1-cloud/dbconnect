@@ -618,8 +618,10 @@ function register(getWin) {
   const dbaHandler = (fn, approvalOperation) => async (event, a) => {
     try {
       const approval = approvalOperation ? safety.consume(event, approvalOperation, a) : null;
-      const prog = (p) => { try { event.sender.send('dba:progress', p); } catch (e) { /* ignore */ } };
-      return { ok: true, data: await fn(a, prog, approval) };
+      const prog = (p) => {
+        try { event.sender.send('dba:progress', { ...p, taskId: a && a.taskId || null }); } catch (e) { /* ignore */ }
+      };
+      return { ok: true, data: await fn(a, prog, approval, event) };
     } catch (err) {
       return { ok: false, error: (err && err.message) || String(err) };
     }
@@ -630,14 +632,20 @@ function register(getWin) {
     fileAccess.assertAllowed(a.file, 'write');
     return transfer.dumpSql(dbm.get(a.connId), a, prog);
   }, 'dba.dump'));
-  ipcMain.handle('dba:runSqlFile', dbaHandler(async (a, prog, approval) => {
+  ipcMain.handle('dba:runSqlFile', dbaHandler(async (a, prog, approval, event) => {
     const snapshot = await fileAccess.snapshot(a.file, approval && approval.file && approval.file.sha256);
     try {
-      return await transfer.runSqlFile(dbm.get(a.connId), { ...a, file: snapshot.path }, prog);
+      return await transfer.runSqlFile(dbm.get(a.connId), {
+        ...a,
+        taskId: rendererRequestId(event, a.taskId),
+        file: snapshot.path,
+      }, prog);
     } finally {
       await snapshot.cleanup();
     }
   }, 'dba.runSqlFile'));
+  h('dba:cancelSqlFile', (event, a) =>
+    dbm.get(a.connId).cancelOperation(rendererRequestId(event, a.taskId)), null, true);
 
   // ---- 结构同步 / 数据同步 ----
   const sync = require('./sync');
@@ -824,6 +832,14 @@ function register(getWin) {
   h('file:read', (p) => fs.promises.readFile(fileAccess.assertAllowed(p, 'read'), 'utf8'));
   h('file:write', (p, content) => fs.promises.writeFile(fileAccess.assertAllowed(p, 'write'), content, 'utf8'));
   h('file:writeBase64', (p, b64) => fs.promises.writeFile(fileAccess.assertAllowed(p, 'write'), Buffer.from(b64, 'base64')));
+  h('file:grantDroppedSql', async (a) => {
+    const droppedPath = String(a && a.path || '');
+    const displayName = String(a && a.name || path.basename(droppedPath));
+    if (!droppedPath || !/\.(?:sql|txt)$/i.test(displayName)) throw new Error('只能拖入 SQL 或 TXT 文件');
+    const stat = await fs.promises.stat(droppedPath);
+    if (!stat.isFile()) throw new Error('拖入的项目不是文件');
+    return fileAccess.grant(droppedPath, 'r');
+  });
 
   // ---- 工作区崩溃恢复（固定 userData 路径、原子写入，不接受任意文件路径） ----
   h('workspace:read', () => workspaceStore.read());

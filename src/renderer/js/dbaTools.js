@@ -245,6 +245,7 @@ export async function openTransferDialog(preset) {
     running = true;
     bar.style.display = '';
     const off = window.api.dba.onProgress((p) => {
+      if (p.taskId) return;
       if (p.tablesTotal) fill.style.width = Math.round((p.tablesDone / p.tablesTotal) * 100) + '%';
       text.textContent = `[${p.tablesDone}/${p.tablesTotal}] ${p.table || ''} — ${p.phase}${p.rows ? ` (${p.rows.toLocaleString()} 行)` : ''}`;
     });
@@ -331,6 +332,7 @@ export async function openDumpDialog(target, options = {}) {
     running = true;
     bar.style.display = '';
     const off = window.api.dba.onProgress((p) => {
+      if (p.taskId) return;
       if (p.tablesTotal) fill.style.width = Math.round((p.tablesDone / p.tablesTotal) * 100) + '%';
       text.textContent = `[${p.tablesDone}/${p.tablesTotal}] ${p.table || ''} — ${p.phase}${p.rows ? ` (${p.rows.toLocaleString()} 行)` : ''}`;
     });
@@ -350,8 +352,8 @@ export async function openDumpDialog(target, options = {}) {
 }
 
 // ---------------- 运行 SQL 文件 ----------------
-export async function openRunSqlFileDialog(target) {
-  const file = await window.api.dlg.openFile({
+export async function openRunSqlFileDialog(target, options = {}) {
+  const file = options.file || await window.api.dlg.openFile({
     title: '选择 SQL 文件',
     filters: [{ name: 'SQL 文件', extensions: ['sql', 'txt'] }, { name: '所有文件', extensions: ['*'] }],
   });
@@ -361,56 +363,239 @@ export async function openRunSqlFileDialog(target) {
     el('option', { value: 'utf-8' }, 'UTF-8'),
     el('option', { value: 'gbk' }, 'GBK / GB2312'));
   const chkContinue = el('input', { type: 'checkbox' });
-  const { bar, text, fill } = progressBarPair();
-  let running = false;
+  const transactionName = `sql-file-transaction-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const txAuto = el('input', { type: 'radio', name: transactionName, value: 'auto' });
+  const txSingle = el('input', { type: 'radio', name: transactionName, value: 'single' });
+  txAuto.checked = true;
+  const conn = state.connections.find((item) => item.id === target.connId);
+  const transactionSupported = !conn || conn.type !== 'clickhouse';
+  txSingle.disabled = !transactionSupported;
+  const transactionNote = el('div', {
+    style: { color: 'var(--text-muted)', fontSize: '12px' },
+  }, transactionSupported
+    ? '单一事务：遇到错误或停止时回滚；MySQL / Oracle 的部分 DDL 仍可能按数据库规则隐式提交。'
+    : 'ClickHouse 当前连接模式不支持跨语句事务，只能使用自动提交。');
+  const syncTransactionOptions = () => {
+    const single = txSingle.checked;
+    if (single) chkContinue.checked = false;
+    chkContinue.disabled = single;
+    chkContinue.parentElement.title = single ? '单一事务遇错必须停止并回滚' : '';
+  };
+  txAuto.addEventListener('change', syncTransactionOptions);
+  txSingle.addEventListener('change', syncTransactionOptions);
 
-  openModal({
-    title: `运行 SQL 文件 — ${connLabel(target.connId)}${target.db ? ' › ' + target.db : ''}`,
-    body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', width: '480px' } },
+  const { bar, text, fill } = progressBarPair();
+  const logEl = el('textarea', {
+    class: 'sql-file-log',
+    readOnly: true,
+    spellcheck: false,
+    'aria-label': 'SQL 文件执行日志',
+  });
+  const logLines = [];
+  let running = false;
+  let preparing = false;
+  let stopping = false;
+  let activeTaskId = null;
+  let modal;
+  let closeBtn;
+  let copyBtn;
+  let saveBtn;
+  let stopBtn;
+  let runBtn;
+
+  modal = openModal({
+    title: `运行 SQL 文件 — ${connLabel(target.connId)}${target.db ? ' › ' + target.db : ''}${target.schema ? ' › ' + target.schema : ''}`,
+    width: 760,
+    body: el('div', { class: 'sql-file-runner' },
       el('div', { style: { fontSize: '12.5px', wordBreak: 'break-all' } }, el('b', {}, '文件: '), file),
-      el('div', { style: { display: 'flex', gap: '16px', alignItems: 'center' } },
+      el('div', { class: 'sql-file-options' },
         el('span', { style: { color: 'var(--text-muted)', fontSize: '12.5px' } }, '编码:'), encSel,
         el('label', { class: 'form-check' }, chkContinue, '出错继续')),
-      bar, text),
+      el('div', { class: 'sql-file-transaction' },
+        el('span', { style: { color: 'var(--text-muted)', fontSize: '12.5px' } }, '事务方式:'),
+        el('label', { class: 'form-check' }, txAuto, '自动提交'),
+        el('label', { class: 'form-check' }, txSingle, '单一事务')),
+      transactionNote,
+      bar,
+      text,
+      el('div', { class: 'sql-file-log-label' }, '执行日志'),
+      logEl),
     buttons: [
-      { label: '关闭', onClick: () => !running },
-      { label: '执行', primary: true, onClick: () => { run(); return false; } },
+      { label: '关闭', onClick: () => !(running || preparing) },
+      { label: '复制日志', onClick: () => { copyLog(); return false; } },
+      { label: '保存日志…', onClick: () => { saveLog(); return false; } },
+      { label: '停止', onClick: () => { stop(); return false; } },
+      { label: '开始', primary: true, onClick: () => { run(); return false; } },
     ],
   });
+  [closeBtn, copyBtn, saveBtn, stopBtn, runBtn] = [...modal.overlay.querySelectorAll('.modal-foot .btn')];
+  stopBtn.disabled = true;
+  copyBtn.disabled = true;
+  saveBtn.disabled = true;
+  syncTransactionOptions();
+
+  function appendLog(line) {
+    logLines.push(line);
+    logEl.value = logLines.join('\n');
+    logEl.scrollTop = logEl.scrollHeight;
+    copyBtn.disabled = false;
+    saveBtn.disabled = false;
+  }
+
+  function formatLogEntry(entry, total) {
+    const stateLabel = entry.status === 'success' ? '成功'
+      : (entry.status === 'cancelled' ? '停止' : '失败');
+    const detail = `[${entry.index}/${total}] ${stateLabel} · ${entry.ms} ms · ${entry.sql}`;
+    return entry.error ? `${detail}\n    ${entry.error}` : detail;
+  }
+
+  async function copyLog() {
+    if (!logLines.length) return;
+    try {
+      await navigator.clipboard.writeText(logLines.join('\n'));
+      toast.success('执行日志已复制');
+    } catch (error) {
+      toast.error(`复制日志失败：${error.message}`);
+    }
+  }
+
+  async function saveLog() {
+    if (!logLines.length) return;
+    const now = new Date().toISOString().replace(/[:.]/g, '-');
+    const output = await window.api.dlg.saveFile({
+      title: '保存 SQL 文件执行日志',
+      defaultPath: `SQL执行日志-${now}.txt`,
+      filters: [{ name: '文本文件', extensions: ['txt', 'log'] }],
+    });
+    if (!output) return;
+    await window.api.file.write(output, logLines.join('\r\n') + '\r\n');
+    toast.success('执行日志已保存');
+  }
+
+  async function stop() {
+    if (!running || !activeTaskId || stopping) return;
+    stopping = true;
+    stopBtn.disabled = true;
+    text.textContent = '正在停止；当前数据库语句可能需要等待服务器响应…';
+    appendLog(`${new Date().toLocaleString()} 用户请求停止执行`);
+    try {
+      const result = await window.api.dba.cancelSqlFile(target.connId, activeTaskId);
+      if (result && result.driverCancelled === false) {
+        text.textContent = '已停止后续语句；当前驱动无法中断正在执行的语句，正在等待其返回…';
+      }
+    } catch (error) {
+      stopping = false;
+      if (running) stopBtn.disabled = false;
+      toast.error(`停止失败：${error.message}`);
+    }
+  }
 
   async function run() {
-    if (running) return;
+    if (running || preparing) return;
+    preparing = true;
+    runBtn.disabled = true;
+    activeTaskId = `sql-file-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const transactionMode = txSingle.checked ? 'single' : 'auto';
     const sqlFilePayload = {
       connId: target.connId,
-      db: target.db || null, file, encoding: encSel.value, stopOnError: !chkContinue.checked,
+      db: target.db || null,
+      schema: target.schema || null,
+      file,
+      encoding: encSel.value,
+      stopOnError: !chkContinue.checked,
+      transactionMode,
+      taskId: activeTaskId,
     };
     let approvedFile;
     try {
       approvedFile = await authorizeOperation('dba.runSqlFile', sqlFilePayload);
     } catch (e) {
       toast.error('生产库安全检查失败：' + e.message);
+      preparing = false;
+      activeTaskId = null;
+      runBtn.disabled = false;
       return;
     }
-    if (!approvedFile) return;
+    if (!approvedFile) {
+      preparing = false;
+      activeTaskId = null;
+      runBtn.disabled = false;
+      return;
+    }
+    preparing = false;
     running = true;
+    stopping = false;
+    logLines.length = 0;
+    logEl.value = '';
+    appendLog(`${new Date().toLocaleString()} 开始执行 SQL 文件`);
+    appendLog(`目标：${connLabel(target.connId)}${target.db ? ' › ' + target.db : ''}${target.schema ? ' › ' + target.schema : ''}`);
+    appendLog(`文件：${file}`);
+    appendLog(`编码：${encSel.value.toUpperCase()}；事务：${transactionMode === 'single' ? '单一事务' : '自动提交'}；错误处理：${sqlFilePayload.stopOnError ? '遇错停止' : '出错继续'}`);
+    appendLog('');
     bar.style.display = '';
+    fill.style.width = '0%';
+    runBtn.disabled = true;
+    stopBtn.disabled = false;
+    encSel.disabled = true;
+    chkContinue.disabled = true;
+    txAuto.disabled = true;
+    txSingle.disabled = true;
+    const seenLogs = new Set();
     const off = window.api.dba.onProgress((p) => {
       if (p.total) fill.style.width = Math.round((p.done / p.total) * 100) + '%';
-      text.textContent = `已执行 ${p.done} / ${p.total} 条语句`;
-    });
+      text.textContent = `${p.phase || '执行'}：${p.done} / ${p.total} 条语句`;
+      if (p.log) {
+        const key = `${p.log.index}:${p.log.status}`;
+        if (!seenLogs.has(key)) {
+          seenLogs.add(key);
+          appendLog(formatLogEntry(p.log, p.total));
+        }
+      }
+    }, activeTaskId);
     try {
       const r = await window.api.dba.runSqlFile(target.connId, approvedFile);
-      let msg = `执行完成：成功 ${r.executed}/${r.total} 条 · ${r.ms} ms`;
-      if (r.failed) msg += `\n失败 ${r.failed} 条：\n${r.errors.join('\n')}`;
-      (r.failed ? toast.error : toast.success)(msg, r.failed ? 15000 : 6000);
+      for (const entry of r.logs || []) {
+        const key = `${entry.index}:${entry.status}`;
+        if (!seenLogs.has(key)) appendLog(formatLogEntry(entry, r.total));
+      }
+      let msg;
+      if (r.cancelled) {
+        const outcome = r.rollbackUnconfirmed
+          ? '；事务会话已隔离，回滚结果未确认'
+          : (r.rolledBack ? '；本次事务已回滚' : '；自动提交下已成功的语句可能已经生效');
+        msg = `执行已停止：成功 ${r.executed}/${r.total} 条${outcome} · ${r.ms} ms`;
+      } else if (r.failed) {
+        const outcome = r.rollbackUnconfirmed
+          ? '；事务会话已隔离，回滚结果未确认'
+          : (r.rolledBack ? '；本次事务已回滚' : '');
+        msg = `${r.stoppedOnError ? '执行因错误停止' : '执行完成'}：成功 ${r.executed}/${r.total} 条，失败 ${r.failed} 条${outcome} · ${r.ms} ms`;
+      } else {
+        msg = `执行完成：成功 ${r.executed}/${r.total} 条${r.committed ? '；事务已提交' : ''} · ${r.ms} ms`;
+      }
+      appendLog('');
+      appendLog(msg);
+      if (r.cancelled) toast.info(msg, 8000);
+      else (r.failed ? toast.error : toast.success)(msg, r.failed ? 15000 : 6000);
       text.textContent = msg;
       emit('objects-changed', { connId: target.connId, db: target.db, schema: target.schema || null });
     } catch (e) {
       toast.error('执行失败：\n' + e.message, 15000);
       text.textContent = '失败：' + e.message;
+      appendLog('');
+      appendLog(`执行失败：${e.message}`);
     } finally {
       off();
+      preparing = false;
       running = false;
+      stopping = false;
+      activeTaskId = null;
+      closeBtn.disabled = false;
+      runBtn.disabled = false;
+      stopBtn.disabled = true;
+      encSel.disabled = false;
+      txAuto.disabled = false;
+      txSingle.disabled = !transactionSupported;
+      syncTransactionOptions();
     }
   }
 }

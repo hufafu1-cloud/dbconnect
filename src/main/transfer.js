@@ -170,7 +170,7 @@ async function dumpSql(ad, args, progress) {
 
 /**
  * 运行 SQL 文件（流式执行，不进编辑器）
- * args: {db, file, encoding, stopOnError}
+ * args: {db, schema, file, encoding, stopOnError, transactionMode, taskId}
  */
 async function runSqlFile(ad, args, progress) {
   const buf = fs.readFileSync(args.file);
@@ -187,26 +187,130 @@ async function runSqlFile(ad, args, progress) {
   const t0 = Date.now();
   let executed = 0;
   let failed = 0;
+  let cancelled = false;
+  let stoppedOnError = false;
+  let committed = false;
+  let rolledBack = false;
+  let rollbackUnconfirmed = false;
   const errors = [];
-  await ad.withSession(args.db, async (run) => {
-    for (const s of stmts) {
+  const logs = [];
+  const taskId = String(args.taskId || `sql-file-${Date.now()}`);
+  const singleTransaction = args.transactionMode === 'single';
+  const record = (entry) => {
+    logs.push(entry);
+    progress({
+      phase: entry.status === 'error' ? '错误' : (entry.status === 'cancelled' ? '已停止' : '执行'),
+      done: executed + failed,
+      total: stmts.length,
+      log: entry,
+    });
+  };
+  const executeStatements = async (run, assertActive) => {
+    for (let i = 0; i < stmts.length; i++) {
+      const statement = stmts[i];
+      const started = Date.now();
       try {
-        await run(s);
+        assertActive();
+        await run(statement, { requestId: taskId });
+        assertActive();
         executed++;
-      } catch (err) {
+        record({
+          index: i + 1,
+          status: 'success',
+          ms: Date.now() - started,
+          sql: excerpt(statement, 240),
+        });
+      } catch (error) {
+        const message = (error && error.message) || String(error);
+        if (ad.isOperationCancelled(taskId) || error.code === 'QUERY_CANCELED') {
+          cancelled = true;
+          record({
+            index: i + 1,
+            status: 'cancelled',
+            ms: Date.now() - started,
+            sql: excerpt(statement, 240),
+            error: message,
+          });
+          break;
+        }
         failed++;
-        if (errors.length < 5) errors.push(`${excerpt(s, 60)} → ${(err && err.message) || err}`);
-        if (args.stopOnError) {
-          throw new Error(`第 ${executed + failed} 条语句失败：${(err && err.message) || err}\nSQL: ${excerpt(s, 120)}\n已执行 ${executed} 条`);
+        errors.push(`第 ${i + 1} 条：${excerpt(statement, 120)} → ${message}`);
+        record({
+          index: i + 1,
+          status: 'error',
+          ms: Date.now() - started,
+          sql: excerpt(statement, 240),
+          error: message,
+        });
+        if (singleTransaction || args.stopOnError) {
+          stoppedOnError = true;
+          break;
         }
       }
-      if ((executed + failed) % 50 === 0) {
-        progress({ phase: '执行', done: executed + failed, total: stmts.length });
+    }
+  };
+
+  const sessionOptions = { requestId: taskId, schema: args.schema || null };
+  if (singleTransaction) {
+    const transaction = await ad.openCancelableTransaction(args.db, sessionOptions);
+    let finished = false;
+    try {
+      await executeStatements(transaction.run, transaction.assertActive);
+      if (failed || cancelled) {
+        finished = true;
+        try {
+          await transaction.finish('rollback');
+          rolledBack = true;
+        } catch (error) {
+          rollbackUnconfirmed = true;
+          errors.push(`回滚结果未确认，事务会话已隔离：${(error && error.message) || error}`);
+        }
+      } else {
+        finished = true;
+        await transaction.finish('commit');
+        committed = true;
+      }
+    } catch (error) {
+      if (!finished) {
+        try {
+          await transaction.finish('rollback');
+          rolledBack = true;
+        } catch (rollbackError) {
+          rollbackUnconfirmed = true;
+        }
+      }
+      throw error;
+    }
+  } else {
+    try {
+      await ad.withCancelableSession(args.db, sessionOptions, executeStatements);
+    } catch (error) {
+      if (error && (error.code === 'QUERY_CANCELED' || /查询已取消/.test(error.message || ''))) {
+        cancelled = true;
+      } else {
+        throw error;
       }
     }
+  }
+  progress({
+    phase: cancelled ? '已停止' : '完成',
+    done: executed + failed,
+    total: stmts.length,
   });
-  progress({ phase: '完成', done: executed + failed, total: stmts.length });
-  return { total: stmts.length, executed, failed, errors, ms: Date.now() - t0 };
+  return {
+    total: stmts.length,
+    executed,
+    failed,
+    errors,
+    logs,
+    cancelled,
+    stoppedOnError,
+    transactionMode: singleTransaction ? 'single' : 'auto',
+    committed,
+    rolledBack,
+    rollbackUnconfirmed,
+    ms: Date.now() - t0,
+  };
 }
 
 module.exports = { runTransfer, dumpSql, runSqlFile, valueLiteral };

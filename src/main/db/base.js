@@ -479,6 +479,84 @@ class BaseAdapter {
   /** Session cleanup that runs only after COMMIT/ROLLBACK has succeeded. */
   _transactionCleanupSqls() { return []; }
 
+  /** SQL file runner uses the same dialect-specific transaction rules as query tabs. */
+  sqlFileTransactionPlan() {
+    const support = this.transactionSupport || { supported: false };
+    return {
+      supported: !!support.supported,
+      warning: support.warning || '',
+      begin: support.supported
+        ? (this.dialect === 'mssql' ? ['BEGIN TRANSACTION'] : this._transactionBeginSqls({}))
+        : [],
+      commit: support.supported ? this._transactionEndSqls('commit') : [],
+      rollback: support.supported ? this._transactionEndSqls('rollback') : [],
+      cleanup: support.supported ? this._transactionCleanupSqls() : [],
+    };
+  }
+
+  /** Register a long-running non-query-page operation so driver cancellation remains precise. */
+  async withCancelableSession(db, opts, fn) {
+    const requestId = this._beginRequest(opts);
+    try {
+      return await this.withSession(db,
+        (run) => fn(run, () => this._assertRequestActive(requestId)),
+        { ...(opts || {}), requestId });
+    } finally {
+      this._endRequest(requestId);
+    }
+  }
+
+  async openCancelableTransaction(db, opts = {}) {
+    const support = this.transactionSupport || { supported: false };
+    if (!support.supported) throw new Error(support.warning || '当前数据库不支持单一事务');
+    const requestId = this._beginRequest(opts);
+    let session;
+    try {
+      session = await this._openExplicitTransaction(db, { ...opts, requestId });
+    } catch (error) {
+      this._endRequest(requestId);
+      throw error;
+    }
+    let finished = false;
+    return {
+      run: (sql, runOpts) => {
+        this._assertRequestActive(requestId);
+        return session.run(sql, { ...(runOpts || {}), requestId });
+      },
+      assertActive: () => this._assertRequestActive(requestId),
+      finish: async (action) => {
+        if (finished) throw new Error('事务已经结束');
+        finished = true;
+        try {
+          return await session.finish(action);
+        } finally {
+          this._endRequest(requestId);
+        }
+      },
+    };
+  }
+
+  async cancelOperation(requestId) {
+    this._markRequestCancelled(requestId);
+    try {
+      await this.cancel(requestId);
+      return { cancelled: true, driverCancelled: true };
+    } catch (error) {
+      if (this.cancel === BaseAdapter.prototype.cancel) {
+        return { cancelled: true, driverCancelled: false };
+      }
+      throw error;
+    }
+  }
+
+  isOperationCancelled(requestId) {
+    return this._isRequestCancelled(requestId);
+  }
+
+  async quarantineOperationSession(run, error) {
+    return this._quarantineTransactionSession(run, error);
+  }
+
   _transactionTerminalError(action, error) {
     const reason = (error && error.message) || String(error || '未知错误');
     const committing = action === 'commit';
