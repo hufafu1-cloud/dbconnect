@@ -512,15 +512,15 @@ class MSSQLAdapter extends BaseAdapter {
     const tables = await this._q(db,
       `SELECT s.name AS sch, t.name AS name,
               CASE
-                WHEN SUM(p.rows) IS NULL THEN NULL
-                WHEN SUM(p.rows) > 0 THEN SUM(p.rows)
-                WHEN SUM(CAST(p.data_pages AS bigint)) > 0 THEN NULL
+                WHEN SUM(p.row_count) IS NULL THEN NULL
+                WHEN SUM(p.row_count) > 0 THEN SUM(p.row_count)
+                WHEN SUM(CAST(p.used_page_count AS bigint)) > 0 THEN NULL
                 ELSE 0
               END AS rowcnt,
               MAX(CAST(ep.value AS nvarchar(400))) AS comment
        FROM sys.tables t
        JOIN sys.schemas s ON s.schema_id = t.schema_id
-       LEFT JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0, 1)
+       LEFT JOIN sys.dm_db_partition_stats p ON p.object_id = t.object_id AND p.index_id IN (0, 1)
        LEFT JOIN sys.extended_properties ep ON ep.major_id = t.object_id AND ep.minor_id = 0 AND ep.name = 'MS_Description'
        GROUP BY s.name, t.name ORDER BY s.name, t.name`);
     const views = await this._q(db,

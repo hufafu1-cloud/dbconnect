@@ -384,6 +384,40 @@ async function runSelfTest() {
     && chQueryOptions.clickhouse_settings.output_format_json_quote_64bit_integers === 1
     && chQueryOptions.clickhouse_settings.output_format_json_quote_decimals === 1
     && chQueryOptions.clickhouse_settings.output_format_json_quote_denormals === 1, chQueryOptions);
+  const chMetadata = new ClickHouseAdapter({});
+  let chColumnSql = '';
+  chMetadata._run = async (_db, sql) => {
+    const text = String(sql);
+    if (/database = 'system' AND table = 'columns'/.test(text)) {
+      return { rows: [['default_kind']] };
+    }
+    if (/FROM system\.columns WHERE database = 'db1'/.test(text)) {
+      chColumnSql = text;
+      return {
+        rows: [
+          ['id', 'UInt32', '', '', 1, 1, '', '', ''],
+          ['note', 'String', '', '', 0, 0, '', '', ''],
+        ],
+      };
+    }
+    if (/SELECT sorting_key, primary_key, partition_key/.test(text)) {
+      return { rows: [['id', 'id', '']] };
+    }
+    if (/system\.data_skipping_indices/.test(text)) return { rows: [] };
+    if (/SHOW CREATE TABLE/.test(text)) {
+      return { rows: [['CREATE TABLE `db1`.`t` (`id` UInt32, `note` String) ENGINE = MergeTree ORDER BY id']] };
+    }
+    if (/SELECT comment FROM system\.tables/.test(text)) return { rows: [['']] };
+    throw new Error(`Unexpected ClickHouse metadata query: ${text}`);
+  };
+  const chInfo = await chMetadata.tableInfo('db1', null, 't');
+  check('ClickHouse 旧版元数据列按能力投影且不触发未知栏位查询',
+    /default_kind/.test(chColumnSql)
+    && /'' AS codec_expression/.test(chColumnSql)
+    && /'' AS ttl_expression/.test(chColumnSql)
+    && chInfo.columns.every((column) => column.editSafe === true), { sql: chColumnSql, columns: chInfo.columns });
+  check('ClickHouse 排序主键仅用于结构展示而不冒充唯一行键',
+    chInfo.columns[0].key === 'PRI' && chInfo.pk.length === 0, chInfo);
 
   // ---- OceanBase（MySQL 兼容模式，继承 MySQL 适配器） ----
   const { OceanBaseAdapter } = require('./db/oceanbase');
@@ -533,8 +567,11 @@ async function runSelfTest() {
   };
   const mssqlObjs = await mssqlObjects.listObjects('db1');
   check('SQL Server 行数未知不为 0', mssqlObjs.tables[0].rows === null && mssqlObjs.tables[1].rows === 12, mssqlObjs.tables);
-  check('SQL Server 行数估算不再 ISNULL 归零', !/ISNULL\(SUM\(p\.rows\),\s*0\)/.test(mssqlObjects._listSql || '')
-    && /data_pages/.test(mssqlObjects._listSql || ''), mssqlObjects._listSql);
+  check('SQL Server 行数估算使用有效的分区统计列',
+    /sys\.dm_db_partition_stats/.test(mssqlObjects._listSql || '')
+    && /p\.row_count/.test(mssqlObjects._listSql || '')
+    && /p\.used_page_count/.test(mssqlObjects._listSql || '')
+    && !/p\.data_pages/.test(mssqlObjects._listSql || ''), mssqlObjects._listSql);
   const sqliteRowId = new SQLiteAdapter({});
   sqliteRowId._execRaw = (sql) => ({
     rows: [/norowid/i.test(String(sql))

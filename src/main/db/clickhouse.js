@@ -280,19 +280,23 @@ class ClickHouseAdapter extends BaseAdapter {
 
   async tableInfo(db, _schema, table) {
     const L = (v) => this.literal(v);
-    let colRes;
-    let advancedMetadataKnown = true;
+    const advancedFields = ['default_kind', 'codec_expression', 'ttl_expression'];
+    let availableAdvancedFields = new Set();
     try {
-      colRes = await this._run(null,
-        `SELECT name, type, default_expression, comment, is_in_primary_key, is_in_sorting_key,
-                default_kind, codec_expression, ttl_expression
-         FROM system.columns WHERE database = ${L(db)} AND table = ${L(table)} ORDER BY position`);
-    } catch (e) {
-      advancedMetadataKnown = false;
-      colRes = await this._run(null,
-        `SELECT name, type, default_expression, comment, is_in_primary_key, is_in_sorting_key
-         FROM system.columns WHERE database = ${L(db)} AND table = ${L(table)} ORDER BY position`);
-    }
+      const capabilityRows = await this._run(null,
+        `SELECT name FROM system.columns
+         WHERE database = 'system' AND table = 'columns'
+           AND name IN (${advancedFields.map((name) => L(name)).join(', ')})`);
+      availableAdvancedFields = new Set(capabilityRows.rows.map((row) => String(row[0])));
+    } catch (e) { /* 无权探测时按旧版本保守处理 */ }
+    const advancedMetadataKnown = advancedFields.every((name) => availableAdvancedFields.has(name));
+    const advancedProjection = advancedFields.map((name) => (
+      availableAdvancedFields.has(name) ? name : `'' AS ${name}`
+    )).join(', ');
+    const colRes = await this._run(null,
+      `SELECT name, type, default_expression, comment, is_in_primary_key, is_in_sorting_key,
+              ${advancedProjection}
+       FROM system.columns WHERE database = ${L(db)} AND table = ${L(table)} ORDER BY position`);
     const columns = colRes.rows.map((r) => {
       const defaultKind = String(r[6] || '').toUpperCase();
       const advanced = !advancedMetadataKnown || (!!defaultKind && defaultKind !== 'DEFAULT') || !!r[7] || !!r[8];

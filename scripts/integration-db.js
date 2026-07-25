@@ -345,7 +345,13 @@ async function tableMetadataCheck(adapter, type, database, tableName) {
   assert(typeof info.ddl === 'string', 'tableInfo did not return DDL text');
   const names = info.columns.map((column) => String(column.name).toLowerCase());
   assert(names.includes('id') && names.includes('note'), 'tableInfo did not return the test table columns');
-  assert(info.pk.some((name) => String(name).toLowerCase() === 'id'), 'tableInfo did not identify the test table primary key');
+  if (type === 'clickhouse') {
+    const idColumn = info.columns.find((column) => String(column.name).toLowerCase() === 'id');
+    assert(idColumn && idColumn.key === 'PRI', 'tableInfo did not identify the ClickHouse primary sorting key');
+    assert(info.pk.length === 0, 'ClickHouse sorting keys must not be exposed as unique editable row keys');
+  } else {
+    assert(info.pk.some((name) => String(name).toLowerCase() === 'id'), 'tableInfo did not identify the test table primary key');
+  }
 }
 
 async function exportCheck(adapter, type, database, tableName) {
