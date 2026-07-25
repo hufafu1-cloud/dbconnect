@@ -15,6 +15,7 @@ import * as actions from './actions.js';
 import { openQueryTab } from './queryTab.js';
 import { openTableTab } from './tableTab.js';
 import { statusbar } from './statusbar.js';
+import { loadPreferences, getPreferences, onPreferences, toggleFavorite } from './preferences.js';
 
 // ---------------- 工具栏（Navicat 风格大图标） ----------------
 function newQueryFromToolbar() {
@@ -32,6 +33,26 @@ async function openAiPanelFromToolbar() {
   const { openAiPanel } = await import('./aiPanel.js');
   const t = firstOpenTarget();
   openAiPanel(t || {});
+}
+
+async function openGlobalSearch() { (await import('./globalSearchDialog.js')).openGlobalSearchDialog(); }
+async function openSettings() { (await import('./settingsDialog.js')).openSettingsDialog(); }
+async function openTaskCenter() { (await import('./taskCenter.js')).openTaskCenter(); }
+
+function showFavorites(anchor) {
+  const favorites = getPreferences().favorites || [];
+  const recents = getPreferences().recents || [];
+  const r = anchor.getBoundingClientRect();
+  const openItem = (item) => async () => {
+    if (!state.open.has(item.target.connId)) await openConnectionById(item.target.connId);
+    if (!state.open.has(item.target.connId)) return;
+    await revealTarget(item.target).catch(() => false);
+    if (item.target.table) actions.openTable(item.target);
+  };
+  showMenu(r.left, r.bottom + 4, [
+    { label: '收藏', submenu: favorites.length ? favorites.map((item) => ({ label: item.title, hint: [item.target.db, item.target.schema].filter(Boolean).join(' · '), onClick: openItem(item) })) : [{ label: '暂无收藏。选中表后按 Ctrl+Alt+F 可收藏', disabled: true }] },
+    { label: '最近访问', submenu: recents.length ? recents.slice(0, 20).map((item) => ({ label: item.title, hint: [item.target.db, item.target.schema].filter(Boolean).join(' · '), onClick: openItem(item) })) : [{ label: '暂无最近访问', disabled: true }] },
+  ]);
 }
 
 function showConnMenu(anchor) {
@@ -174,6 +195,7 @@ function buildToolbar() {
   const btnConn = big('connection', '连接', () => showConnMenu(btnConn), '新建连接');
   btnConn.querySelector('span').append(el('span', { class: 'caret' }, ' ▾'));
   const btnQuery = big('query', '新建查询', newQueryFromToolbar);
+  const compactToolbar = !getPreferences().ui || getPreferences().ui.toolbar !== 'full';
 
   // 对象类型切换（Navicat 式：表/视图/函数/…）
   const kindDefs = [
@@ -204,17 +226,23 @@ function buildToolbar() {
   });
 
   const btnAi = big('ai', 'AI 助手', openAiPanelFromToolbar, 'AI 助手：优化 / 解释 / 生成 SQL');
+  const btnSearch = big('search', '搜索', openGlobalSearch, '全局对象搜索 (Ctrl+P)');
+  const btnFavorites = big('star', '收藏', () => showFavorites(btnFavorites), '收藏的连接和对象');
   const btnHistory = big('history', '历史', openHistory);
+  const btnTasks = big('monitor', '任务', openTaskCenter, '任务中心与通知');
   const btnTheme = big('theme', '主题', toggleTheme, '切换浅色/深色主题');
+  const btnSettings = big('settings', '设置', openSettings, '设置 (Ctrl+,)');
   const btnAbout = big('info', '关于', showAbout);
+  const btnObjects = big('objects', '对象', () => showObjectMenu(btnObjects), '切换对象类型');
 
   tb.append(
     btnConn, btnQuery,
     el('span', { class: 'toolbar-sep' }),
-    ...kindEls,
+    ...(compactToolbar ? [btnObjects] : kindEls),
     el('span', { class: 'toolbar-spring' }),
-    btnAi, btnHistory, btnTheme, btnAbout,
+    btnSearch, btnFavorites, btnAi, btnHistory, btnTasks, btnTheme, btnSettings, btnAbout,
   );
+  tb.classList.toggle('toolbar-compact', getPreferences().ui && getPreferences().ui.toolbar === 'compact');
 }
 
 // ---------------- 主题 ----------------
@@ -286,6 +314,7 @@ function setupShortcuts() {
     // SQL 编辑器内的按键交给 CodeMirror（F5 运行、Ctrl+F 编辑器内查找等）
     const inEditor = !!(t && t.closest && t.closest('.CodeMirror'));
     const inInput = inEditor || !!(t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable));
+    if (e.key === 'F1' && !e.ctrlKey && !e.altKey) { e.preventDefault(); openShortcutHelp(); return; }
     if (e.key === 'F5' && !e.ctrlKey && !e.shiftKey && !e.altKey) {
       if (!inEditor) { e.preventDefault(); runMenuAction('refresh'); }
       return;
@@ -293,6 +322,15 @@ function setupShortcuts() {
     if (e.ctrlKey && !e.altKey && e.key === 'Tab') {
       e.preventDefault();
       activateRelative(e.shiftKey ? -1 : 1);
+      return;
+    }
+    if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') { e.preventDefault(); openCommandPalette(); return; }
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') { e.preventDefault(); openGlobalSearch(); return; }
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === ',') { e.preventDefault(); openSettings(); return; }
+    if (e.ctrlKey && e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+      const active = getActiveTab(); const target = active && active.target;
+      if (target && target.connId) toggleFavorite(target, active.title).then((added) => toast.success(added ? '已加入收藏' : '已取消收藏'));
+      else toast.info('请先打开一个连接、数据库或表标签');
       return;
     }
     if (!e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -303,6 +341,42 @@ function setupShortcuts() {
     else if (k === 'd') { if (!inInput) { e.preventDefault(); runMenuAction('design-table'); } }
     else if (k === 'f') { if (!inEditor) { e.preventDefault(); runMenuAction('search'); } }
   });
+}
+
+async function openShortcutHelp() {
+  const { openModal } = await import('./toast.js');
+  const body = el('div', { style: { minWidth: '520px', lineHeight: '2' } },
+    el('div', { style: { color: 'var(--text-muted)', marginBottom: '7px' } }, '全局快捷键（输入框和 SQL 编辑器保留自身编辑行为）'),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+P'), el('span', {}, '全局对象搜索')),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+Shift+P'), el('span', {}, '命令面板')),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+Alt+F'), el('span', {}, '收藏 / 取消收藏当前标签')),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+Tab'), el('span', {}, '切换标签页；Ctrl+W 关闭标签')),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+,'), el('span', {}, '打开设置；F1 打开此帮助')),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+R / F5'), el('span', {}, '在查询页运行当前语句；Ctrl+Shift+R 运行选中 SQL')),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+Space'), el('span', {}, 'SQL 补全；Ctrl+F / Ctrl+H 在当前区域查找 / 替换')),
+    el('div', { class: 'settings-row' }, el('kbd', {}, 'Ctrl+S'), el('span', {}, '保存 SQL 或应用结果集 / 网格修改')),
+  );
+  openModal({ title: '快捷键帮助', body, buttons: [{ label: '关闭', primary: true }] });
+}
+
+function showObjectMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const defs = [['table', 'table', '表'], ['view', 'view', '视图'], ['routine', 'func', '函数'], ['trigger', 'trigger', '触发器'], ['event', 'eventIcon', '事件'], ['sequence', 'sequence', '序列'], ['user', 'user', '用户'], ['query', 'query', '查询']];
+  showMenu(r.left, r.bottom + 4, defs.map(([kind, icon, label]) => ({ label, icon, onClick: async () => { const { setObjectKind } = await import('./objectsTab.js'); const { activate } = await import('./tabs.js'); activate('objects'); await setObjectKind(kind); } })));
+}
+
+async function openCommandPalette() {
+  const { openModal } = await import('./toast.js');
+  const { el } = await import('./util.js');
+  const entries = [
+    ['新建查询', newQueryFromToolbar], ['全局对象搜索', openGlobalSearch], ['打开设置', openSettings],
+    ['任务中心', openTaskCenter], ['历史记录', openHistory], ['切换主题', toggleTheme], ['检查更新', () => checkForUpdates(true)],
+  ];
+  const input = el('input', { class: 'global-search-input', placeholder: '输入命令…', spellcheck: false });
+  const list = el('div', { class: 'global-search-list' }); let modal; let shown = entries;
+  const render = () => { const q = input.value.toLowerCase(); shown = entries.filter(([name]) => name.toLowerCase().includes(q)); list.innerHTML = ''; shown.forEach(([name, fn]) => list.append(el('button', { class: 'global-search-item', onClick: () => { modal.close(); fn(); } }, iconEl('objects'), el('span', {}, name), el('span', {}, '↵')))); };
+  input.oninput = render; input.onkeydown = (e) => { if (e.key === 'Enter' && shown[0]) { modal.close(); shown[0][1](); } };
+  modal = openModal({ title: '命令面板', body: el('div', { style: { minWidth: '480px' } }, input, list), buttons: [{ label: '关闭', primary: true }] }); render(); setTimeout(() => input.focus(), 20);
 }
 
 // ---------------- 原生菜单动作 ----------------
@@ -556,7 +630,15 @@ const pendingRestoreConnectionIds = new Set();
 async function boot() {
   window.__APP_READY = false;
   $('#app').classList.add('workspace-loading');
-  try { applyTheme(localStorage.getItem('dbc-theme') || 'light'); } catch (e) { /* ignore */ }
+  const preferences = await loadPreferences().catch(() => null);
+  try { applyTheme((preferences && preferences.ui && preferences.ui.theme) || localStorage.getItem('dbc-theme') || 'light'); } catch (e) { /* ignore */ }
+  if (preferences && preferences.ui) document.documentElement.dataset.density = preferences.ui.density || 'comfortable';
+  onPreferences((next) => {
+    if (next && next.ui) {
+      document.documentElement.dataset.density = next.ui.density || 'comfortable';
+      buildToolbar();
+    }
+  });
   const { buildMenuBar } = await import('./menubar.js');
   buildMenuBar(runMenuAction);
   buildToolbar();

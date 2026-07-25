@@ -17,6 +17,8 @@ function show(type, msg, ms) {
     el('span', {}, String(msg)));
   root().append(t);
   setTimeout(() => t.remove(), ms || (type === 'error' ? 9000 : 3500));
+  // Toast 会消失，任务中心保留一份可追溯记录；失败不影响原有提示。
+  import('./preferences.js').then(({ recordNotification }) => recordNotification(type, msg)).catch(() => {});
 }
 
 export const toast = {

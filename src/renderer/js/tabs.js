@@ -305,6 +305,7 @@ export async function closeTab(id, force) {
     if (allowed === false) return;
   }
   if (t.onClose) t.onClose();
+  if (t.target) import('./preferences.js').then(({ addRecent }) => addRecent(t.target, t.title)).catch(() => {});
   t.tabEl.remove();
   t.paneEl.remove();
   tabs.delete(id);
@@ -330,7 +331,8 @@ export function addTab(opts) {
   syncSeq(id);
 
   const titleEl = el('span', { class: 'tab-title' }, opts.title);
-  const tabEl = el('div', { class: 'tab', title: opts.tooltip || opts.title, onClick: () => activate(id) },
+  const tabEl = el('div', { class: 'tab' + (opts.pinned ? ' pinned' : ''), title: opts.tooltip || opts.title, draggable: !opts.permanent,
+    onClick: () => activate(id) },
     opts.color ? el('span', { class: 'tab-dot', style: { background: opts.color } }) : null,
     iconEl(opts.icon || 'table'),
     titleEl);
@@ -344,12 +346,20 @@ export function addTab(opts) {
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showMenu(e.clientX, e.clientY, [
+      { label: tabEl.classList.contains('pinned') ? '取消固定标签页' : '固定标签页', onClick: () => handle.setPinned(!tabEl.classList.contains('pinned')) },
+      { sep: true },
       !opts.permanent && { label: '关闭', hint: 'Ctrl+W', onClick: () => closeTab(id) },
       { label: '关闭其他标签页', onClick: () => closeOtherTabs(id) },
       { label: '关闭右侧标签页', onClick: () => closeTabsToRight(id) },
       { sep: true },
       { label: '关闭全部标签页', onClick: () => closeAllTabs() },
     ].filter(Boolean));
+  });
+  tabEl.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; });
+  tabEl.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+  tabEl.addEventListener('drop', (e) => {
+    e.preventDefault(); const from = e.dataTransfer.getData('text/plain'); if (!from || from === id || !workspaceOrder.includes(from)) return;
+    workspaceOrder.splice(workspaceOrder.indexOf(from), 1); workspaceOrder.splice(workspaceOrder.indexOf(id), 0, from); reorderWorkspaceDom(); scheduleWorkspacePersist();
   });
 
   const paneEl = el('div', { class: 'tabpane' });
@@ -359,7 +369,7 @@ export function addTab(opts) {
   const rec = {
     id, tabEl, paneEl, title: opts.title,
     target: opts.target && typeof opts.target === 'object' ? { ...opts.target } : null,
-    permanent: opts.permanent, onShow: opts.onShow, beforeClose: opts.beforeClose, onClose: opts.onClose, isDirty: opts.isDirty,
+    permanent: opts.permanent, pinned: !!opts.pinned, onShow: opts.onShow, beforeClose: opts.beforeClose, onClose: opts.onClose, isDirty: opts.isDirty,
     recovery: recoveryFor(opts.recovery || opts.workspace),
   };
   const handle = {
@@ -369,6 +379,7 @@ export function addTab(opts) {
     deferredWorkspaceEntry,
     setTitle(t) { rec.title = t; titleEl.textContent = t; tabEl.title = t; scheduleWorkspacePersist(); },
     setDirty(d) { tabEl.classList.toggle('dirty', !!d); scheduleWorkspacePersist(); },
+    setPinned(pinned) { rec.pinned = !!pinned; tabEl.classList.toggle('pinned', rec.pinned); scheduleWorkspacePersist(); },
     setOnShow(fn) { rec.onShow = fn; },
     setBeforeClose(fn) { rec.beforeClose = fn; },
     setIsDirty(fn) { rec.isDirty = fn; },

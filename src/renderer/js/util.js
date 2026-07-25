@@ -160,6 +160,9 @@ export const icons = {
     <circle cx="8" cy="2.1" r="1.05" fill="#4b57d6"/>
     <circle cx="6.1" cy="8.6" r="1.05" fill="#4b57d6"/><circle cx="9.9" cy="8.6" r="1.05" fill="#4b57d6"/>
     <path d="M1.6 8v2M14.4 8v2" stroke="#4b57d6" stroke-width="1.4" stroke-linecap="round"/>`),
+  search: svg(`<circle cx="7" cy="7" r="4.5" stroke="#2b7de9" stroke-width="1.5"/><path d="m10.4 10.4 3.2 3.2" stroke="#2b7de9" stroke-width="1.6" stroke-linecap="round"/>`),
+  star: svg(`<path d="m8 1.8 1.85 3.75 4.15.6-3 2.92.7 4.13L8 11.34l-3.7 1.94.7-4.13-3-2.92 4.15-.6L8 1.8z" stroke="#d97706" stroke-width="1.25" fill="none" stroke-linejoin="round"/>`),
+  settings: svg(`<circle cx="8" cy="8" r="2.15" stroke="#5b6470" stroke-width="1.45"/><path d="M8 1.9v1.5M8 12.6v1.5M14.1 8h-1.5M3.4 8H1.9M12.3 3.7l-1.05 1.05M4.75 11.25 3.7 12.3M12.3 12.3l-1.05-1.05M4.75 4.75 3.7 3.7" stroke="#5b6470" stroke-width="1.45" stroke-linecap="round"/>`),
 };
 
 export function iconEl(name, cls) {

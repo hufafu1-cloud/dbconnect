@@ -1,7 +1,7 @@
 // 数据网格：展示 + 选择 + 单元格编辑（增/改/删跟踪）
 import { el, renderCellValue, cellText } from './util.js';
 import { showMenu } from './contextmenu.js';
-import { cellViewer, toast } from './toast.js';
+import { cellViewer, toast, openModal } from './toast.js';
 
 const NUM_RE = /int|decimal|numeric|float|double|real|money|number/i;
 
@@ -61,6 +61,7 @@ export class DataGrid {
     this.pk = [];
     this.sort = { col: null, dir: null };
     this.colWidths = {};
+    this.hiddenColumns = new Set();
     this.clearPending();
     this.selection = new Set();
     this.lastSel = null;
@@ -73,6 +74,7 @@ export class DataGrid {
       this._removeEditor(false);
     });
     this.wrap.addEventListener('keydown', (e) => this._onKeyDown(e));
+    this.wrap.addEventListener('paste', (e) => this._onPaste(e));
   }
 
   get editable() { return !!this.opts.editable && this.pk.length > 0; }
@@ -102,6 +104,32 @@ export class DataGrid {
 
   setSort(col, dir) { this.sort = { col, dir }; }
 
+  resetColumnWidths() { this.colWidths = {}; this.render(); }
+  autoFitColumns() {
+    this.columns.forEach((col, i) => {
+      let longest = String(col.name || '').length;
+      for (let r = 0; r < Math.min(this.rows.length, 300); r++) longest = Math.max(longest, cellText(this._currentVal(r, i, false)).length);
+      this.colWidths[i] = Math.min(Math.max(longest * 8 + 34, 90), 420);
+    });
+    this.render();
+  }
+  setColumnVisible(index, visible) {
+    if (visible) this.hiddenColumns.delete(index); else this.hiddenColumns.add(index);
+    for (const node of this.wrap.querySelectorAll(`[data-col="${index}"]`)) node.classList.toggle('column-hidden', !visible);
+  }
+  openColumnManager() {
+    const form = el('div', { style: { minWidth: '360px', maxHeight: '410px', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '5px' } });
+    this.columns.forEach((col, index) => {
+      const check = el('input', { type: 'checkbox', checked: !this.hiddenColumns.has(index) });
+      check.addEventListener('change', () => this.setColumnVisible(index, check.checked));
+      form.append(el('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 2px' } }, check, el('span', {}, col.name), el('small', { style: { color: 'var(--text-muted)' } }, col.type || '')));
+    });
+    openModal({ title: '列管理', body: form, buttons: [
+      { label: '显示全部', onClick: () => { this.columns.forEach((_c, i) => this.setColumnVisible(i, true)); return false; } },
+      { label: '关闭', primary: true },
+    ] });
+  }
+
   // ---------- 渲染 ----------
   render() {
     this._removeEditor(false);
@@ -115,7 +143,7 @@ export class DataGrid {
     colgroup.append(el('col', { style: { width: '46px' } }));
     this.columns.forEach((c, i) => {
       const w = this.colWidths[i] || Math.min(Math.max(c.name.length * 10 + 36, 90), 280);
-      colgroup.append(el('col', { style: { width: w + 'px' } }));
+      colgroup.append(el('col', { 'data-col': i, class: this.hiddenColumns.has(i) ? 'column-hidden' : '', style: { width: w + 'px' } }));
     });
     table.append(colgroup);
 
@@ -131,7 +159,7 @@ export class DataGrid {
       const headerTip = c.comment
         ? String(c.comment)
         : (c.type ? `${c.name} : ${c.type}` : c.name);
-      const th = el('th', { title: headerTip }, inner);
+      const th = el('th', { title: headerTip, 'data-col': i, class: this.hiddenColumns.has(i) ? 'column-hidden' : '' }, inner);
       if (this.opts.onSort) {
         th.addEventListener('click', (e) => {
           if (e.target.classList.contains('col-resizer')) return;
@@ -256,6 +284,13 @@ export class DataGrid {
       const v = this._currentVal(r, f.c, isNew);
       navigator.clipboard.writeText(cellText(v === undefined ? null : v));
       toast.success('已复制单元格');
+    } else if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'v' && !e.shiftKey && !e.altKey) {
+      // 浏览器权限策略下 clipboard.readText 可能不可用，paste 事件仍会兜底。
+      navigator.clipboard.readText().then((text) => this._pasteText(text)).catch(() => {});
+    } else if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'f' && !e.shiftKey && !e.altKey) {
+      e.preventDefault(); this.openFindReplace(false);
+    } else if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'h' && !e.shiftKey && !e.altKey) {
+      e.preventDefault(); this.openFindReplace(true);
     } else if (!e.ctrlKey && !e.altKey && !e.metaKey && key.length === 1) {
       // 直接输入进入编辑（输入字符作为起始内容），Navicat/Excel 习惯
       const { r, isNew } = this._fromDisplay(f.dr);
@@ -265,6 +300,52 @@ export class DataGrid {
         if (td) this._beginEdit(td, r, f.c, isNew, key);
       }
     }
+  }
+
+  _onPaste(e) {
+    if (!this.editable || !this.focus || this._editor) return;
+    const text = e.clipboardData && e.clipboardData.getData('text/plain');
+    if (!text) return;
+    e.preventDefault(); this._pasteText(text);
+  }
+
+  _pasteText(text) {
+    if (!this.editable || !this.focus || !String(text).length) return;
+    const data = String(text).replace(/\r/g, '').split('\n').filter((line, idx, arr) => line !== '' || idx < arr.length - 1).map((line) => line.split('\t'));
+    if (!data.length) return;
+    let changed = 0;
+    for (let rr = 0; rr < data.length; rr++) {
+      const dr = this.focus.dr + rr;
+      if (dr >= this.rows.length) break; // 批量粘贴只更新已有记录，避免意外新增
+      for (let cc = 0; cc < data[rr].length; cc++) {
+        const c = this.focus.c + cc; if (c >= this.columns.length) break;
+        const td = this._tdAt(dr, c); this._setCell(dr, c, data[rr][cc], false, td); changed++;
+      }
+    }
+    if (changed) toast.success(`已粘贴 ${changed} 个单元格，尚未提交`);
+  }
+
+  openFindReplace(withReplace = false) {
+    const find = el('input', { type: 'text', placeholder: '查找内容', style: { width: '260px' } });
+    const replace = el('input', { type: 'text', placeholder: '替换为', style: { width: '260px', display: withReplace ? '' : 'none' } });
+    const status = el('div', { style: { color: 'var(--text-muted)', minHeight: '18px' } }, '在当前结果页的可见数据中查找');
+    const runFind = (apply) => {
+      const q = find.value; if (!q) return;
+      let matches = 0; let first = null;
+      for (let r = 0; r < this.rows.length; r++) for (let c = 0; c < this.columns.length; c++) {
+        const old = this._currentVal(r, c, false); if (old == null || !String(old).includes(q)) continue;
+        matches++; if (!first) first = { r, c };
+        if (apply && this.editable) this._setCell(r, c, String(old).split(q).join(replace.value), false, this._tdAt(r, c));
+      }
+      if (first) { this._setFocus(first.r, first.c); this.wrap.focus(); }
+      status.textContent = apply ? `已替换 ${matches} 处，尚未提交` : `找到 ${matches} 处`;
+    };
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', minWidth: '340px' } }, find, replace, status);
+    openModal({ title: withReplace ? '查找并替换' : '查找数据', body, buttons: [
+      { label: '查找下一个', onClick: () => { runFind(false); return false; } },
+      withReplace && { label: '全部替换', primary: true, onClick: () => { if (!this.editable) { toast.info('当前结果只读，不能替换'); return false; } runFind(true); return false; } },
+      { label: '关闭' },
+    ].filter(Boolean) }); setTimeout(() => find.focus(), 30);
   }
 
   _renderRow(values, r, isNew) {
@@ -282,7 +363,7 @@ export class DataGrid {
       e.preventDefault();
       const td = e.target.closest('td');
       if (!td || td.classList.contains('rownum')) return;
-      const ci = [...td.parentNode.children].indexOf(td) - 1;
+      const ci = Number(td.dataset.c);
       this._cellMenu(e, r, ci, isNew);
     });
     return tr;
@@ -292,7 +373,7 @@ export class DataGrid {
     const edited = !isNew && this.cellEdits.get(r) && this.cellEdits.get(r).has(i);
     const v = edited ? this.cellEdits.get(r).get(i)
       : (isNew ? values[i] : values[i]);
-    const td = el('td', { 'data-c': i });
+    const td = el('td', { 'data-c': i, 'data-col': i, class: this.hiddenColumns.has(i) ? 'column-hidden' : '' });
     if (this.columns[i].type && NUM_RE.test(this.columns[i].type)) td.classList.add('cell-num');
     if (edited || (isNew && v !== undefined)) td.classList.add('cell-modified');
     td.innerHTML = isNew && v === undefined ? '<span class="v-null"></span>' : renderCellValue(v === undefined ? null : v);
@@ -490,6 +571,9 @@ export class DataGrid {
         label: `跳转到 ${fk.refTable}（${fk.refColumn} = ${cellText(v).slice(0, 20)}）`,
         icon: 'link',
         onClick: () => this.opts.onJumpFk(fk, v),
+      },
+      fk && canEdit && this.opts.onPickFk && {
+        label: `选择 ${fk.refTable} 的关联值…`, icon: 'link', onClick: () => this.opts.onPickFk(fk, { row: r, column: i, isNew, td }),
       },
       { label: '复制单元格', icon: 'copy', onClick: () => { navigator.clipboard.writeText(cellText(v)); } },
       { sep: true },

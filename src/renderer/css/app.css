@@ -1127,3 +1127,27 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .sql-file-log:focus {
   border-color: var(--accent);
 }
+
+/* v2.6.0 工作台：设置、搜索、任务和紧凑工具栏 */
+html[data-density="compact"] .tree-row, html[data-density="compact"] .grid td, html[data-density="compact"] .grid th { min-height: 24px; height: 24px; }
+.toolbar-compact .tbtn-big { min-width: 52px; padding-left: 7px; padding-right: 7px; }
+.toolbar-compact .tbtn-big > span:last-child { font-size: 11px; }
+.global-search-input { width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--accent); border-radius: 6px; outline: none; background: var(--panel); color: var(--text); }
+.global-search-list { margin-top: 9px; max-height: 390px; overflow: auto; border: 1px solid var(--border-light); border-radius: 6px; }
+.global-search-item { width: 100%; box-sizing: border-box; display: grid; grid-template-columns: 22px 1fr auto; gap: 7px; text-align: left; align-items: center; border: 0; border-bottom: 1px solid var(--border-light); background: var(--panel); color: var(--text); padding: 8px 10px; cursor: pointer; }
+.global-search-item:hover, .global-search-item.active { background: var(--accent-light); }
+.global-search-item small { display: block; margin-top: 2px; color: var(--text-muted); }
+.global-search-empty { padding: 28px; text-align: center; color: var(--text-muted); }
+.settings-form { display: grid; gap: 13px; min-width: 480px; }
+.settings-section { border: 1px solid var(--border-light); border-radius: 7px; padding: 10px 12px; }
+.settings-section h4 { margin: 0 0 8px; font-size: 13px; }
+.settings-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 30px; font-size: 12.5px; }
+.settings-row select, .settings-row input { max-width: 260px; }
+.task-center-list { min-width: 500px; max-height: 420px; overflow: auto; }
+.task-item { border-left: 3px solid var(--accent); border-bottom: 1px solid var(--border-light); padding: 9px 11px; }
+.task-item.error { border-left-color: var(--danger); }.task-item.success { border-left-color: var(--green); }
+.task-item-main { font-size: 13px; }.task-item-detail, .task-item-time { margin-top: 3px; color: var(--text-muted); font-size: 11.5px; }.task-item-detail { white-space: pre-wrap; }
+.grid .column-hidden { display: none; }
+.tab.pinned .tab-close { display: none; }.tab.pinned::after { content: '●'; font-size: 7px; color: var(--accent); margin-left: 4px; }
+.query-snippet-menu { min-width: 260px; }
+.param-row { display: grid; grid-template-columns: 150px 1fr; gap: 9px; align-items: center; margin-bottom: 8px; }
