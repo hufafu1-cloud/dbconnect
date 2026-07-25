@@ -7,7 +7,6 @@ import { toast, promptDialog, openModal } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { showMenu } from './contextmenu.js';
 import { openEditorSearch, closeEditorSearch, editorSearchNext } from './editorSearch.js';
-import { getPreferences, patchPreferences } from './preferences.js';
 
 const CM_MODES = { mysql: 'text/x-mysql', postgres: 'text/x-pgsql', mssql: 'text/x-mssql', sqlite: 'text/x-sqlite', clickhouse: 'text/x-mysql', oceanbase: 'text/x-mysql', oboracle: 'text/x-plsql' };
 let queryNo = 0;
@@ -26,7 +25,6 @@ const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING
 const ID_CHARS = "[\\w$\\u4e00-\\u9fa5]";
 
 export function openQueryTab(target, initialSql, opts) {
-  const editorPrefs = getPreferences().editor || {};
   const restoreState = (opts && opts.restoreState) || null;
   const restoredTarget = restoreState && restoreState.target;
   const initialText = restoreState && typeof restoreState.sql === 'string'
@@ -45,7 +43,6 @@ export function openQueryTab(target, initialSql, opts) {
   let db = (restoredTarget && restoredTarget.db) || (target && target.db);
   let schema = (restoredTarget && restoredTarget.schema) || (target && target.schema) || null;
   let dbUnavailable = false;
-  if (connId) import('./preferences.js').then(({ addRecent }) => addRecent({ connId, db, schema, kind: 'query' }, initialTitle)).catch(() => {});
   // fileAccess 授权只在当前主进程有效；重启恢复的文件查询必须降级为独立草稿。
   let savedPath = null;
   // 模板/右键生成的 initialSql 是未保存草稿；只有已保存查询才以 initialText 为干净基线。
@@ -277,8 +274,8 @@ export function openQueryTab(target, initialSql, opts) {
     el('option', { value: '10000' }, '10000 行'));
   if (restoreState && ['200', '2000', '10000'].includes(String(restoreState.maxRows))) {
     maxRowsSel.value = String(restoreState.maxRows);
-  } else if (['200', '2000', '10000'].includes(String(editorPrefs.maxRows))) maxRowsSel.value = String(editorPrefs.maxRows);
-  maxRowsSel.addEventListener('change', () => { touchRecovery(); patchPreferences({ editor: { maxRows: Number(maxRowsSel.value) } }).catch(() => {}); });
+  }
+  maxRowsSel.addEventListener('change', () => touchRecovery());
 
   const mkBtn = (icon, label, onClick, cls) =>
     el('button', { class: 'pbtn' + (cls ? ' ' + cls : ''), onClick }, iconEl(icon), label);
@@ -313,7 +310,6 @@ export function openQueryTab(target, initialSql, opts) {
   }, el('span', { class: 'transaction-label' }, '事务'), btnTxBegin, btnTxCommit, btnTxRollback, txStatus);
 
   const btnAi = mkBtn('ai', 'AI ▾', () => showAiMenu(btnAi));
-  const btnSnippet = mkBtn('objects', '片段 ▾', () => showSnippetMenu(btnSnippet));
   const btnOpenFile = mkBtn('openFile', '打开 ▾', () => showFileMenu(btnOpenFile));
 
   function showFileMenu(anchor) {
@@ -356,35 +352,6 @@ export function openQueryTab(target, initialSql, opts) {
     ]);
   }
 
-  function showSnippetMenu(anchor) {
-    const r = anchor.getBoundingClientRect();
-    const snippets = getPreferences().snippets || [];
-    showMenu(r.left, r.bottom + 4, [
-      ...snippets.map((item) => ({ label: item.name, hint: '插入', onClick: () => insertSnippet(item) })),
-      { sep: true },
-      { label: '管理 SQL 片段…', icon: 'settings', onClick: () => manageSnippets() },
-    ]);
-  }
-  function insertSnippet(item) {
-    const source = String(item.sql || '');
-    const vars = [...source.matchAll(/\$\{([A-Za-z_]\w*)(?::([^}]*))?\}/g)];
-    if (!vars.length) { cm.replaceSelection(source); cm.focus(); return; }
-    promptSnippetVariables(vars, source).then((text) => { if (text != null) { cm.replaceSelection(text); cm.focus(); } });
-  }
-  async function promptSnippetVariables(vars, source) {
-    const unique = [...new Map(vars.map((m) => [m[1], m[2] || ''])).entries()];
-    const values = {};
-    for (const [name, initial] of unique) { const v = await promptDialog('SQL 片段参数', `${name}:`, initial); if (v == null) return null; values[name] = v; }
-    return source.replace(/\$\{([A-Za-z_]\w*)(?::[^}]*)?\}/g, (_m, name) => values[name] == null ? '' : values[name]);
-  }
-  async function manageSnippets() {
-    const current = (getPreferences().snippets || []).map((x) => ({ ...x }));
-    const textarea = el('textarea', { class: 'generated-sql-editor', value: JSON.stringify(current, null, 2), style: { minHeight: '300px' } });
-    openModal({ title: '管理 SQL 片段', body: el('div', {}, el('div', { class: 'generated-sql-label' }, 'JSON 数组；每项包含 name、sql，可用 ${变量:默认值} 占位。'), textarea), width: 680, buttons: [
-      { label: '取消' }, { label: '保存', primary: true, onClick: async () => { let value; try { value = JSON.parse(textarea.value); if (!Array.isArray(value)) throw new Error('必须是数组'); } catch (e) { toast.error('片段格式无效：' + e.message); return false; } await patchPreferences({ snippets: value.slice(0, 100) }); toast.success('SQL 片段已保存'); } },
-    ] });
-  }
-
   async function aiAssist(action) {
     const { openAiPanel } = await import('./aiPanel.js');
     let sql = (cm.getSelection() || cm.getValue()).trim().replace(/;\s*$/, '');
@@ -403,7 +370,7 @@ export function openQueryTab(target, initialSql, opts) {
       el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '数据库:'), dbSel,
       schemaLabel, schemaSel, schemaBadge),
     el('span', { class: 'sep' }),
-    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '工具'), mkBtn('explain', '解释', explainSql), mkBtn('format', '美化', formatSql), btnSnippet, btnAi),
+    el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '工具'), mkBtn('explain', '解释', explainSql), mkBtn('format', '美化', formatSql), btnAi),
     el('div', { class: 'query-toolbar-group' }, el('span', { class: 'query-toolbar-label' }, '文件'), btnOpenFile, mkBtn('save', '保存', () => saveQuery()), mkBtn('exportIcon', '另存文件', () => saveAsFile())),
     el('span', { class: 'sep' }),
     maxRowsSel,
@@ -462,11 +429,10 @@ export function openQueryTab(target, initialSql, opts) {
     lineNumbers: true,
     indentWithTabs: false,
     indentUnit: 2,
-    tabSize: Number(editorPrefs.tabSize) || 2,
+    tabSize: 2,
     matchBrackets: true,
     autoCloseBrackets: true,
     styleActiveLine: true,
-    lineWrapping: !!editorPrefs.lineWrapping,
     extraKeys: {
       'F5': () => run('current'),
       'Ctrl-Enter': () => run('current'),
@@ -872,10 +838,8 @@ export function openQueryTab(target, initialSql, opts) {
     if (!(await finishResultEditsBefore('重新执行查询'))) return;
     if (!connId || !state.open.has(connId)) { toast.info('请先打开一个连接'); return; }
     if (dbUnavailable) { toast.info('保存的数据库当前不可用，请先明确选择新的数据库'); return; }
-    let sql = await sqlForRunMode(mode);
+    const sql = await sqlForRunMode(mode);
     if (!sql.trim()) { toast.info('没有可执行的 SQL'); return; }
-    sql = await bindQueryParameters(sql);
-    if (sql == null) return;
     const queryConnId = connId;
     const requestId = uid('query-request');
     const queryPayload = {
@@ -995,17 +959,6 @@ export function openQueryTab(target, initialSql, opts) {
       await refreshTransactionSupport(true);
       syncTransactionUi();
     }
-  }
-
-  async function bindQueryParameters(sql) {
-    // 支持 :name 参数；跳过 PostgreSQL 类型转换 :: 和字符串内的冒号。
-    const names = []; const seen = new Set();
-    const cleaned = String(sql).replace(/'(?:''|[^'])*'/g, '').replace(/::[A-Za-z_][\w]*/g, '');
-    for (const match of cleaned.matchAll(/(^|[^:]):([A-Za-z_][\w]*)\b/g)) if (!seen.has(match[2])) { seen.add(match[2]); names.push(match[2]); }
-    if (!names.length) return sql;
-    const values = {};
-    for (const name of names) { const value = await promptDialog('查询参数', `${name}（直接输入 SQL 值，如 '张三'、123、NULL）:`, ''); if (value == null) return null; values[name] = value; }
-    return sql.replace(/(^|[^:]):([A-Za-z_][\w]*)\b/g, (m, before, name) => Object.prototype.hasOwnProperty.call(values, name) ? before + values[name] : m);
   }
 
   async function openFile() {

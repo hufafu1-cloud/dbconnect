@@ -3,17 +3,14 @@ import { el, iconEl, fmtCount } from './util.js';
 import { connLabel, connColor, state, setActiveTarget } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
-import { showMenu } from './contextmenu.js';
-import { toast, confirmDialog, openModal } from './toast.js';
+import { toast, confirmDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { authorizeOperation } from './danger.js';
-import { addRecent } from './preferences.js';
 
 const PAGE_SIZES = [100, 500, 1000];
 
 export function openTableTab(target, openOpts) {
   setActiveTarget(target, 'table-tab');
-  addRecent(target, target.table).catch(() => {});
   const restored = openOpts && openOpts.restoreState;
   const tabId = (openOpts && openOpts.restoreId) || `table:${target.connId}|${target.db}|${target.schema || ''}|${target.table}`;
   const tab = addTab({ id: tabId, title: target.table, icon: 'table', color: connColor(target.connId), target: { ...target }, tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}` });
@@ -60,7 +57,6 @@ export function openTableTab(target, openOpts) {
       const cond = `${qi(fk.refColumn)} = ${numOrLit(value)}`;
       openTableTab({ connId: target.connId, db: target.db, schema: fk.refSchema || target.schema, table: fk.refTable }, { initialWhere: cond });
     },
-    onPickFk: (fk, cell) => openForeignKeyPicker(fk, cell),
   });
 
   const mkBtn = (icon, label, onClick, extra) =>
@@ -71,43 +67,10 @@ export function openTableTab(target, openOpts) {
   const btnAdd = mkBtn('plus', '添加行', () => { if (canEdit()) grid.addNewRow(); });
   const btnDel = mkBtn('minus', '删除行', () => { if (canEdit()) { grid.deleteSelected(); updateDirty(); } });
   const btnView = mkBtn('objects', '表单视图', () => toggleView());
-  const btnColumns = mkBtn('objects', '列 ▾', (e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    showMenu(r.left, r.bottom + 4, [
-      { label: '按内容自动调整列宽', onClick: () => grid.autoFitColumns() },
-      { label: '显示 / 隐藏列…', onClick: () => grid.openColumnManager() },
-      { label: '恢复默认列宽', onClick: () => grid.resetColumnWidths() },
-      { sep: true },
-      { label: '提示：拖动表头分隔线可调整单列宽度', disabled: true },
-    ]);
-  });
-  const btnFind = mkBtn('search', '查找', () => grid.openFindReplace(false));
 
   function canEdit() {
     if (readonly) { toast.info(roBadge.textContent || '该表没有主键，数据为只读'); return false; }
     return true;
-  }
-
-  async function openForeignKeyPicker(fk, cell) {
-    const title = `选择关联值 · ${fk.refSchema ? fk.refSchema + '.' : ''}${fk.refTable}.${fk.refColumn}`;
-    const host = el('div', { style: { minWidth: '540px', minHeight: '160px' } }, el('div', { style: { color: 'var(--text-muted)' } }, '正在读取关联表前 100 条记录…'));
-    let modal; let data = null;
-    const pick = (value) => { grid._setCell(cell.row, cell.column, value, cell.isNew, cell.td); modal.close(); };
-    modal = openModal({ title, body: host, buttons: [{ label: '设为 NULL', onClick: () => pick(null) }, { label: '取消', primary: true }] });
-    try {
-      data = await window.api.db.tableData(target.connId, { db: target.db, schema: fk.refSchema || target.schema, table: fk.refTable, page: 1, pageSize: 100, where: '', orderBy: fk.refColumn, orderDir: 'asc' });
-      const idx = data.columns.findIndex((c) => c.name === fk.refColumn);
-      if (idx < 0) throw new Error(`关联列 ${fk.refColumn} 不存在`);
-      const filter = el('input', { type: 'text', placeholder: `筛选 ${fk.refColumn}（仅当前 100 条）`, style: { width: '100%', marginBottom: '7px' } });
-      const list = el('div', { class: 'global-search-list', style: { maxHeight: '310px' } });
-      const render = () => {
-        const q = filter.value.toLowerCase(); list.innerHTML = '';
-        const rows = data.rows.filter((row) => !q || String(row[idx] == null ? '' : row[idx]).toLowerCase().includes(q));
-        if (!rows.length) list.append(el('div', { class: 'global-search-empty' }, '无匹配值'));
-        rows.forEach((row) => list.append(el('button', { class: 'global-search-item', onClick: () => pick(row[idx]) }, iconEl('link'), el('span', {}, String(row[idx] == null ? 'NULL' : row[idx]), el('small', {}, row.map((v) => String(v == null ? '' : v)).join(' · ').slice(0, 180))), el('span', {}, '选择'))));
-      };
-      filter.addEventListener('input', render); host.innerHTML = ''; host.append(filter, list); render(); filter.focus();
-    } catch (e) { host.innerHTML = ''; host.append(el('div', { style: { color: 'var(--danger)' } }, '读取关联数据失败：' + e.message)); }
   }
 
   const toolbar = el('div', { class: 'pane-toolbar' },
@@ -117,7 +80,7 @@ export function openTableTab(target, openOpts) {
     el('span', { class: 'sep' }),
     btnAdd, btnDel, btnApply, btnDiscard,
     el('span', { class: 'sep' }),
-    btnView, btnFind, btnColumns,
+    btnView,
     mkBtn('importIcon', '导入', async () => {
       const { openImportWizard } = await import('./importWizard.js');
       openImportWizard(target);

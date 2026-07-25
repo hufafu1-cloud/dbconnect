@@ -150,11 +150,6 @@ contextBridge.exposeInMainWorld('api', {
     write: (snapshot) => inv('workspace:write', snapshot),
     clear: () => inv('workspace:clear'),
   },
-  preferences: {
-    read: () => inv('preferences:read'),
-    patch: (delta) => inv('preferences:patch', delta),
-    reset: () => inv('preferences:reset'),
-  },
   app: {
     info: () => inv('app:info'),
     ackClose: (id) => ipcRenderer.send('app:close-ack', id),

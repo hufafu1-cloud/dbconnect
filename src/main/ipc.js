@@ -15,7 +15,6 @@ const safety = require('./safety');
 const fileAccess = require('./fileAccess');
 const sshHostKeys = require('./sshHostKeys');
 const workspaceStore = require('./workspaceStore');
-const preferences = require('./preferences');
 const { parseNcxBuffer, targetLabel, MAX_FILE_BYTES } = require('./navicatNcx');
 const connectionLocks = new Map();
 const navicatImportSessions = new Map();
@@ -843,10 +842,6 @@ function register(getWin) {
   });
 
   // ---- 工作区崩溃恢复（固定 userData 路径、原子写入，不接受任意文件路径） ----
-  // ---- 用户偏好 / 收藏 / 任务通知（不保存任何连接口令） ----
-  h('preferences:read', () => preferences.load());
-  h('preferences:patch', (delta) => preferences.patch(delta || {}));
-  h('preferences:reset', () => preferences.reset());
   h('workspace:read', () => workspaceStore.read());
   h('workspace:write', (snapshot) => workspaceStore.write(snapshot));
   h('workspace:clear', () => workspaceStore.clear());
