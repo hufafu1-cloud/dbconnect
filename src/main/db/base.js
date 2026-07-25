@@ -133,6 +133,12 @@ class BaseAdapter {
     throw new Error('该数据库不支持查看此对象的定义');
   }
 
+  /** View definition; SHOW CREATE based adapters can reuse tableInfo().ddl. */
+  async viewDdl(db, schema, view, info) {
+    const metadata = info || await this.tableInfo(db, schema, view);
+    return metadata && metadata.ddl || '';
+  }
+
   /** 取消正在执行的查询；默认不支持 */
   async cancel(_requestId) { throw new Error('该数据库类型不支持取消查询'); }
 

@@ -306,7 +306,10 @@ class ClickHouseAdapter extends BaseAdapter {
         nullable: /^\s*Nullable\(/i.test(String(r[1] || '')),
         def: r[2] || null,
         key: r[4] ? 'PRI' : '',
-        extra: r[5] && !r[4] ? 'sorting key' : '',
+        extra: [
+          r[5] && !r[4] ? 'sorting key' : '',
+          defaultKind && defaultKind !== 'DEFAULT' ? defaultKind.toLowerCase() : '',
+        ].filter(Boolean).join(' '),
         comment: r[3] || '',
         editSafe: !advanced,
         editUnsafeReason: advanced ? 'ClickHouse MATERIALIZED/ALIAS、CODEC 或 TTL 栏位不能由设计器无损修改' : '',

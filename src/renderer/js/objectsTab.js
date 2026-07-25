@@ -438,6 +438,7 @@ function rowMenu(e, it) {
     showMenu(mx, my, [
       { label: isView ? '打开视图' : '打开表', icon: 'table', onClick: () => actions.openTable(t) },
       { label: isView ? '查看定义' : '设计表', icon: 'struct', onClick: () => actions.designTable(t, isView) },
+      { label: '生成 SQL', icon: 'query', submenu: actions.generatedSqlSubmenu(t, isView) },
       { sep: true },
       !isView && { label: '导入向导…', icon: 'importIcon', onClick: () => actions.importTable(t) },
       !isView && { label: '转储 SQL 文件', icon: 'exportIcon', submenu: [

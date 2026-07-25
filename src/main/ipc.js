@@ -9,6 +9,7 @@ const dbm = require('./db');
 const ddl = require('./db/ddl');
 const importer = require('./importer');
 const exporter = require('./exporter');
+const { generateTableSql } = require('./sqlGenerator');
 const history = require('./history');
 const safety = require('./safety');
 const fileAccess = require('./fileAccess');
@@ -419,6 +420,7 @@ function register(getWin) {
   h('db:schemas', (a) => dbm.get(a.connId).listSchemas(a.db));
   h('db:objects', (a) => dbm.get(a.connId).listObjects(a.db, a.schema));
   h('db:tableInfo', (a) => dbm.get(a.connId).tableInfo(a.db, a.schema, a.table));
+  h('db:generateTableSql', (a) => generateTableSql(dbm.get(a.connId), a));
   h('db:tableData', (a) => {
     safety.assertWhereFragment(a.where);
     return dbm.get(a.connId).tableData(a.db, a);

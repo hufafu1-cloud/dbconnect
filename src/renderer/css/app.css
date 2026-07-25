@@ -1013,3 +1013,73 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   border-radius: 6px; font-size: 13px; outline: none; background: var(--panel); color: var(--text);
 }
 .danger-confirm-input:focus { border-color: #e5484d; }
+.generated-sql-dialog {
+  display: flex;
+  flex-direction: column;
+  min-height: 500px;
+}
+
+.generated-sql-label {
+  margin-bottom: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.generated-sql-editor {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 390px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px 14px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.65 var(--mono);
+  tab-size: 2;
+  outline: none;
+  white-space: pre;
+}
+
+.generated-sql-editor:focus {
+  border-color: var(--accent);
+}
+
+.generated-sql-status {
+  min-height: 18px;
+  margin-top: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.generated-sql-status.error {
+  color: var(--danger);
+}
+
+.generated-sql-warnings {
+  min-height: 18px;
+  color: var(--orange);
+  font-size: 12px;
+}
+
+.generated-sql-settings-label {
+  margin-top: 8px;
+}
+
+.generated-sql-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+}
+
+.generated-sql-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+  user-select: none;
+}
+
+.generated-sql-option input {
+  margin: 0;
+}

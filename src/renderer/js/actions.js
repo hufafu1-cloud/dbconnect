@@ -50,6 +50,39 @@ export function newQuery(target, initialSql) {
   openQueryTab(target, initialSql);
 }
 
+export async function openGeneratedSql(target, kind, isView = false) {
+  if (!target || !target.connId || !target.table || !state.open.has(target.connId)) {
+    toast.info('请先打开连接并选择一张表');
+    return;
+  }
+  const { openGeneratedSqlDialog } = await import('./generatedSqlDialog.js');
+  openGeneratedSqlDialog(target, kind, isView);
+}
+
+export function generatedSqlSubmenu(target, isView = false) {
+  const conn = state.connections.find((item) => item.id === target.connId);
+  const dialect = conn && conn.type === 'oboracle' ? 'oracle' : (conn && conn.type);
+  const mergeSupported = ['mssql', 'postgres', 'oracle'].includes(dialect);
+  const item = (kind, extra = {}) => ({
+    label: kind.toUpperCase(),
+    onClick: () => openGeneratedSql(target, kind, isView),
+    ...extra,
+  });
+  if (isView) return [item('select'), item('ddl')];
+  return [
+    item('select'),
+    item('insert'),
+    item('update'),
+    item('delete'),
+    item('merge', {
+      disabled: !mergeSupported,
+      hint: mergeSupported ? '' : '当前数据库不支持',
+    }),
+    { sep: true },
+    item('ddl'),
+  ];
+}
+
 function fullName(t) {
   return (t.schema ? t.schema + '.' : '') + t.table;
 }

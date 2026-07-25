@@ -203,6 +203,15 @@ class MSSQLAdapter extends BaseAdapter {
     return `DROP LOGIN ${this.quoteIdent(name)}`;
   }
 
+  async viewDdl(db, schema, view) {
+    const sch = schema || 'dbo';
+    const rows = await this._q(db,
+      `SELECT OBJECT_DEFINITION(OBJECT_ID(${this.literal(sch + '.' + view)})) AS def`);
+    const def = rows[0] && rows[0].def;
+    if (!def) throw new Error('无法获取视图定义（可能已加密或缺少权限）');
+    return String(def);
+  }
+
   async listAllColumns(db) {
     const rows = await this._q(db,
       `SELECT TABLE_SCHEMA AS s, TABLE_NAME AS t, COLUMN_NAME AS c
@@ -611,7 +620,9 @@ class MSSQLAdapter extends BaseAdapter {
       if (c.is_identity) activeFlags.unshift('is_identity');
       return {
         name: c.name, type: typeStr(c), baseType: baseTypeStr(c), nullable: !!c.is_nullable, def: c.def,
-        key: pk.includes(c.name) ? 'PRI' : '', extra: c.is_identity ? 'identity' : '', comment: c.comment || '',
+        key: pk.includes(c.name) ? 'PRI' : '',
+        extra: c.is_identity ? 'identity' : (activeFlags.includes('is_computed') ? 'computed' : ''),
+        comment: c.comment || '',
         defConstraint: c.def_constraint || null, collation: c.collation_name || '',
         editSafe: activeFlags.length === 0,
         editUnsafeReason: activeFlags.length

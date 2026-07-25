@@ -325,7 +325,7 @@ class SQLiteAdapter extends BaseAdapter {
     // PRAGMA table_xinfo: cid, name, type, notnull, dflt_value, pk, hidden
     const columns = ti.rows.map((r) => ({
       name: r[1], type: r[2] || '', nullable: !r[3], def: r[4],
-      key: r[5] > 0 ? 'PRI' : '', extra: '', comment: '',
+      key: r[5] > 0 ? 'PRI' : '', extra: Number(r[6] || 0) === 0 ? '' : 'generated hidden', comment: '',
       editSafe: Number(r[6] || 0) === 0,
       editUnsafeReason: Number(r[6] || 0) === 0 ? '' : 'SQLite 生成栏位或虚拟表隐藏栏位不能由设计器无损修改',
     }));

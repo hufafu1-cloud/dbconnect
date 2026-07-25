@@ -2479,6 +2479,90 @@ async function runSelfTest() {
   try { fs.unlinkSync(fkFile); } catch (e) { /* ignore */ }
   } catch (e2) { fail++; console.log('  ✗ 第二档块异常:', e2 && e2.stack || e2); }
 
+  // ---- Table SQL generator (pure metadata-to-template tests) ----
+  try {
+    const { generateFromInfo } = require('./sqlGenerator');
+    const fakeAdapter = (dialect) => ({
+      dialect,
+      quoteIdent: (name) => dialect === 'mysql' || dialect === 'clickhouse'
+        ? `\`${name}\`` : (dialect === 'mssql' ? `[${name}]` : `"${name}"`),
+      qualify(db, schema, table) {
+        if (dialect === 'mysql' || dialect === 'clickhouse' || dialect === 'oracle') {
+          return db ? `${this.quoteIdent(db)}.${this.quoteIdent(table)}` : this.quoteIdent(table);
+        }
+        if (dialect === 'sqlite') return this.quoteIdent(table);
+        return schema ? `${this.quoteIdent(schema)}.${this.quoteIdent(table)}` : this.quoteIdent(table);
+      },
+    });
+    const generatorInfo = {
+      columns: [
+        { name: 'id', type: 'int', extra: 'auto_increment' },
+        { name: 'name', type: 'varchar(80)', extra: '' },
+        { name: 'note', type: 'text', extra: '' },
+      ],
+      pk: ['id'],
+      ddl: 'CREATE TABLE demo (id int)',
+    };
+    const generatedSelect = generateFromInfo(fakeAdapter('mysql'),
+      { db: 'app', table: 'demo', kind: 'select' }, generatorInfo);
+    check('generated SQL SELECT qualifies and expands columns',
+      /FROM `app`\.`demo`;/.test(generatedSelect.sql)
+      && /`id`,\n\s+`name`,\n\s+`note`/.test(generatedSelect.sql), generatedSelect.sql);
+    const generatedStarSelect = generateFromInfo(fakeAdapter('mysql'),
+      { db: 'app', table: 'demo', kind: 'select', options: { explicitColumns: false } }, generatorInfo);
+    check('generated SQL SELECT star keeps valid spacing',
+      /SELECT \*\nFROM `app`\.`demo`;/.test(generatedStarSelect.sql), generatedStarSelect.sql);
+    const generatedInsert = generateFromInfo(fakeAdapter('mysql'),
+      { db: 'app', table: 'demo', kind: 'insert' }, generatorInfo);
+    check('generated SQL INSERT excludes generated columns',
+      !/\(\s*`id`/.test(generatedInsert.sql) && /<name>/.test(generatedInsert.sql), generatedInsert.sql);
+    const generatedUpdate = generateFromInfo(fakeAdapter('postgres'),
+      { db: 'app', schema: 'public', table: 'demo', kind: 'update' }, generatorInfo);
+    check('generated SQL UPDATE uses primary-key guard',
+      /WHERE "id" = <id>;/.test(generatedUpdate.sql), generatedUpdate.sql);
+    const generatedNoPkDelete = generateFromInfo(fakeAdapter('mysql'),
+      { db: 'app', table: 'demo', kind: 'delete' }, { ...generatorInfo, pk: [] });
+    check('generated SQL DELETE without PK is safe',
+      /WHERE 1 = 0;/.test(generatedNoPkDelete.sql) && generatedNoPkDelete.warnings.length === 1,
+      generatedNoPkDelete);
+    const generatedClickHouseUpdate = generateFromInfo(fakeAdapter('clickhouse'),
+      { db: 'app', table: 'demo', kind: 'update' }, generatorInfo);
+    check('generated SQL uses ClickHouse mutation syntax',
+      /^ALTER TABLE `app`\.`demo` UPDATE/.test(generatedClickHouseUpdate.sql), generatedClickHouseUpdate.sql);
+    const generatedMerge = generateFromInfo(fakeAdapter('mssql'),
+      { db: 'app', schema: 'dbo', table: 'demo', kind: 'merge' }, generatorInfo);
+    check('generated SQL creates SQL Server MERGE template',
+      /^MERGE INTO \[dbo\]\.\[demo\] AS target_row/.test(generatedMerge.sql)
+      && /AS source_row \(\[id\], \[name\], \[note\]\)/.test(generatedMerge.sql)
+      && /INSERT \(\[name\], \[note\]\)/.test(generatedMerge.sql), generatedMerge.sql);
+    check('generated SQL rejects unsupported MERGE dialects', (() => {
+      try {
+        generateFromInfo(fakeAdapter('sqlite'),
+          { db: 'main', table: 'demo', kind: 'merge' }, generatorInfo);
+        return false;
+      } catch (error) { return /不支持/.test(error.message); }
+    })());
+    const generatedDdl = generateFromInfo(fakeAdapter('postgres'),
+      { db: 'app', schema: 'public', table: 'demo', kind: 'ddl' }, generatorInfo);
+    check('generated SQL returns DDL with synthesis warning',
+      /CREATE TABLE demo/.test(generatedDdl.sql) && generatedDdl.warnings.length === 1, generatedDdl);
+    const generatedViewDdl = generateFromInfo(fakeAdapter('postgres'),
+      { db: 'app', schema: 'public', table: 'demo_view', kind: 'ddl', isView: true },
+      { ...generatorInfo, ddl: 'CREATE VIEW demo_view AS SELECT 1' });
+    check('generated SQL returns native view DDL without table synthesis warning',
+      /CREATE VIEW demo_view/.test(generatedViewDdl.sql) && generatedViewDdl.warnings.length === 0,
+      generatedViewDdl);
+    const generatedOracleMerge = generateFromInfo(fakeAdapter('oracle'),
+      { db: 'APP', table: 'DEMO', kind: 'merge' }, generatorInfo);
+    check('generated SQL uses Oracle MERGE alias syntax',
+      /^MERGE INTO "APP"\."DEMO" target_row/.test(generatedOracleMerge.sql)
+      && /FROM dual\) source_row/.test(generatedOracleMerge.sql)
+      && !/\bAS target_row\b/.test(generatedOracleMerge.sql), generatedOracleMerge.sql);
+  } catch (eGenerator) {
+    fail++;
+    console.log('  ✗ SQL generator block failed:', eGenerator && eGenerator.stack || eGenerator);
+  }
+
   // ---- AI 助手（纯函数：URL 推导 + SSE 解析） ----
   try {
     const ai = require('./ai');

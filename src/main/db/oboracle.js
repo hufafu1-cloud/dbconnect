@@ -160,6 +160,14 @@ class OBOracleAdapter extends BaseAdapter {
     throw new Error('无法获取定义');
   }
 
+  async viewDdl(db, _schema, view) {
+    const rows = await this._q(
+      `SELECT dbms_metadata.get_ddl('VIEW', ${this.literal(view)}, ${this.literal(db)}) AS "DDL" FROM dual`);
+    const ddl = rows[0] && (rows[0].DDL !== undefined ? rows[0].DDL : rows[0].ddl);
+    if (!ddl) throw new Error('无法获取视图定义');
+    return String(ddl).trim();
+  }
+
   async listAllColumns(db) {
     const rows = await this._q(
       `SELECT table_name, column_name FROM all_tab_columns

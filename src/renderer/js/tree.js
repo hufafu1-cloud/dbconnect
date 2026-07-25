@@ -876,6 +876,7 @@ function leafMenu(e, target, isView) {
     { label: isView ? '打开视图' : '打开表', icon: 'table', onClick: () => actions.openTable(target) },
     { label: isView ? '查看定义' : '设计表', icon: 'struct', onClick: () => actions.designTable(target, isView) },
     { label: '新建查询', icon: 'query', onClick: () => actions.newQuery(target, `SELECT * FROM ${target.table};`) },
+    { label: '生成 SQL', icon: 'query', submenu: actions.generatedSqlSubmenu(target, isView) },
     { sep: true },
     !isView && { label: '导入数据…', icon: 'importIcon', onClick: () => actions.importTable(target) },
     !isView && { label: '转储 SQL 文件', icon: 'exportIcon', submenu: [

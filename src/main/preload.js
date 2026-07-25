@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('api', {
     schemas: (connId, db) => inv('db:schemas', { connId, db }),
     objects: (connId, db, schema) => inv('db:objects', { connId, db, schema }),
     tableInfo: (connId, t) => inv('db:tableInfo', { connId, ...t }),
+    generateTableSql: (connId, t) => inv('db:generateTableSql', { connId, ...t }),
     tableData: (connId, t) => inv('db:tableData', { connId, ...t }),
     query: (connId, t) => inv('db:query', { connId, ...t }),
     applyEdits: (connId, t) => inv('db:applyEdits', { connId, ...t }),

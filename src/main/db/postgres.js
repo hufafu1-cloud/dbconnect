@@ -260,6 +260,15 @@ class PostgresAdapter extends BaseAdapter {
     return `DROP ROLE ${this.quoteIdent(name)}`;
   }
 
+  async viewDdl(db, schema, view) {
+    const sch = schema || 'public';
+    const regclass = `${this.quoteIdent(sch)}.${this.quoteIdent(view)}`;
+    const rows = await this._q(db, 'SELECT pg_get_viewdef($1::regclass, true) AS def', [regclass]);
+    const def = rows[0] && rows[0].def;
+    if (!def) throw new Error('无法获取视图定义');
+    return `CREATE OR REPLACE VIEW ${this.qualify(db, sch, view)} AS\n${String(def).replace(/;\s*$/, '')};`;
+  }
+
   async listAllColumns(db, schema) {
     const rows = await this._q(db,
       `SELECT table_name AS t, column_name AS c FROM information_schema.columns
@@ -542,7 +551,9 @@ class PostgresAdapter extends BaseAdapter {
       ].filter(Boolean).join(' / ');
       return {
         name: c.name, type: c.type, nullable: c.nullable, def: c.def,
-        key: pk.includes(c.name) ? 'PRI' : '', extra: c.identity_kind ? 'identity' : '', comment: c.comment || '',
+        key: pk.includes(c.name) ? 'PRI' : '',
+        extra: c.identity_kind ? 'identity' : (c.generated_kind ? 'generated' : ''),
+        comment: c.comment || '',
         editSafe: !advanced,
         editUnsafeReason: advanced ? `栏位含无法无损表示的 PostgreSQL ${detail} 属性` : '',
       };
