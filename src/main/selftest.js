@@ -1011,6 +1011,8 @@ async function runSelfTest() {
   const csv1 = parseCsv('a,b,c\r\n1,"x,y",3\n4,"含""引号""与\n换行",6\n', ',');
   check('csv 基本', csv1.length === 3 && csv1[1][1] === 'x,y', csv1);
   check('csv 引号换行', csv1[2][1] === '含"引号"与\n换行', csv1[2]);
+  const csvDbeaverCompat = parseCsv('a,b,c\n1,说明含有"未转义引号,3\n2,正常,4\n', ',');
+  check('csv 兼容字段中间未转义引号', csvDbeaverCompat.length === 3 && csvDbeaverCompat[1][1] === '说明含有"未转义引号' && csvDbeaverCompat[2][0] === '2', csvDbeaverCompat);
   check('csv tab', parseCsv('a\tb\n1\t2', '\\t')[1][1] === '2');
 
   // ---- 设计器建表 → 导入 → 导出 端到端（SQLite） ----

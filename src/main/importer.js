@@ -22,7 +22,11 @@ function parseCsv(text, delimiter) {
       }
       cur += ch; i++; continue;
     }
-    if (ch === '"') { inQuote = true; i++; continue; }
+    // RFC CSV only treats a quote at the beginning of a field as its wrapper.
+    // Some exporters (including DBeaver in non-quote-all mode) emit a literal
+    // quote inside an otherwise unquoted field. Treating that quote as an
+    // opening wrapper would merge all following records until the next quote.
+    if (ch === '"' && cur === '') { inQuote = true; i++; continue; }
     if (ch === d) { row.push(cur); cur = ''; i++; continue; }
     if (ch === '\r') { i++; continue; }
     if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; i++; continue; }
