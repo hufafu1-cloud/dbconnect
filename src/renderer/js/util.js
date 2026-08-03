@@ -143,11 +143,14 @@ export const icons = {
     <path d="M2.8 13.6c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4" stroke="#5b6470" stroke-width="1.4" stroke-linecap="round" fill="none"/>`),
   transfer: svg(`<path d="M2.5 5.4h9M9 2.6l2.8 2.8L9 8.2" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
     <path d="M13.5 10.6h-9M7 7.8l-2.8 2.8L7 13.4" stroke="#1a9e57" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`),
+  sync: svg(`<path d="M13.2 5.8A5.5 5.5 0 0 0 3 4.4L2.2 6.8M2.8 3.5v3.3h3.3" stroke="#2b7de9" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M2.8 10.2A5.5 5.5 0 0 0 13 11.6l.8-2.4M13.2 12.5V9.2H9.9" stroke="#1a9e57" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`),
   monitor: svg(`<path d="M2.2 12.8a6 6 0 1 1 11.6 0" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" fill="none"/>
     <path d="M8 12.8l3-4.4" stroke="#d93026" stroke-width="1.5" stroke-linecap="round"/>
     <circle cx="8" cy="12.6" r="1.1" fill="#d93026"/>`),
   theme: svg(`<circle cx="8" cy="8" r="5.6" stroke="#5b6470" stroke-width="1.4" fill="none"/>
     <path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="#5b6470"/>`),
+  more: svg(`<circle cx="3.2" cy="8" r="1.25" fill="#5b6470"/><circle cx="8" cy="8" r="1.25" fill="#5b6470"/><circle cx="12.8" cy="8" r="1.25" fill="#5b6470"/>`),
   explain: svg(`<circle cx="6.4" cy="3.4" r="1.8" fill="#1a9e57"/><circle cx="3.4" cy="9.4" r="1.8" fill="#2b7de9"/><circle cx="10" cy="9.4" r="1.8" fill="#d97706"/><circle cx="12.4" cy="13.4" r="1.5" fill="#7c5cd6"/>
     <path d="M6 5l-2 2.8M6.8 5l2.6 2.8M10.6 11l1.4 1.4" stroke="#9aa3af" stroke-width="1.2"/>`),
   er: svg(`<rect x="1.6" y="2" width="5" height="4" rx="0.8" stroke="#2b7de9" stroke-width="1.2" fill="none"/>

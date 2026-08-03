@@ -1,5 +1,5 @@
 // “对象”标签页：Navicat 式多类型对象列表（表/视图/函数/触发器/事件/序列/用户/查询）
-// 工具栏大图标按钮通过 setObjectKind() 切换显示类型
+// 对象页内的类型导航通过 setObjectKind() 切换显示类型
 import { el, iconEl, fmtCount } from './util.js';
 import { state, on, emit, connLabel, objectsCacheKey } from './state.js';
 import { addTab } from './tabs.js';
@@ -109,6 +109,23 @@ function renderToolbar() {
   const mk = (icon, label, onClick, cls) =>
     el('button', { class: 'pbtn' + (cls ? ' ' + cls : ''), onClick }, iconEl(icon), label);
 
+  const kindNav = el('div', {
+    class: 'obj-kind-switcher',
+    role: 'tablist',
+    'aria-label': '对象类型',
+  });
+  for (const [kind, meta] of Object.entries(KINDS)) {
+    kindNav.append(el('button', {
+      class: 'obj-kind-btn' + (kind === k ? ' active' : ''),
+      type: 'button',
+      'data-kind': kind,
+      role: 'tab',
+      'aria-selected': kind === k ? 'true' : 'false',
+      title: `查看${meta.label}`,
+      onClick: () => setObjectKind(kind),
+    }, iconEl(meta.icon), el('span', {}, meta.label)));
+  }
+
   const btns = [];
   if (k === 'table') {
     btns.push(
@@ -160,8 +177,8 @@ function renderToolbar() {
   btns.push(mk('refresh', '刷新', () => load(true)));
 
   pathEl = el('span', { class: 'obj-path' }, pathEl ? pathEl.textContent : '');
-  searchEl = el('input', { type: 'text', placeholder: '筛选…', style: { width: '150px' }, onInput: renderList, value: searchEl ? searchEl.value : '' });
-  toolbarEl.append(...btns, el('span', { class: 'spring' }), pathEl, searchEl);
+  searchEl = el('input', { class: 'obj-filter-input', type: 'text', placeholder: '筛选…', onInput: renderList, value: searchEl ? searchEl.value : '' });
+  toolbarEl.append(kindNav, ...btns, el('span', { class: 'spring' }), pathEl, searchEl);
 }
 
 function targetOf(it) {
@@ -182,7 +199,7 @@ function renderWorkspaceOverview() {
   const metric = (value, label) => el('div', { class: 'overview-metric' }, el('b', {}, value), el('span', {}, label));
   const actionsEl = el('div', { class: 'overview-actions' });
   if (target) actionsEl.append(el('button', { class: 'btn primary', onClick: () => actions.newQuery(target) }, '新建查询'));
-  actionsEl.append(el('button', { class: 'btn', onClick: () => document.querySelector('.tbtn-big')?.click() }, '新建连接'));
+  actionsEl.append(el('button', { class: 'btn', onClick: () => document.querySelector('.toolbar-connection')?.click() }, '新建连接'));
   listEl.append(el('div', { class: 'workspace-overview' },
     el('div', { class: 'overview-eyebrow' }, 'DBPANDA 工作区'),
     el('div', { class: 'overview-title' }, opened.length ? '从一个连接开始工作' : '建立你的第一个数据库连接'),

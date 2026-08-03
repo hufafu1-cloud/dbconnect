@@ -47,7 +47,10 @@ function showConnMenu(anchor) {
   ]);
 }
 
-const kindBtns = new Map();
+let toolbarContextButton = null;
+let toolbarContextLabel = null;
+let toolbarContextEnv = null;
+let toolbarActionEls = {};
 let updateCheckBusy = false;
 let updateDownloadBusy = false;
 let updateDownloaded = false;
@@ -163,58 +166,151 @@ function setupUpdaterEvents() {
   });
 }
 
+function connectionForTarget(target) {
+  return target && state.connections.find((item) => item.id === target.connId);
+}
+
+function targetContextParts(target) {
+  if (!target || !target.connId) return [];
+  const conn = connectionForTarget(target);
+  return [conn ? conn.name : target.connId, target.db, target.schema, target.table].filter(Boolean);
+}
+
+function targetContextLabel(target) {
+  if (!target || !target.connId) return '未选择数据库';
+  const parts = targetContextParts(target);
+  return parts.length ? parts.join(' / ') : `${target.connId}（未选择数据库）`;
+}
+
+function renderToolbarContext(target) {
+  if (!toolbarContextLabel) return;
+  const parts = targetContextParts(target);
+  toolbarContextLabel.replaceChildren();
+  if (!parts.length) {
+    toolbarContextLabel.append('未选择数据库');
+    return;
+  }
+  parts.forEach((part, index) => {
+    if (index) toolbarContextLabel.append(el('span', { class: 'toolbar-context-separator' }, ' / '));
+    toolbarContextLabel.append(el('span', {
+      class: index === 0 ? 'toolbar-context-connection' : 'toolbar-context-object',
+    }, part));
+  });
+}
+
+function updateToolbarActions() {
+  const hasOpen = state.open.size > 0;
+  const hasDb = !!getActiveTarget({ requireOpen: true, requireDb: true });
+  if (toolbarActionEls.refresh) toolbarActionEls.refresh.disabled = !hasOpen;
+  if (toolbarActionEls.search) toolbarActionEls.search.disabled = !hasOpen;
+  if (toolbarActionEls.transfer) toolbarActionEls.transfer.disabled = !hasOpen;
+  if (toolbarActionEls.sync) toolbarActionEls.sync.disabled = !hasOpen;
+  if (toolbarActionEls.import) toolbarActionEls.import.disabled = !hasDb;
+  if (toolbarActionEls.dump) toolbarActionEls.dump.disabled = !hasDb;
+}
+
+function updateToolbarContext(target = state.activeTarget) {
+  if (!toolbarContextButton || !toolbarContextLabel) return;
+  const conn = connectionForTarget(target);
+  const label = targetContextLabel(target);
+  renderToolbarContext(target);
+  toolbarContextButton.title = target && target.connId
+    ? `当前上下文：${label}\n点击切换已打开的连接或数据库`
+    : '当前未选择数据库；点击选择已打开的连接或数据库';
+  toolbarContextButton.classList.toggle('empty', !target || !target.connId);
+  if (toolbarContextEnv) {
+    const env = conn && conn.env;
+    toolbarContextEnv.textContent = env === 'prod' ? '生产' : (env === 'test' ? '测试' : '');
+    toolbarContextEnv.className = 'toolbar-context-env' + (env ? ` env-${env}` : '');
+    toolbarContextEnv.style.display = env ? '' : 'none';
+  }
+  updateToolbarActions();
+}
+
+function showToolbarContextMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const entries = [];
+  for (const [connId, opened] of state.open) {
+    const conn = connectionForTarget({ connId });
+    const databases = Array.isArray(opened && opened.databases) ? opened.databases : [];
+    const choose = (db) => setActiveTarget({ connId, db }, 'toolbar-context');
+    if (databases.length) {
+      entries.push({
+        label: conn ? conn.name : connId,
+        icon: conn && conn.type || 'connection',
+        submenu: databases.map((db) => ({ label: db, onClick: () => choose(db) })),
+      });
+    } else {
+      entries.push({
+        label: conn ? conn.name : connId,
+        icon: conn && conn.type || 'connection',
+        onClick: () => choose(null),
+      });
+    }
+  }
+  if (!entries.length) entries.push({ label: '请先打开一个连接', disabled: true });
+  showMenu(r.left, r.bottom + 4, entries);
+}
+
+function showToolbarMoreMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  showMenu(r.left, r.bottom + 4, [
+    { label: '运行 SQL 文件…', icon: 'openFile', onClick: () => runMenuAction('run-sql-file') },
+    { label: '导入向导…', icon: 'importIcon', onClick: () => runMenuAction('import') },
+    { label: '转储 SQL 文件…', icon: 'exportIcon', onClick: () => runMenuAction('dump') },
+    { label: '进程列表', icon: 'monitor', onClick: () => runMenuAction('processes') },
+    { sep: true },
+    { label: 'AI 助手设置…', icon: 'ai', onClick: () => runMenuAction('ai-config') },
+    { label: '快捷键说明', icon: 'info', onClick: () => showAbout() },
+  ]);
+}
+
 function buildToolbar() {
   const tb = $('#toolbar');
   tb.innerHTML = '';
-  const big = (icon, label, onClick, title) => {
-    const span = el('span', {}, label);
-    return el('button', { class: 'tbtn-big', onClick, title: title || label }, iconEl(icon), span);
+  const main = (icon, label, onClick, title, cls = '') => {
+    return el('button', {
+      class: 'tbtn-main' + (cls ? ` ${cls}` : ''),
+      type: 'button',
+      onClick,
+      title: title || label,
+    }, iconEl(icon), el('span', { class: 'tbtn-label' }, label));
   };
 
-  const btnConn = big('connection', '连接', () => showConnMenu(btnConn), '新建连接');
-  btnConn.querySelector('span').append(el('span', { class: 'caret' }, ' ▾'));
-  const btnQuery = big('query', '新建查询', newQueryFromToolbar);
+  const btnConn = main('connection', '连接', () => showConnMenu(btnConn), '新建连接', 'toolbar-connection');
+  btnConn.querySelector('.tbtn-label').append(el('span', { class: 'caret' }, ' ▾'));
+  const btnQuery = main('query', '新建查询', newQueryFromToolbar, '新建查询 (Ctrl+Q)', 'toolbar-query');
 
-  // 对象类型切换（Navicat 式：表/视图/函数/…）
-  const kindDefs = [
-    ['table', 'table', '表'],
-    ['view', 'view', '视图'],
-    ['routine', 'func', '函数'],
-    ['trigger', 'trigger', '触发器'],
-    ['event', 'eventIcon', '事件'],
-    ['sequence', 'sequence', '序列'],
-    ['user', 'user', '用户'],
-    ['query', 'query', '查询'],
-  ];
-  kindBtns.clear();
-  const kindEls = [];
-  for (const [kind, icon, label] of kindDefs) {
-    const b = big(icon, label, async () => {
-      const { setObjectKind } = await import('./objectsTab.js');
-      const { activate } = await import('./tabs.js');
-      activate('objects');
-      await setObjectKind(kind);
-    }, `查看${label}`);
-    if (kind === 'table') b.classList.add('active');
-    kindBtns.set(kind, b);
-    kindEls.push(b);
-  }
-  on('objkind-changed', (k) => {
-    for (const [kk, b] of kindBtns) b.classList.toggle('active', kk === k);
-  });
+  toolbarContextLabel = el('span', { class: 'toolbar-context-label' });
+  toolbarContextEnv = el('span', { class: 'toolbar-context-env', style: { display: 'none' } });
+  toolbarContextButton = el('button', {
+    class: 'toolbar-context empty',
+    type: 'button',
+    onClick: () => showToolbarContextMenu(toolbarContextButton),
+    title: '当前未选择数据库；点击选择已打开的连接或数据库',
+    'aria-label': '当前数据库上下文',
+  }, iconEl('connection', 'toolbar-context-icon'), toolbarContextLabel, toolbarContextEnv);
 
-  const btnAi = big('ai', 'AI 助手', openAiPanelFromToolbar, 'AI 助手：优化 / 解释 / 生成 SQL');
-  const btnHistory = big('history', '历史', openHistory);
-  const btnTheme = big('theme', '主题', toggleTheme, '切换浅色/深色主题');
-  const btnAbout = big('info', '关于', showAbout);
+  const btnRefresh = main('refresh', '刷新', () => runMenuAction('refresh'), '刷新当前对象 (F5)');
+  const btnSearch = main('filter', '查找', () => runMenuAction('search'), '在库中查找 (Ctrl+F)');
+  const btnTransfer = main('transfer', '传输', () => runMenuAction('transfer'), '数据传输');
+  const btnSync = main('sync', '同步', () => runMenuAction('sync'), '结构/数据同步');
+  const btnAi = main('ai', 'AI 助手', openAiPanelFromToolbar, 'AI 助手：优化 / 解释 / 生成 SQL');
+  const btnHistory = main('history', '历史', openHistory, '查询历史');
+  const btnMore = main('more', '更多', () => showToolbarMoreMenu(btnMore), '更多工具');
+
+  toolbarActionEls = { refresh: btnRefresh, search: btnSearch, transfer: btnTransfer, sync: btnSync };
 
   tb.append(
     btnConn, btnQuery,
     el('span', { class: 'toolbar-sep' }),
-    ...kindEls,
+    toolbarContextButton,
+    el('span', { class: 'toolbar-sep' }),
+    btnRefresh, btnSearch, btnTransfer, btnSync,
     el('span', { class: 'toolbar-spring' }),
-    btnAi, btnHistory, btnTheme, btnAbout,
+    btnAi, btnHistory, btnMore,
   );
+  updateToolbarContext();
 }
 
 // ---------------- 主题 ----------------
@@ -536,7 +632,7 @@ function setupTestHooks() {
       return true;
     },
     openConnMenu: () => {
-      const b = document.querySelector('#toolbar .tbtn-big') || document.querySelector('#toolbar .tbtn');
+      const b = document.querySelector('#toolbar .toolbar-connection') || document.querySelector('#toolbar .tbtn');
       if (b) b.click();
       return !!b;
     },
@@ -659,6 +755,7 @@ async function boot() {
 }
 
 on('conn-opened', async ({ connId } = {}) => {
+  updateToolbarContext();
   if (connId) pendingRestoreConnectionIds.delete(connId);
   touchWorkspacePersistence();
   if (workspaceBooted && workspaceEntryRestorer && connId) {
@@ -669,8 +766,9 @@ on('conn-opened', async ({ connId } = {}) => {
     if (retried.restored) toast.success(`已继续恢复 ${retried.restored} 个工作标签`);
   }
 });
-on('conn-closed', touchWorkspacePersistence);
-on('target-selected', touchWorkspacePersistence);
+on('conn-closed', (detail) => { updateToolbarContext(); touchWorkspacePersistence(detail); });
+on('connections-changed', () => updateToolbarContext());
+on('target-selected', (detail) => { updateToolbarContext(detail); touchWorkspacePersistence(detail); });
 boot().catch((e) => {
   $('#app').classList.remove('workspace-loading');
   if (e && e.code === 'WORKSPACE_READ_FAILED') {

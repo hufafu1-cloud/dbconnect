@@ -16,8 +16,6 @@ export function buildMenuBar(runAction) {
       { label: '导入 Navicat 连接…', onClick: () => runAction('import-navicat') },
       { label: '新建查询', hint: 'Ctrl+Q', onClick: () => runAction('new-query') },
       { sep: true },
-      { label: '运行 SQL 文件…', onClick: () => runAction('run-sql-file') },
-      { sep: true },
       { label: '退出', onClick: () => window.api.app.winCmd('close') },
     ]],
     ['编辑', () => [
@@ -48,11 +46,7 @@ export function buildMenuBar(runAction) {
       { label: '数据传输…', onClick: () => runAction('transfer') },
       { label: '结构同步 / 数据同步…', onClick: () => runAction('sync') },
       { sep: true },
-      { label: '导入向导…', onClick: () => runAction('import') },
-      { label: '转储 SQL 文件…', onClick: () => runAction('dump') },
-      { sep: true },
       { label: '查询历史', onClick: () => runAction('history') },
-      { label: '进程列表', onClick: () => runAction('processes') },
     ]],
     ['窗口', () => [
       { label: '下一个标签页', hint: 'Ctrl+Tab', onClick: () => runAction('next-tab') },

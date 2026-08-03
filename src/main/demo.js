@@ -131,16 +131,16 @@ async function runDemo(createWindow) {
   await ej('window.__test.closeMenus()');
   await wait(200);
 
-  // 工具栏对象类型切换：触发器
+  // 对象页内对象类型切换：触发器
   await ej(`(() => {
-    const b = [...document.querySelectorAll('#toolbar .tbtn-big')].find((x) => x.textContent.trim() === '触发器');
+    const b = document.querySelector('.obj-kind-btn[data-kind="trigger"]');
     if (b) b.click();
     return !!b;
   })()`);
   await wait(700);
   await shot('shot-13-objkind.png');
   await ej(`(() => {
-    const b = [...document.querySelectorAll('#toolbar .tbtn-big')].find((x) => x.textContent.trim() === '表');
+    const b = document.querySelector('.obj-kind-btn[data-kind="table"]');
     if (b) b.click();
     return !!b;
   })()`);

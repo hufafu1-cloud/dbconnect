@@ -114,10 +114,10 @@ body {
 /* ---------- 顶部工具栏 ---------- */
 #toolbar {
   display: flex; align-items: center; gap: 4px;
-  padding: 6px 10px;
+  min-height: 56px; padding: 5px 10px;
   background: var(--chrome);
   border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
+  flex: 0 0 auto; overflow: hidden;
 }
 .tbtn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -132,6 +132,56 @@ body {
 .tbtn.primary { color: var(--accent-dark); }
 .tbtn:disabled { opacity: 0.45; cursor: default; }
 .tbtn:disabled:hover { background: transparent; border-color: transparent; }
+
+/* 主工具栏：全局高频操作使用横向紧凑按钮，对象类型留在对象页内。 */
+.tbtn-main {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 38px; padding: 6px 10px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--text);
+  font-size: 12.5px; cursor: default; white-space: nowrap;
+}
+.tbtn-main:hover { background: var(--hover); border-color: var(--border-light); }
+.tbtn-main:active { background: var(--selected); }
+.tbtn-main:disabled { opacity: 0.42; cursor: default; }
+.tbtn-main:disabled:hover { background: transparent; border-color: transparent; }
+.tbtn-main svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.tbtn-main.toolbar-query {
+  color: var(--accent-dark); background: transparent;
+  border-color: transparent; font-weight: 500;
+}
+.tbtn-main.toolbar-query:hover { color: var(--accent-dark); background: var(--accent-light); border-color: transparent; }
+.tbtn-main.toolbar-query:active { background: var(--selected); }
+.tbtn-main.toolbar-query svg { opacity: .95; }
+.tbtn-main .tbtn-label { display: inline-flex; align-items: center; gap: 2px; }
+.tbtn-main .caret { color: currentColor; font-size: 10px; line-height: 1; }
+.toolbar-context {
+  display: inline-flex; align-items: center; gap: 6px;
+  flex: 0 1 auto; width: fit-content; min-width: 170px; max-width: 330px; min-height: 34px;
+  padding: 5px 6px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--text); text-align: left; overflow: hidden;
+}
+.toolbar-context:hover { background: var(--hover); border-color: transparent; }
+.toolbar-context:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.toolbar-context::after {
+  content: "\25BE"; flex: 0 0 auto; margin-left: auto;
+  color: var(--text-muted); font-size: 11px; line-height: 1;
+}
+.toolbar-context.empty { color: var(--text-muted); background: transparent; }
+.toolbar-context-icon { width: 17px; height: 17px; flex: 0 0 auto; opacity: .86; }
+.toolbar-context-label {
+  display: inline-flex; align-items: center; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.toolbar-context-connection { color: var(--text-muted); font-weight: 450; }
+.toolbar-context-object { color: var(--text); font-weight: 550; }
+.toolbar-context-separator { color: var(--text-muted); opacity: .72; }
+.toolbar-context-env {
+  flex: 0 0 auto; margin-left: 2px; padding: 1px 6px; border-radius: 8px;
+  font-size: 10.5px; font-weight: 700; line-height: 16px; letter-spacing: .4px;
+}
+.toolbar-context-env.env-prod { background: #e5484d; color: #fff; }
+.toolbar-context-env.env-test { background: #f0d9a8; color: #8a5a00; }
 
 /* Navicat 风格大图标按钮：图标在上、文字在下 */
 .tbtn-big {
@@ -152,6 +202,16 @@ body {
 .tbtn-big .caret { font-size: 8px; color: var(--text-muted); }
 .toolbar-sep { width: 1px; height: 22px; background: var(--border); margin: 0 6px; }
 .toolbar-spring { flex: 1; }
+
+@media (max-width: 1100px) {
+  .tbtn-main { padding-left: 7px; padding-right: 7px; }
+  .toolbar-context { max-width: 260px; }
+}
+@media (max-width: 900px) {
+  .tbtn-main:not(.toolbar-query) .tbtn-label { display: none; }
+  .tbtn-main:not(.toolbar-query) { min-width: 34px; padding: 6px 7px; }
+  .toolbar-context { max-width: 230px; }
+}
 
 /* ---------- 主区域 ---------- */
 #main { display: flex; flex: 1 1 auto; min-height: 0; }
@@ -316,6 +376,25 @@ body {
   border: 1px solid var(--warn-border); background: var(--warn-bg);
   padding: 1px 7px; border-radius: 9px;
 }
+
+/* 对象类型导航：从全局工具栏下沉到对象页，保持对象与列表同一上下文。 */
+.obj-kind-switcher {
+  display: flex; align-items: center; gap: 2px; flex: 0 0 100%;
+  min-width: 0; overflow-x: auto; padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-light);
+}
+.obj-kind-switcher::-webkit-scrollbar { height: 3px; }
+.obj-kind-btn {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  min-height: 28px; padding: 4px 9px;
+  border: 1px solid transparent; border-radius: 5px;
+  background: transparent; color: var(--text-muted);
+  font-size: 12px; white-space: nowrap; cursor: default;
+}
+.obj-kind-btn svg { width: 15px; height: 15px; }
+.obj-kind-btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-light); }
+.obj-kind-btn.active { background: var(--accent-light); color: var(--accent-dark); border-color: var(--accent); font-weight: 600; }
+.obj-filter-input { width: 150px; }
 
 /* ---------- 数据网格 ---------- */
 .grid-wrap { flex: 1; min-height: 0; overflow: auto; position: relative; background: var(--panel); }
