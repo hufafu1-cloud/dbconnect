@@ -417,7 +417,7 @@ class BaseAdapter {
           out.push(await this._decorateQueryResult(context.db, context.schema, s, normalized));
         }
       } catch (err) {
-        out.push({ sql: excerpt(s), ms: Date.now() - t0, error: this._errMsg(err) });
+        out.push({ sql: excerpt(s), sqlText: s, ms: Date.now() - t0, error: this._errMsg(err) });
         break; // 出错即停止
       }
     }
@@ -934,7 +934,7 @@ class BaseAdapter {
         out.push(...results);
         if (results.some((item) => item.error)) break;
       } catch (error) {
-        out.push({ sql: excerpt(stmt), ms: Date.now() - startedAt, error: this._errMsg(error) });
+        out.push({ sql: excerpt(stmt), sqlText: stmt, ms: Date.now() - startedAt, error: this._errMsg(error) });
         break;
       }
     }

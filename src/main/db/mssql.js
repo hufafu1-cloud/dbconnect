@@ -475,7 +475,7 @@ class MSSQLAdapter extends BaseAdapter {
         } catch (err) {
           let m = (err && err.message) || String(err);
           if (err && err.lineNumber) m += ` (第 ${err.lineNumber} 行)`;
-          out.push({ sql: excerpt(batch), ms: Date.now() - t0, error: m });
+          out.push({ sql: excerpt(batch), sqlText: batch, ms: Date.now() - t0, error: m });
           break;
         } finally {
           this._untrack(req, requestId);

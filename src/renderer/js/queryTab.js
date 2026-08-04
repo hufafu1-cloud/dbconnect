@@ -17,6 +17,71 @@ function formatQueryRowCount(result) {
     : `${fmtCount(result.rowCount)} 行`;
 }
 
+function compactSqlText(result) {
+  const text = String(result && (result.sql || result.sqlText) || '').replace(/\s+/g, ' ').trim();
+  return text || '未返回 SQL';
+}
+
+function compactSqlError(result) {
+  const raw = String(result && result.error || '').replace(/\s+/g, ' ').trim();
+  const queryContext = raw.search(/\s+while processing query\s*:/i);
+  return (queryContext > 0 ? raw.slice(0, queryContext) : raw) || '数据库未返回具体错误信息';
+}
+
+function parseSqlErrorPosition(message) {
+  const raw = String(message || '');
+  const positionMatch = raw.match(/\bposition\s*[:=]?\s*(\d+)/i);
+  const lineColMatch = raw.match(/\bline\s*[:=]?\s*(\d+)\s*[,;]?\s*(?:col|column)\.?\s*[:=]?\s*(\d+)/i);
+  const lineMatch = raw.match(/\bline\s*[:=]?\s*(\d+)/i);
+  return {
+    position: positionMatch ? Number(positionMatch[1]) : null,
+    line: lineColMatch ? Number(lineColMatch[1]) : (lineMatch ? Number(lineMatch[1]) : null),
+    column: lineColMatch ? Number(lineColMatch[2]) : null,
+  };
+}
+
+function resolveSqlErrorPosition(sql, parsed) {
+  let line = Number.isFinite(parsed.line) ? parsed.line : null;
+  let column = Number.isFinite(parsed.column) ? parsed.column : null;
+  if ((!line || !column) && Number.isFinite(parsed.position) && parsed.position > 0) {
+    const offset = Math.min(String(sql || '').length, parsed.position - 1);
+    const before = String(sql || '').slice(0, offset);
+    line = before.split(/\r?\n/).length;
+    column = offset - before.lastIndexOf('\n');
+  }
+  return { line, column };
+}
+
+function findSqlErrorToken(message) {
+  const raw = String(message || '');
+  const patterns = [
+    /(?:missing columns?|unknown column|unknown identifier|invalid column name|no such column)[^'`"]*[`'\"]([^`'\"]+)[`'\"]/i,
+    /column\s*[`'\"]([^`'\"]+)[`'\"]\s+(?:does not exist|not found)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match && match[1]) return match[1].trim().split(/\s+/)[0];
+  }
+  return '';
+}
+
+function findSqlErrorOffset(sql, message) {
+  const source = String(sql || '');
+  const token = findSqlErrorToken(message);
+  if (!source || !token) return -1;
+  const candidates = [token, token.split('.').pop()].filter(Boolean);
+  for (const candidate of candidates) {
+    for (const text of [`\`${candidate}\``, `"${candidate}"`, `'${candidate}'`, candidate]) {
+      const exact = source.indexOf(text);
+      if (exact >= 0) return exact + (text[0] === '`' || text[0] === '"' || text[0] === "'" ? 1 : 0);
+    }
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = source.match(new RegExp(`(^|[^\\w$])${escaped}(?=$|[^\\w$])`, 'i'));
+    if (match) return match.index + match[1].length;
+  }
+  return -1;
+}
+
 const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET',
   'INSERT INTO', 'UPDATE', 'DELETE FROM', 'SET', 'VALUES', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN',
   'JOIN', 'ON', 'AS', 'AND', 'OR', 'NOT', 'NULL', 'IS NULL', 'IS NOT NULL', 'IN', 'LIKE', 'BETWEEN',
@@ -634,6 +699,82 @@ export function openQueryTab(target, initialSql, opts) {
   // ---- 结果渲染 ----
   let pages = [];
   let resultEditors = [];
+  let errorLine = null;
+  function clearErrorLine() {
+    if (errorLine === null || !cm) return;
+    cm.removeLineClass(errorLine, 'background', 'query-error-line');
+    errorLine = null;
+  }
+
+  function locateSqlError(result) {
+    if (!cm) return;
+    const source = String(result.sqlText || result.sql || '');
+    const fullSql = cm.getValue();
+    let start = source ? fullSql.indexOf(source) : -1;
+    if (start < 0 && source.trim()) start = fullSql.indexOf(source.trim());
+    const baseLine = start >= 0 ? fullSql.slice(0, start).split(/\r?\n/).length - 1 : 0;
+    const location = resolveSqlErrorPosition(source || fullSql, parseSqlErrorPosition(result.error));
+    const inferredOffset = findSqlErrorOffset(source || fullSql, result.error);
+    let line;
+    let ch;
+    if (location.line) {
+      line = baseLine + location.line - 1;
+      if (location.column) {
+        ch = location.column - 1;
+      } else if (inferredOffset >= 0) {
+        const before = source.slice(0, inferredOffset);
+        const inferredLine = before.split(/\r?\n/).length;
+        ch = inferredLine === location.line ? inferredOffset - before.lastIndexOf('\n') - 1 : 0;
+      } else {
+        ch = 0;
+      }
+    } else {
+      const targetOffset = Math.max(0, (start >= 0 ? start : 0) + Math.max(0, inferredOffset));
+      const before = fullSql.slice(0, targetOffset);
+      line = before.split(/\r?\n/).length - 1;
+      ch = targetOffset - before.lastIndexOf('\n') - 1;
+    }
+    line = Math.max(0, Math.min(cm.lineCount() - 1, line));
+    ch = Math.max(0, Math.min(cm.getLine(line).length, ch));
+    clearErrorLine();
+    errorLine = line;
+    cm.addLineClass(line, 'background', 'query-error-line');
+    cm.setCursor({ line, ch });
+    cm.scrollIntoView({ line, ch }, 120);
+    cm.focus();
+  }
+
+  function copyErrorText(text, label) {
+    if (!navigator.clipboard) { toast.error('当前环境不支持复制'); return; }
+    navigator.clipboard.writeText(text)
+      .then(() => toast.success(label))
+      .catch((e) => toast.error('复制失败：' + e.message));
+  }
+
+  async function openErrorAi(result, action) {
+    const sqlText = String(result.sqlText || result.sql || '').trim();
+    if (!sqlText) { toast.info('没有可提供给 AI 的 SQL'); return; }
+    const { openAiPanel } = await import('./aiPanel.js');
+    const sql = action === 'diagnose'
+      ? `${sqlText}\n\n/* 数据库执行错误：\n${String(result.error || '').trim()}\n*/`
+      : sqlText;
+    openAiPanel({
+      connId, db, schema, sql, action,
+      insertTarget: (text) => { cm.replaceSelection(text); cm.focus(); },
+    });
+  }
+
+  function showSqlContextMenu(event, result) {
+    event.preventDefault();
+    event.stopPropagation();
+    const sqlText = String(result.sqlText || result.sql || '').trim();
+    showMenu(event.clientX, event.clientY, [
+      { label: '定位到 SQL', icon: 'locate', disabled: !sqlText, onClick: () => locateSqlError(result) },
+      { label: '复制 SQL', icon: 'copy', disabled: !sqlText, onClick: () => copyErrorText(sqlText, 'SQL 已复制') },
+      { label: '优化 SQL', icon: 'format', disabled: !sqlText, onClick: () => { void openErrorAi(result, 'optimize'); } },
+    ]);
+  }
+
   function hasDirtyResultEdits() {
     return resultEditors.some((editor) => editor.grid.isDirty());
   }
@@ -642,6 +783,7 @@ export function openQueryTab(target, initialSql, opts) {
     tab.setDirty(cm.getValue() !== savedText || transactionState !== 'idle' || hasDirtyResultEdits());
   }
   function clearResults() {
+    clearErrorLine();
     rtabs.innerHTML = '';
     rbody.innerHTML = '';
     pages = [];
@@ -664,11 +806,59 @@ export function openQueryTab(target, initialSql, opts) {
     });
   }
 
+  function renderErrorSummary(results, totalMs) {
+    const summary = el('div', { class: 'sql-error-summary', role: 'table' });
+    summary.append(el('div', { class: 'sql-error-summary-head', role: 'row' },
+      el('span', { role: 'columnheader' }, '查询'),
+      el('span', { role: 'columnheader' }, '消息'),
+      el('span', { role: 'columnheader' }, '耗时')));
+    results.forEach((result) => {
+      const sql = compactSqlText(result);
+      const rawError = String(result.error || '数据库未返回具体错误信息').trim();
+      const summaryError = compactSqlError(result);
+      const row = el('div', {
+        class: 'sql-error-summary-row', role: 'row',
+        title: `${String(result.sqlText || result.sql || '').trim()}\n${rawError}`,
+      },
+      el('span', { class: 'sql-error-summary-query', role: 'cell' },
+        iconEl('cross'),
+        el('span', {
+          class: 'sql-error-summary-query-text', title: '点击定位，右键查看更多操作',
+          onClick: () => locateSqlError(result),
+          onContextMenu: (event) => showSqlContextMenu(event, result),
+        }, sql),
+        el('button', {
+          class: 'pbtn sql-error-inline-action', disabled: !String(result.sqlText || result.sql || '').trim(),
+          title: '使用 AI 修复此 SQL',
+          onClick: (event) => { event.stopPropagation(); void openErrorAi(result, 'diagnose'); },
+        }, iconEl('ai'), 'AI 修复')),
+      el('span', { class: 'sql-error-summary-message', role: 'cell' },
+        el('span', { class: 'sql-error-summary-message-text' }, summaryError),
+        el('button', {
+          class: 'pbtn sql-error-inline-action',
+          title: '复制完整错误消息',
+          onClick: (event) => { event.stopPropagation(); copyErrorText(rawError, '错误消息已复制'); },
+        }, iconEl('copy'), '复制')),
+      el('span', { class: 'sql-error-summary-time', role: 'cell' }, `${Number(result.ms) || 0} ms`));
+      summary.append(row);
+    });
+    return el('div', { class: 'sql-error-summary-wrap' },
+      el('div', { class: 'sql-error-summary-meta' },
+        el('span', { class: 'sql-error-summary-title' }, '执行失败'),
+        el('span', {}, `${results.length} 条错误`),
+        el('span', {}, `${totalMs} ms`)),
+      summary);
+  }
+
   function renderMessages(results, totalMs) {
     const list = el('div', { class: 'msg-list' });
+    const errors = results.filter((result) => result.error);
+    if (errors.length) {
+      list.append(renderErrorSummary(errors, totalMs));
+    }
     for (const r of results) {
       if (r.error) {
-        list.append(el('div', { class: 'msg-item error' }, `✗ ${r.sql}\n${r.error}`));
+        continue;
       } else if (r.columns) {
         list.append(el('div', { class: 'msg-item' },
           el('span', { class: 'msg-sql' }, r.sql + '  →  '),
@@ -685,7 +875,9 @@ export function openQueryTab(target, initialSql, opts) {
       }
     }
     if (!results.length) list.append(el('div', { class: 'msg-item' }, '（没有要执行的语句）'));
-    list.append(el('div', { style: { color: 'var(--text-muted)', marginTop: '6px' } }, `总耗时 ${totalMs} ms`));
+    if (!errors.length) {
+      list.append(el('div', { style: { color: 'var(--text-muted)', marginTop: '6px' } }, `总耗时 ${totalMs} ms`));
+    }
     return list;
   }
 
@@ -871,8 +1063,8 @@ export function openQueryTab(target, initialSql, opts) {
       const results = await window.api.db.query(queryConnId, approvedQuery);
       const totalMs = Date.now() - t0;
       clearResults();
-      const hasError = results.some((r) => r.error);
-      addResultPage(hasError ? '信息 ✗' : '信息', renderMessages(results, totalMs), hasError);
+      const errorCount = results.filter((r) => r.error).length;
+      addResultPage(errorCount ? '摘要' : '信息', renderMessages(results, totalMs), errorCount > 0);
       let n = 0;
       for (const r of results) {
         if (!r.columns) continue;
@@ -937,15 +1129,17 @@ export function openQueryTab(target, initialSql, opts) {
         addResultPage(`结果 ${n}`, wrap, false);
       }
       // 默认激活第一个结果集（若有）
-      activatePage(n ? 1 : 0);
+      activatePage(errorCount ? 0 : (n ? 1 : 0));
       const okCount = results.filter((r) => !r.error).length;
+      const hasError = errorCount > 0;
       statusbar.setLeft(hasError ? '执行出错' : `执行完成（${okCount} 条语句）`);
       statusbar.setRight(`${totalMs} ms`);
       refreshHintTables();
       emit('history-changed');
     } catch (e) {
       clearResults();
-      addResultPage('信息 ✗', el('div', { class: 'msg-list' }, el('div', { class: 'msg-item error' }, e.message)), true);
+      const elapsed = Date.now() - t0;
+      addResultPage('错误 (1)', renderMessages([{ sql: sql, sqlText: sql, error: e.message, ms: elapsed }], elapsed), true);
       activatePage(0);
       statusbar.setLeft('执行失败');
       emit('history-changed');
