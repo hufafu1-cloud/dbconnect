@@ -9,12 +9,13 @@ import {
   addTab, closeActive, anyDirty, getActiveTab, activateRelative,
   getStoredWorkspace, restoreWorkspaceTabs, retryDeferredWorkspaceTabs,
   setWorkspaceContextProvider, touchWorkspacePersistence, persistWorkspaceNow, runBeforeCloseGuards,
+  setSecondaryTab, getSecondaryTabId,
 } from './tabs.js';
 import { openConnDialog } from './connDialog.js';
 import * as actions from './actions.js';
 import { openQueryTab } from './queryTab.js';
 import { openTableTab } from './tableTab.js';
-import { statusbar } from './statusbar.js';
+import { statusbar, setupTaskIndicator } from './statusbar.js';
 import {
   registerCommands, runCommand, matchShortcut, isEnabled,
   setCommandContextProvider, accelHint, applyKeymap, accelConflicts,
@@ -582,6 +583,10 @@ function registerAppCommands() {
     },
     { id: 'history', label: '查询历史', menu: '工具', sepBefore: true, run: () => openHistory() },
     {
+      id: 'task-center', label: '任务中心…', menu: '工具',
+      run: async () => (await import('./taskTab.js')).openTaskTab(),
+    },
+    {
       id: 'audit-log', label: '操作审计…', menu: '工具',
       run: async () => (await import('./auditTab.js')).openAuditTab(),
     },
@@ -590,7 +595,19 @@ function registerAppCommands() {
       run: async () => (await import('./securityDialog.js')).openSecurityDialog(),
     },
     {
-      id: 'data-dict', label: '导出数据字典…', menu: '工具', sepBefore: true,
+      id: 'backup', label: '备份 / 还原…', menu: '工具', sepBefore: true,
+      run: async ({ target, needConn }) => {
+        if (!needConn()) return;
+        if (!target.db) { toast.info('请先在左侧选择数据库'); return; }
+        (await import('./backupDialog.js')).openBackupDialog(target);
+      },
+    },
+    {
+      id: 'schedule', label: '定时任务…', menu: '工具',
+      run: async () => (await import('./scheduleDialog.js')).openScheduleDialog(),
+    },
+    {
+      id: 'data-dict', label: '导出数据字典…', menu: '工具',
       run: async ({ target, needConn }) => {
         if (!needConn()) return;
         if (!target.db) { toast.info('请先在左侧选择数据库'); return; }
@@ -604,6 +621,16 @@ function registerAppCommands() {
     { id: 'prev-tab', label: '上一个标签页', menu: '窗口', accel: 'Ctrl+Shift+Tab', run: () => activateRelative(-1) },
     // Ctrl+W 一直是生效的，但过去没出现在任何菜单里，用户无从发现
     { id: 'close-tab', label: '关闭当前标签页', menu: '窗口', accel: 'Ctrl+W', run: () => closeActive() },
+    {
+      id: 'split-right', label: '在右侧拆分当前标签页', menu: '窗口', accel: 'Ctrl+\\', sepBefore: true,
+      run: () => {
+        const active = getActiveTab();
+        if (!active) { toast.info('请先打开一个标签页'); return; }
+        if (getSecondaryTabId() === active.id) { setSecondaryTab(null); return; }
+        setSecondaryTab(active.id);
+      },
+    },
+    { id: 'split-none', label: '取消拆分', menu: '窗口', run: () => setSecondaryTab(null) },
     { id: 'win-minimize', label: '最小化', menu: '窗口', sepBefore: true, run: () => window.api.app.winCmd('minimize') },
     { id: 'win-maximize', label: '最大化 / 还原', menu: '窗口', run: () => window.api.app.winCmd('maximize') },
     { id: 'win-close', label: '关闭窗口', menu: '窗口', sepBefore: true, run: () => window.api.app.winCmd('close') },
@@ -875,6 +902,7 @@ async function boot() {
     head.prepend(el('div', { class: 'sidebar-title' }, iconEl('connection'), el('span', {}, '我的连接'), locateButton));
   }
   initObjectsTab();
+  setupTaskIndicator();
   setupSplitter();
   setupShortcuts();
   setupCloseGuard();

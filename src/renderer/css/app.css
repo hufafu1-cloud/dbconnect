@@ -340,6 +340,14 @@ body {
 #tabpanes { flex: 1; min-height: 0; position: relative; background: var(--panel); }
 .tabpane { position: absolute; inset: 0; display: none; flex-direction: column; min-height: 0; background: var(--panel); }
 .tabpane.active { display: flex; }
+/* 左右分屏：主标签占左半边，副标签固定在右半边 */
+#tabpanes.split .tabpane.active { right: 50%; border-right: 1px solid var(--border); }
+#tabpanes.split .tabpane.secondary { display: flex; left: 50%; }
+.tab.secondary { box-shadow: inset 0 -2px 0 var(--accent); }
+/* 拖拽排序时的插入位置提示 */
+.tab.dragging { opacity: 0.45; }
+.tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+.tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 
 /* ---------- 面板内工具条 ---------- */
 .pane-toolbar {
@@ -880,6 +888,52 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 .btn.primary:hover { background: var(--accent-dark); }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: default; }
+
+/* 定时任务 */
+.schedule-warning {
+  padding: 9px 12px; border-radius: 6px; font-size: 12.5px; line-height: 1.6;
+  background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--text);
+}
+
+/* 备份 / 还原 */
+.backup-list { max-height: 240px; overflow: auto; border: 1px solid var(--border-light); border-radius: 6px; }
+.backup-item { padding: 8px 10px; border-bottom: 1px solid var(--border-light); }
+.backup-item:last-child { border-bottom: 0; }
+.backup-item.missing { opacity: 0.6; }
+.backup-line { display: flex; align-items: center; gap: 8px; }
+.backup-line .spring { flex: 1; }
+.backup-label { font-weight: 600; font-size: 12.5px; }
+.backup-missing { color: var(--danger); font-size: 11.5px; }
+.backup-meta { margin-top: 3px; font-size: 11.5px; color: var(--text-muted); font-family: var(--mono); }
+.backup-foot { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.backup-foot .audit-path { flex: 1; }
+
+/* 任务中心 */
+#status-tasks {
+  border: 0; background: transparent; color: var(--accent-dark);
+  font-size: 12px; padding: 0 8px; cursor: default;
+}
+#status-tasks:hover { background: var(--hover); border-radius: 4px; }
+.task-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 0; }
+.task-item { padding: 8px 12px; border-bottom: 1px solid var(--border-light); }
+.task-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.task-line .spring { flex: 1; }
+.task-status {
+  flex: 0 0 auto; padding: 1px 7px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; color: #fff;
+}
+.task-status-running { background: var(--accent); }
+.task-status-done { background: var(--green); }
+.task-status-failed { background: var(--danger); }
+.task-status-cancelled { background: var(--text-muted); }
+.task-title { font-weight: 600; }
+.task-conn { color: var(--text-muted); font-size: 12px; }
+.task-time { color: var(--text-muted); font-size: 11.5px; font-family: var(--mono); }
+.task-actions { display: inline-flex; gap: 4px; }
+.task-msg { margin-top: 4px; font-size: 12px; color: var(--text-muted); line-height: 1.6; word-break: break-all; }
+.task-failed .task-msg { color: var(--err-text); }
+.task-bar { margin-top: 6px; height: 4px; background: var(--border-light); border-radius: 2px; overflow: hidden; }
+.task-bar-fill { height: 100%; background: var(--accent); transition: width 0.2s; }
 
 /* 连接安全体检 */
 .sec-body { display: flex; flex-direction: column; gap: 10px; max-height: 62vh; overflow: auto; }

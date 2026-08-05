@@ -403,6 +403,13 @@ function describe(operation, payload) {
       title = `即将在生产连接「${target.name}」上执行 SQL 文件`;
       items = genericItem('执行整个 SQL 文件', p.file || '');
       break;
+    case 'backup.restore':
+      // 还原会 DROP 掉现有表再重建，是破坏性最强的写操作之一
+      target = connection(p.connId);
+      title = `即将用备份覆盖生产连接「${target.name}」的数据`;
+      items = genericItem('从备份还原：现有同名表将被删除并重建',
+        `${p.db || ''}${p.schema ? ' / ' + p.schema : ''}\n备份：${p.backupLabel || p.id || ''}`);
+      break;
     case 'db.killProcess':
     case 'db.killProcesses':
       target = connection(p.connId);
@@ -454,6 +461,7 @@ function describe(operation, payload) {
 //
 // 只读 = 不修改数据库。导出到本地文件（db.exportTable / dba.dump）只读库，因此允许。
 const READ_ONLY_BLOCKED = {
+  'backup.restore': '从备份还原',
   'db.action': '数据库对象操作',
   'db.applyEdits': '表数据修改',
   'design.apply': '表结构变更',

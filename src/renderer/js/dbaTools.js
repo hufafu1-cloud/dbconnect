@@ -3,6 +3,7 @@ import { el } from './util.js';
 import { openModal, toast, confirmDialog } from './toast.js';
 import { state, emit, connLabel, objectsCacheKey } from './state.js';
 import { authorizeOperation } from './danger.js';
+import { startTask } from './taskCenter.js';
 
 function openConnsOptions(selected) {
   return [...state.open.keys()].map((id) =>
@@ -244,10 +245,13 @@ export async function openTransferDialog(preset) {
     if (!approvedTransfer) return;
     running = true;
     bar.style.display = '';
+    // 同时登记到任务中心：对话框关掉后，任务在主进程照样跑，状态栏还能看到
+    const task = startTask({ title: '数据传输', kind: 'transfer', connName: connLabel(dstConn.value) });
     const off = window.api.dba.onProgress((p) => {
       if (p.taskId) return;
       if (p.tablesTotal) fill.style.width = Math.round((p.tablesDone / p.tablesTotal) * 100) + '%';
       text.textContent = `[${p.tablesDone}/${p.tablesTotal}] ${p.table || ''} — ${p.phase}${p.rows ? ` (${p.rows.toLocaleString()} 行)` : ''}`;
+      task.progress(text.textContent, p.tablesTotal ? (p.tablesDone / p.tablesTotal) * 100 : undefined);
     });
     try {
       const r = await window.api.dba.transfer(approvedTransfer);
@@ -258,10 +262,12 @@ export async function openTransferDialog(preset) {
       if (r.errors.length) msg += `\n✗ ${r.errors.slice(0, 5).join('\n✗ ')}`;
       (r.errors.length ? toast.error : toast.success)(msg, r.errors.length ? 15000 : 8000);
       text.textContent = msg;
+      task.done(msg.split('\n')[0]);
       emit('objects-changed', { connId: dstConn.value, db: dstDb.value, schema: dstSchema.value || null });
     } catch (e) {
       toast.error('传输失败：\n' + e.message, 15000);
       text.textContent = '失败：' + e.message;
+      task.fail(e);
     } finally {
       off();
       running = false;
@@ -331,19 +337,23 @@ export async function openDumpDialog(target, options = {}) {
     if (!approvedDump) return;
     running = true;
     bar.style.display = '';
+    const task = startTask({ title: '转储 SQL 文件', kind: 'dump', connName: connLabel(target.connId) });
     const off = window.api.dba.onProgress((p) => {
       if (p.taskId) return;
       if (p.tablesTotal) fill.style.width = Math.round((p.tablesDone / p.tablesTotal) * 100) + '%';
       text.textContent = `[${p.tablesDone}/${p.tablesTotal}] ${p.table || ''} — ${p.phase}${p.rows ? ` (${p.rows.toLocaleString()} 行)` : ''}`;
+      task.progress(text.textContent, p.tablesTotal ? (p.tablesDone / p.tablesTotal) * 100 : undefined);
     });
     try {
       const r = await window.api.dba.dump(target.connId, approvedDump);
       const mode = chkData.checked ? '结构和数据' : '仅结构';
       toast.success(`转储完成（${mode}）：${r.tables} 个表，${r.rows.toLocaleString()} 行\n${r.file}`, 8000);
       text.textContent = `完成（${mode}）：${r.tables} 个表，${r.rows.toLocaleString()} 行`;
+      task.done(text.textContent);
     } catch (e) {
       toast.error('转储失败：\n' + e.message, 15000);
       text.textContent = '失败：' + e.message;
+      task.fail(e);
     } finally {
       off();
       running = false;
@@ -541,9 +551,15 @@ export async function openRunSqlFileDialog(target, options = {}) {
     txAuto.disabled = true;
     txSingle.disabled = true;
     const seenLogs = new Set();
+    // SQL 文件执行是少数支持中途取消的任务，把取消能力一并交给任务中心
+    const task = startTask({
+      title: '运行 SQL 文件', kind: 'sqlfile', connName: connLabel(target.connId), detail: file,
+      cancel: () => window.api.dba.cancelSqlFile(target.connId, activeTaskId),
+    });
     const off = window.api.dba.onProgress((p) => {
       if (p.total) fill.style.width = Math.round((p.done / p.total) * 100) + '%';
       text.textContent = `${p.phase || '执行'}：${p.done} / ${p.total} 条语句`;
+      task.progress(text.textContent, p.total ? (p.done / p.total) * 100 : undefined);
       if (p.log) {
         const key = `${p.log.index}:${p.log.status}`;
         if (!seenLogs.has(key)) {
@@ -577,12 +593,15 @@ export async function openRunSqlFileDialog(target, options = {}) {
       if (r.cancelled) toast.info(msg, 8000);
       else (r.failed ? toast.error : toast.success)(msg, r.failed ? 15000 : 6000);
       text.textContent = msg;
+      if (r.cancelled) task.cancelled(msg);
+      else task.done(msg);
       emit('objects-changed', { connId: target.connId, db: target.db, schema: target.schema || null });
     } catch (e) {
       toast.error('执行失败：\n' + e.message, 15000);
       text.textContent = '失败：' + e.message;
       appendLog('');
       appendLog(`执行失败：${e.message}`);
+      task.fail(e);
     } finally {
       off();
       preparing = false;

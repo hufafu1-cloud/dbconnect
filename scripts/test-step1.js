@@ -374,7 +374,8 @@ async function testRendererSettings() {
 
   const BASE = {
     theme: 'light', uiScale: 100, gridDensity: 'default', keymap: 'dbpanda',
-    impactPreview: 'risky', sidebarWidth: 280, queryMaxRows: 2000, tablePageSize: 500,
+    impactPreview: 'risky', backupKeep: 7,
+    sidebarWidth: 280, queryMaxRows: 2000, tablePageSize: 500,
   };
 
   await checkAsync('旧 localStorage 偏好会被搬到主进程，并删掉旧键', async () => {

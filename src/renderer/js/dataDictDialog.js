@@ -5,6 +5,7 @@ import { el } from './util.js';
 import { openModal, toast } from './toast.js';
 import { t } from './i18n.js';
 import { connLabel } from './state.js';
+import { startTask } from './taskCenter.js';
 
 const FORMATS = [
   ['markdown', 'Markdown (.md)', 'md', t('适合放进 Git 仓库或 Wiki')],
@@ -45,20 +46,29 @@ export function openDataDictDialog(target) {
     if (!file) return false;
     running = true;
     status.textContent = t('正在读取表结构…');
+    const task = startTask({
+      title: t('导出数据字典'), kind: 'datadict', connName: connLabel(target.connId), detail: file,
+    });
     const off = window.api.dba.onProgress((p) => {
-      if (p && p.total) status.textContent = t('正在读取表结构 {done}/{total}…', { done: p.done, total: p.total });
+      if (p && p.total) {
+        status.textContent = t('正在读取表结构 {done}/{total}…', { done: p.done, total: p.total });
+        task.progress(status.textContent, (p.done / p.total) * 100);
+      }
     });
     try {
       const result = await window.api.dba.dataDict(target.connId, {
         db: target.db, schema: target.schema, format, file, includeViews: includeViews.checked,
       });
-      toast.success(result.failed
+      const message = result.failed
         ? t('已导出 {n} 个对象（{f} 个读取失败）', { n: result.tables, f: result.failed })
-        : t('已导出 {n} 个对象', { n: result.tables }));
+        : t('已导出 {n} 个对象', { n: result.tables });
+      toast.success(message);
+      task.done(message);
       return true;
     } catch (error) {
       toast.error(t('导出失败：') + (error && error.message ? error.message : error));
       status.textContent = '';
+      task.fail(error);
       return false;
     } finally {
       running = false;

@@ -36,6 +36,8 @@ const SCHEMA = {
   gridDensity: { def: 'default', parse: stringIn('compact', 'default', 'comfortable') },
   // 快捷键方案，见 app.js 的 KEYMAPS
   keymap: { def: 'dbpanda', parse: stringIn('dbpanda', 'navicat') },
+  // 每个「连接 + 库」保留最近几份备份，超出的自动删除
+  backupKeep: { def: 7, parse: intRange(1, 99) },
   // 执行 UPDATE/DELETE 前是否提示受影响行数
   // off 关闭 / risky 仅无 WHERE 或影响过大时 / always 每次写操作都提示
   impactPreview: { def: 'risky', parse: stringIn('off', 'risky', 'always') },

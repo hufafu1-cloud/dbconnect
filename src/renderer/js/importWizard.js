@@ -1,8 +1,9 @@
 // 数据导入向导：选择文件 → 解析选项/预览 → 目标与字段映射 → 执行
 import { el } from './util.js';
 import { openModal, toast } from './toast.js';
-import { state, emit, objectsCacheKey } from './state.js';
+import { state, emit, objectsCacheKey, connLabel } from './state.js';
 import { authorizeOperation } from './danger.js';
+import { startTask } from './taskCenter.js';
 
 export async function openImportWizard(target) {
   // target: {connId, db, schema, table?}
@@ -279,19 +280,26 @@ export async function openImportWizard(target) {
     running = true;
     progressBar.style.display = '';
     const fill = progressBar.firstChild;
+    const task = startTask({
+      title: '数据导入', kind: 'import', connName: connLabel(target.connId),
+      detail: `${target.schema ? target.schema + '.' : ''}${approvedImport.table || ''}`,
+    });
     const off = window.api.imp.onProgress((p) => {
       fill.style.width = Math.round((p.done / Math.max(p.total, 1)) * 100) + '%';
       progressText.textContent = `已处理 ${p.done.toLocaleString()} / ${p.total.toLocaleString()} 行`;
+      task.progress(progressText.textContent, p.total ? (p.done / p.total) * 100 : undefined);
     });
     try {
       const r = await window.api.imp.run(target.connId, approvedImport);
       let msg = `导入完成：成功 ${r.ok.toLocaleString()} 行`;
       if (r.failed) msg += `，失败 ${r.failed.toLocaleString()} 行\n${(r.errors || []).join('\n')}`;
       (r.failed ? toast.error : toast.success)(msg, r.failed ? 12000 : 5000);
+      task.done(msg.split('\n')[0]);
       emit('objects-changed', { connId: target.connId, db: target.db, schema: target.schema });
       m.close();
     } catch (e) {
       toast.error('导入失败：\n' + e.message, 15000);
+      task.fail(e);
     } finally {
       off();
       running = false;

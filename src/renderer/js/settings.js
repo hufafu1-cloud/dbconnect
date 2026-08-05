@@ -14,6 +14,7 @@ const DEFAULTS = {
   gridDensity: 'default',
   keymap: 'dbpanda',
   impactPreview: 'risky',
+  backupKeep: 7,
   sidebarWidth: 280, // 与 css/app.css 的 #sidebar width 一致
   queryMaxRows: 2000,
   tablePageSize: 500,

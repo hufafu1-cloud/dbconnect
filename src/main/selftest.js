@@ -1353,6 +1353,133 @@ async function runSelfTest() {
     && partial.tables.find((x) => x.name === 'ok_table').columns.length === 1
     && /模拟元数据读取失败/.test(partial.tables.find((x) => x.name === 'boom').error));
 
+  // ---- 备份 / 还原：端到端，备份必须真的能还原回来 ----
+  const backup = require('./backup');
+  // store / safety 在本文件后面才声明，这里用局部别名避免 TDZ
+  const bkStore = require('./store');
+  const bkSafety = require('./safety');
+  await ad.runScript('main', `
+    CREATE TABLE bk_demo (id INTEGER PRIMARY KEY, v TEXT);
+    INSERT INTO bk_demo(v) VALUES ('a'), ('b'), ('c');
+  `);
+  const bkConn = bkStore.save({ name: '备份自检', type: 'sqlite', file });
+  const made = await backup.create(ad, {
+    connId: bkConn.id, connName: '备份自检', db: 'main', name: '自检备份', keep: 3,
+  });
+  check('backup 生成元数据与压缩文件', made.id && made.bytes > 0 && made.tables >= 1
+    && fs.existsSync(path.join(backup.backupRoot(), made.dataFile)));
+  check('backup 压缩后体积小于原始 SQL', made.bytes < made.rawBytes);
+  check('backup 校验统计到语句数', made.statements > 0);
+  const listed = await backup.list({ connId: bkConn.id });
+  check('backup 能按连接列出且新的在前', listed.length >= 1 && listed[0].id === made.id && !listed[0].missing);
+
+  // 还原前先把数据毁掉，能恢复才算数
+  await ad.runScript('main', "DELETE FROM bk_demo; INSERT INTO bk_demo(v) VALUES ('毁掉了');");
+  const restored = await backup.restore(ad, { id: made.id, db: 'main' });
+  const afterRestore = await ad.runScript('main', 'SELECT v FROM bk_demo ORDER BY id');
+  const restoredValues = (afterRestore[0].rows || []).map((r) => (Array.isArray(r) ? r[0] : r.v));
+  check('backup 还原后数据与备份时一致',
+    restored.executed > 0 && restoredValues.join(',') === 'a,b,c', restoredValues);
+
+  // 中间的未压缩 .sql 不能留在备份目录里
+  check('backup 不残留未压缩的中间文件',
+    !fs.readdirSync(backup.backupRoot()).some((n) => n.endsWith('.sql')));
+
+  // 校验必须能识别损坏的备份
+  const corrupt = path.join(backup.backupRoot(), 'corrupt-test.sql.gz');
+  fs.writeFileSync(corrupt, Buffer.from('这不是 gzip 数据'));
+  let corruptDetected = false;
+  try { await backup.verify(corrupt); } catch (e) { corruptDetected = /无法解压|损坏/.test(e.message); }
+  check('backup 校验能识别损坏文件', corruptDetected);
+  fs.rmSync(corrupt, { force: true });
+
+  // 保留份数：连做 4 份、keep=2，应当只剩最近 2 份
+  for (let i = 0; i < 3; i++) {
+    await new Promise((r) => setTimeout(r, 1100)); // 备份 id 含到秒的时间戳，避免同秒重名
+    await backup.create(ad, { connId: bkConn.id, connName: '备份自检', db: 'main', keep: 2 });
+  }
+  const afterPrune = (await backup.list({ connId: bkConn.id })).filter((x) => x.db === 'main');
+  check('backup 按保留份数自动清理旧备份', afterPrune.length === 2, afterPrune.length);
+  check('backup 清理后不留孤儿数据文件',
+    fs.readdirSync(backup.backupRoot()).filter((n) => n.endsWith('.sql.gz')).length === 2);
+
+  // 数据文件被手工删除时要如实标出，而不是假装备份还在
+  const victim = afterPrune[0];
+  fs.rmSync(path.join(backup.backupRoot(), victim.dataFile), { force: true });
+  const withMissing = await backup.list({ connId: bkConn.id });
+  check('backup 数据文件缺失会被标出', withMissing.find((x) => x.id === victim.id).missing === true);
+
+  await backup.remove(victim.id);
+  check('backup 删除会同时清掉元数据',
+    !(await backup.list({ connId: bkConn.id })).some((x) => x.id === victim.id));
+
+  // 只读连接必须拦住还原（还原会 DROP 现有表）
+  const roBackupConn = bkStore.save({ name: '只读还原自检', type: 'sqlite', file, readOnly: true });
+  let restoreBlocked = false;
+  try { bkSafety.assertNotReadOnly('backup.restore', { connId: roBackupConn.id, id: made.id }); }
+  catch (e) { restoreBlocked = /已设为只读/.test(e.message); }
+  check('backup 只读连接拒绝还原', restoreBlocked);
+  const prodBackupConn = bkStore.save({ name: '生产还原自检', type: 'sqlite', file, env: 'prod' });
+  check('backup 生产连接还原必须审批',
+    bkSafety.describe('backup.restore', { connId: prodBackupConn.id, id: made.id, db: 'main' }).required === true);
+  bkStore.remove(bkConn.id);
+  bkStore.remove(roBackupConn.id);
+  bkStore.remove(prodBackupConn.id);
+  // ---- 定时任务：排期算错了会导致任务不跑或狂跑，必须钉死 ----
+  const scheduler = require('./scheduler');
+  const schedConn = bkStore.save({ name: '定时自检', type: 'sqlite', file });
+  const mkJob = (extra) => scheduler.save({
+    name: '定时自检任务', connId: schedConn.id, db: 'main', kind: 'backup', ...extra,
+  });
+  const daily = mkJob({ scheduleType: 'daily', at: '02:30' });
+  check('schedule 保存并回显时刻', daily.at === '02:30' && daily.scheduleType === 'daily');
+  const nextDaily = new Date(daily.nextRunAt);
+  check('schedule 每日任务下次运行落在设定时刻',
+    nextDaily.getHours() === 2 && nextDaily.getMinutes() === 30 && daily.nextRunAt > Date.now());
+  const weekly = mkJob({ scheduleType: 'weekly', at: '03:00', weekday: 5 });
+  check('schedule 每周任务下次运行落在设定星期',
+    new Date(weekly.nextRunAt).getDay() === 5 && new Date(weekly.nextRunAt).getHours() === 3);
+  const interval = mkJob({ scheduleType: 'interval', intervalMinutes: 30 });
+  check('schedule 间隔任务按分钟排期',
+    interval.nextRunAt - Date.now() <= 30 * 60 * 1000 + 1000);
+  check('schedule 间隔下限被夹住', mkJob({ scheduleType: 'interval', intervalMinutes: 1 }).intervalMinutes === 5);
+  check('schedule 非法时刻回落到 02:00', mkJob({ scheduleType: 'daily', at: '99:99' }).at === '02:00');
+  check('schedule 非法类型回落到备份', mkJob({ kind: 'rm -rf' }).kind === 'backup');
+  check('schedule 停用后不再排期', mkJob({ enabled: false }).nextRunAt === null);
+
+  let missingConn = false;
+  try { scheduler.save({ name: 'x', db: 'main' }); } catch (e) { missingConn = /必须指定连接/.test(e.message); }
+  check('schedule 缺少连接会被拒绝', missingConn);
+  let missingDb = false;
+  try { scheduler.save({ name: 'x', connId: schedConn.id }); } catch (e) { missingDb = /必须指定数据库/.test(e.message); }
+  check('schedule 缺少数据库会被拒绝', missingDb);
+
+  // 端到端：手动触发一次备份作业，必须真的产出备份
+  const beforeRun = (await backup.list({ connId: schedConn.id })).length;
+  const ran = await scheduler.runNow(daily.id);
+  check('schedule 手动执行备份作业成功', ran.lastStatus === 'ok', ran.lastMessage);
+  check('schedule 执行后确实产出了备份',
+    (await backup.list({ connId: schedConn.id })).length === beforeRun + 1);
+  check('schedule 执行后重新排到下一次', ran.nextRunAt > Date.now());
+
+  // 未保存密码的连接不能自动连，必须如实报错而不是静默跳过
+  const noPwConn = bkStore.save({
+    name: '免密自检', type: 'mysql', host: '127.0.0.1', port: 1, user: 'u',
+    password: 'x', savePassword: false,
+  });
+  const noPwJob = scheduler.save({ name: '免密任务', connId: noPwConn.id, db: 'main', kind: 'backup' });
+  bkStore.clearSessionPasswords();
+  const noPwResult = await scheduler.runNow(noPwJob.id);
+  check('schedule 未保存密码的连接给出明确错误',
+    noPwResult.lastStatus === 'failed' && /未保存密码/.test(noPwResult.lastMessage), noPwResult.lastMessage);
+
+  for (const job of scheduler.list()) scheduler.remove(job.id);
+  check('schedule 删除后列表为空', scheduler.list().length === 0);
+  bkStore.remove(schedConn.id);
+  bkStore.remove(noPwConn.id);
+
+  await ad.runScript('main', 'DROP TABLE bk_demo;');
+
   await ad.runScript('main', 'DROP VIEW dict_view; DROP TABLE dict_demo;');
   await ad.runScript('main', 'DROP TABLE fk_child_implicit; DROP TABLE fk_child; DROP TABLE fk_parent;');
   await ad.runScript('main', `

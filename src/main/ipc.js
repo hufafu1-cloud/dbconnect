@@ -686,6 +686,40 @@ function register(getWin) {
   h('dba:cancelSqlFile', (event, a) =>
     dbm.get(a.connId).cancelOperation(rendererRequestId(event, a.taskId)), null, true);
 
+  // ---- 备份 / 还原 ----
+  // 备份目录由主进程决定（userData/backups），渲染进程不能指定路径，
+  // 否则等于开了一个「让主进程往任意位置写文件」的口子。
+  const backup = require('./backup');
+  h('backup:list', (a) => backup.list(a || {}));
+  h('backup:describe', (a) => backup.describe(a.id));
+  h('backup:remove', (a) => backup.remove(a.id));
+  h('backup:root', () => backup.backupRoot());
+  h('backup:reveal', async () => {
+    const { shell } = require('electron');
+    await fs.promises.mkdir(backup.backupRoot(), { recursive: true });
+    return shell.openPath(backup.backupRoot());
+  });
+  ipcMain.handle('backup:create', dbaHandler((a, prog) =>
+    backup.create(dbm.get(a.connId), a, prog), null, 'backup:create'));
+  // 还原是破坏性最强的写操作，走完整审批 + 只读闸门
+  ipcMain.handle('backup:restore', dbaHandler(async (a, prog, approval, event) =>
+    backup.restore(dbm.get(a.connId), {
+      ...a, taskId: rendererRequestId(event, a.taskId || `restore-${a.id}`),
+    }, prog), 'backup.restore', 'backup:restore'));
+
+  // ---- 定时任务（仅在应用运行时生效） ----
+  const scheduler = require('./scheduler');
+  h('schedule:list', () => scheduler.list());
+  h('schedule:save', (a) => scheduler.save(a));
+  h('schedule:remove', (a) => scheduler.remove(a.id));
+  h('schedule:runNow', (a) => scheduler.runNow(a.id));
+  scheduler.start(() => {
+    const w = getWin();
+    if (w && !w.isDestroyed()) {
+      try { w.webContents.send('schedule:changed'); } catch (e) { /* 窗口正在销毁 */ }
+    }
+  });
+
   // ---- 数据字典导出（走 dbaHandler：自带进度推送与审计） ----
   const dataDict = require('./dataDict');
   ipcMain.handle('dba:dataDict', dbaHandler((a, prog) => {

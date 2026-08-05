@@ -507,6 +507,80 @@ app.whenReady().then(async () => {
         })()`);
         const securityOk = security.connections > 0 && security.cards === security.connections
           && security.leaks === 0 && security.typesOk && security.fourChecksEach && security.mentionsReadOnly;
+        // 任务中心：关掉对话框后任务仍要可见，这是「长任务后台化」的全部意义
+        const taskCenter = await win.webContents.executeJavaScript(`(async () => {
+          const tc = await import('./js/taskCenter.js');
+          const { openTaskTab } = await import('./js/taskTab.js');
+          const indicator = document.querySelector('#status-tasks');
+          const before = indicator.hidden;
+          const running = tc.startTask({ title: '冒烟任务', kind: 'test', connName: 'demo' });
+          running.progress('处理中 3/10', 30);
+          const finished = tc.startTask({ title: '已完成任务', kind: 'test' });
+          finished.done('完成 42 行');
+          const failing = tc.startTask({ title: '失败任务', kind: 'test' });
+          failing.fail(new Error('模拟失败原因'));
+          openTaskTab();
+          await new Promise((r) => setTimeout(r, 150));
+          const out = {
+            hiddenBefore: before,
+            indicatorShown: !indicator.hidden,
+            indicatorText: indicator.textContent,
+            items: document.querySelectorAll('.task-item').length,
+            runningItems: document.querySelectorAll('.task-item.task-running').length,
+            failedShown: /模拟失败原因/.test(document.querySelector('.task-failed .task-msg').textContent),
+            barWidth: (document.querySelector('.task-bar-fill') || {}).style?.width || '',
+          };
+          running.done('收尾完成');
+          await new Promise((r) => setTimeout(r, 80));
+          out.indicatorHiddenAfter = indicator.hidden;
+          tc.clearFinished();
+          await new Promise((r) => setTimeout(r, 80));
+          out.afterClear = document.querySelectorAll('.task-item').length;
+          return out;
+        })()`);
+        const taskOk = taskCenter.hiddenBefore && taskCenter.indicatorShown
+          && /1 个任务运行中/.test(taskCenter.indicatorText)
+          && taskCenter.items === 3 && taskCenter.runningItems === 1
+          && taskCenter.failedShown && taskCenter.barWidth === '30%'
+          && taskCenter.indicatorHiddenAfter && taskCenter.afterClear === 0;
+        // 标签页拖拽排序与左右分屏
+        const tabsProbe = await win.webContents.executeJavaScript(`(async () => {
+          const tabs = await import('./js/tabs.js');
+          const a = tabs.addTab({ id: 'probe-a', title: 'A' });
+          const b = tabs.addTab({ id: 'probe-b', title: 'B' });
+          const c = tabs.addTab({ id: 'probe-c', title: 'C' });
+          const order = () => [...document.querySelectorAll('#tabbar .tab .tab-title')].map((n) => n.textContent);
+          const before = order();
+          tabs.moveTab('probe-c', 'probe-a');           // C 拖到 A 前面
+          const afterMove = order();
+          const draggable = [...document.querySelectorAll('#tabbar .tab')].every((n) => n.draggable);
+          tabs.activate('probe-a');
+          tabs.setSecondaryTab('probe-b');
+          const panes = document.querySelector('#tabpanes');
+          const split = {
+            splitClass: panes.classList.contains('split'),
+            activePane: !!document.querySelector('.tabpane.active'),
+            secondaryPane: !!document.querySelector('.tabpane.secondary'),
+            secondaryId: tabs.getSecondaryTabId(),
+          };
+          // 激活副标签应当自动退出分屏，否则同一个 pane 会出现在两边
+          tabs.activate('probe-b');
+          split.clearedOnActivate = !panes.classList.contains('split') && tabs.getSecondaryTabId() === null;
+          tabs.setSecondaryTab('probe-a');
+          await tabs.closeTab('probe-a', true);
+          split.clearedOnClose = !panes.classList.contains('split');
+          await tabs.closeTab('probe-b', true);
+          await tabs.closeTab('probe-c', true);
+          return { before, afterMove, draggable, ...split };
+        })()`);
+        const tabsOk = tabsProbe.draggable
+          && tabsProbe.before.slice(-3).join() === 'A,B,C'
+          && tabsProbe.afterMove.slice(-3).join() === 'C,A,B'
+          && tabsProbe.splitClass && tabsProbe.activePane && tabsProbe.secondaryPane
+          && tabsProbe.secondaryId === 'probe-b'
+          && tabsProbe.clearedOnActivate && tabsProbe.clearedOnClose;
+        console.log('[SMOKE][tabs]', JSON.stringify(tabsProbe));
+        console.log('[SMOKE][tasks]', JSON.stringify(taskCenter));
         console.log('[SMOKE][security]', JSON.stringify(security));
         console.log('[SMOKE][audit]', JSON.stringify(audit));
         console.log('[SMOKE][palette]', JSON.stringify(palette));
@@ -529,7 +603,7 @@ app.whenReady().then(async () => {
         const failedSessionRetryPrompt = await win.webContents.executeJavaScript(
           `!!document.querySelector('.password-prompt') && document.querySelector('.modal-head').textContent.includes('Smoke failed session password')`);
         await win.webContents.executeJavaScript('window.__test.closeMenus()');
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} passwordOption=${menuLayout.passwordOptionOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} passwordOption=${menuLayout.passwordOptionOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk

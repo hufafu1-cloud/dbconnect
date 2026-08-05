@@ -153,6 +153,26 @@ contextBridge.exposeInMainWorld('api', {
   security: {
     review: () => inv('security:review'),
   },
+  schedule: {
+    list: () => inv('schedule:list'),
+    save: (job) => inv('schedule:save', job),
+    remove: (id) => inv('schedule:remove', { id }),
+    runNow: (id) => inv('schedule:runNow', { id }),
+    onChanged: (cb) => {
+      const listener = () => cb();
+      ipcRenderer.on('schedule:changed', listener);
+      return () => ipcRenderer.removeListener('schedule:changed', listener);
+    },
+  },
+  backup: {
+    list: (opts) => inv('backup:list', opts || {}),
+    describe: (id) => inv('backup:describe', { id }),
+    remove: (id) => inv('backup:remove', { id }),
+    root: () => inv('backup:root'),
+    reveal: () => inv('backup:reveal'),
+    create: (connId, t) => inv('backup:create', { connId, ...t }),
+    restore: (connId, t) => inv('backup:restore', { connId, ...t }),
+  },
   settings: {
     read: () => inv('settings:read'),
     patch: (partial) => inv('settings:patch', partial),

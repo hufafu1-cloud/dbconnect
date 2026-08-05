@@ -3,6 +3,7 @@ import { el } from './util.js';
 import { openModal, toast, confirmDialog } from './toast.js';
 import { state, emit, connLabel, objectsCacheKey } from './state.js';
 import { authorizeOperation } from './danger.js';
+import { startTask } from './taskCenter.js';
 
 function openConnsOptions(selected) {
   return [...state.open.keys()].map((id) =>
@@ -276,18 +277,22 @@ export async function openSyncDialog(preset) {
     }
     if (!approvedStruct) return;
     running = true;
+    const task = startTask({ title: '结构同步执行', kind: 'sync', connName: connLabel(dstConn.value) });
     const off = window.api.dba.onProgress((p) => {
       if (p.total) progressText.textContent = `执行 ${p.done}/${p.total}`;
+      task.progress(progressText.textContent, p.total ? (p.done / p.total) * 100 : undefined);
     });
     try {
       const r = await window.api.dba.execSqls(dstConn.value, dstDb.value, sqls, approvedStruct.approvalToken);
       toast.success(`结构同步完成：已执行 ${r.executed} 条语句`);
       progressText.textContent = `已执行 ${r.executed} 条语句`;
+      task.done(progressText.textContent);
       btnExec.style.display = 'none';
       emit('objects-changed', { connId: dstConn.value, db: dstDb.value, schema: dstSchema.value || null });
     } catch (e) {
       toast.error('执行失败：\n' + e.message, 15000);
       progressText.textContent = '失败：' + e.message;
+      task.fail(e);
     } finally {
       off();
       running = false;
@@ -340,10 +345,15 @@ export async function openSyncDialog(preset) {
     }
     if (!approvedDataSync) return;
     running = true;
+    const task = startTask({
+      title: dataMode === 'apply' ? '数据同步（应用）' : (dataMode === 'script' ? '数据同步（生成脚本）' : '数据同步（仅统计）'),
+      kind: 'sync', connName: connLabel(dstConn.value),
+    });
     const off = window.api.dba.onProgress((p) => {
       if (p.tablesTotal !== undefined) {
         progressText.textContent = `[${p.tablesDone}/${p.tablesTotal}] ${p.table || ''} — ${p.phase}` +
           (p.inserts !== undefined ? `　插入 ${p.inserts} · 更新 ${p.updates} · 删除 ${p.deletes}` : '');
+        task.progress(progressText.textContent, p.tablesTotal ? (p.tablesDone / p.tablesTotal) * 100 : undefined);
       }
     });
     try {
@@ -366,10 +376,12 @@ export async function openSyncDialog(preset) {
       resultBox.style.display = 'flex';
       const summary = `比对完成：插入 ${ti.toLocaleString()} · 更新 ${tu.toLocaleString()} · 删除 ${td.toLocaleString()}`;
       progressText.textContent = summary;
+      task.done(summary);
       toast.success(summary, 8000);
     } catch (e) {
       toast.error('数据同步失败：\n' + e.message, 15000);
       progressText.textContent = '失败：' + e.message;
+      task.fail(e);
     } finally {
       off();
       running = false;

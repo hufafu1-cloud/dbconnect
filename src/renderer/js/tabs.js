@@ -281,14 +281,111 @@ export function uid(prefix) { return `${prefix}-${++seq}`; }
 
 export function getActiveTab() { return activeId ? tabs.get(activeId) : null; }
 
+// ---------------- 标签页拖拽排序 ----------------
+// workspaceOrder 本来就是标签顺序的唯一来源（恢复工作区、快照都用它），
+// 所以拖拽只要改这个数组再重排 DOM 即可，顺序会自动被持久化。
+let draggingId = null;
+
+function moveTabBefore(sourceId, targetId) {
+  if (!sourceId || sourceId === targetId) return false;
+  const from = workspaceOrder.indexOf(sourceId);
+  if (from < 0) return false;
+  workspaceOrder.splice(from, 1);
+  const to = targetId === null ? workspaceOrder.length : workspaceOrder.indexOf(targetId);
+  workspaceOrder.splice(to < 0 ? workspaceOrder.length : to, 0, sourceId);
+  reorderWorkspaceDom();
+  scheduleWorkspacePersist();
+  return true;
+}
+
+function clearDropMarks() {
+  for (const tt of tabs.values()) {
+    tt.tabEl.classList.remove('drop-before', 'drop-after', 'dragging');
+  }
+}
+
+function setupTabDrag(tabEl, id) {
+  tabEl.draggable = true;
+  tabEl.addEventListener('dragstart', (e) => {
+    draggingId = id;
+    tabEl.classList.add('dragging');
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', id);
+    } catch (error) { /* 某些环境下 dataTransfer 只读 */ }
+  });
+  tabEl.addEventListener('dragend', () => { draggingId = null; clearDropMarks(); });
+  tabEl.addEventListener('dragover', (e) => {
+    if (!draggingId || draggingId === id) return;
+    e.preventDefault();
+    const rect = tabEl.getBoundingClientRect();
+    const after = e.clientX > rect.left + rect.width / 2;
+    tabEl.classList.toggle('drop-before', !after);
+    tabEl.classList.toggle('drop-after', after);
+  });
+  tabEl.addEventListener('dragleave', () => tabEl.classList.remove('drop-before', 'drop-after'));
+  tabEl.addEventListener('drop', (e) => {
+    if (!draggingId || draggingId === id) return;
+    e.preventDefault();
+    const rect = tabEl.getBoundingClientRect();
+    const after = e.clientX > rect.left + rect.width / 2;
+    if (after) {
+      const order = orderedTabIds();
+      const next = order[order.indexOf(id) + 1] || null;
+      moveTabBefore(draggingId, next);
+    } else {
+      moveTabBefore(draggingId, id);
+    }
+    draggingId = null;
+    clearDropMarks();
+  });
+}
+
+/** 仅供测试/自检使用：不经过鼠标事件直接重排 */
+export function moveTab(sourceId, targetId) {
+  return moveTabBefore(sourceId, targetId);
+}
+
+// ---------------- 左右分屏 ----------------
+// 副标签页固定显示在右半边，主标签页照常切换——用来边看表结构边写 SQL、
+// 或者对比两个查询结果。只维持一个副标签，够用且不会把布局搞复杂。
+let secondaryId = null;
+
+function applyPaneLayout() {
+  const panes = $('#tabpanes');
+  if (panes) panes.classList.toggle('split', !!secondaryId && tabs.has(secondaryId));
+  for (const [tid, tt] of tabs) {
+    tt.tabEl.classList.toggle('active', tid === activeId);
+    tt.tabEl.classList.toggle('secondary', tid === secondaryId);
+    tt.paneEl.classList.toggle('active', tid === activeId);
+    tt.paneEl.classList.toggle('secondary', tid === secondaryId && tid !== activeId);
+  }
+}
+
+export function getSecondaryTabId() { return secondaryId; }
+
+/** 把某个标签页固定到右半边；传同一个 id 或 null 表示取消分屏 */
+export function setSecondaryTab(id) {
+  if (!id || secondaryId === id || !tabs.has(id)) secondaryId = null;
+  else secondaryId = id;
+  // 主副不能是同一个标签页，否则同一个 pane 要同时出现在两边
+  if (secondaryId && secondaryId === activeId) {
+    const other = [...tabs.keys()].find((tid) => tid !== secondaryId);
+    if (other) activeId = other;
+    else secondaryId = null;
+  }
+  applyPaneLayout();
+  const secondary = secondaryId && tabs.get(secondaryId);
+  if (secondary && secondary.onShow) secondary.onShow();
+}
+
 export function activate(id) {
   const t = tabs.get(id);
   if (!t) return;
-  for (const [tid, tt] of tabs) {
-    tt.tabEl.classList.toggle('active', tid === id);
-    tt.paneEl.classList.toggle('active', tid === id);
-  }
+  // 激活当前的副标签就等于取消分屏，避免同一个 pane 出现在两边
+  if (secondaryId === id) secondaryId = null;
   activeId = id;
+  applyPaneLayout();
   if (t.onShow) t.onShow();
   scheduleWorkspacePersist();
 }
@@ -310,6 +407,7 @@ export async function closeTab(id, force) {
   tabs.delete(id);
   deferredWorkspaceEntries.delete(id);
   workspaceOrder = workspaceOrder.filter((tabId) => tabId !== id);
+  if (secondaryId === id) { secondaryId = null; applyPaneLayout(); }
   if (activeId === id) {
     const rest = [...tabs.keys()];
     activate(rest[rest.length - 1]);
@@ -344,6 +442,10 @@ export function addTab(opts) {
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showMenu(e.clientX, e.clientY, [
+      secondaryId === id
+        ? { label: '取消拆分', onClick: () => setSecondaryTab(null) }
+        : { label: '在右侧拆分', onClick: () => setSecondaryTab(id) },
+      { sep: true },
       !opts.permanent && { label: '关闭', hint: 'Ctrl+W', onClick: () => closeTab(id) },
       { label: '关闭其他标签页', onClick: () => closeOtherTabs(id) },
       { label: '关闭右侧标签页', onClick: () => closeTabsToRight(id) },
@@ -351,6 +453,7 @@ export function addTab(opts) {
       { label: '关闭全部标签页', onClick: () => closeAllTabs() },
     ].filter(Boolean));
   });
+  setupTabDrag(tabEl, id);
 
   const paneEl = el('div', { class: 'tabpane' });
   $('#tabbar').append(tabEl);
