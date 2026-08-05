@@ -5,6 +5,27 @@ import { cellViewer, toast } from './toast.js';
 
 const NUM_RE = /int|decimal|numeric|float|double|real|money|number/i;
 
+// ---------- 虚拟滚动参数 ----------
+// 行高由 CSS 固定（.grid td { height: 26px; white-space: nowrap }），不随内容变化，
+// 因此可以用「上下两个占位行 + 中间只渲染可见区」的方式虚拟化，
+// 表格布局、粘性表头、列宽 colgroup 全部保持原样。
+const OVERSCAN = 12;              // 视口上下各多渲染的行数，避免快速滚动露白
+const VIRTUAL_MIN_ROWS = 150;     // 行数不到这个值就整表渲染，小表行为与改造前完全一致
+const FALLBACK_ROW_HEIGHT = 27;   // 首次实测前的估算值（26px 内容 + 1px 下边框）
+
+// 行高档位（选项 → 数据网格）改变后，已打开的网格必须重排一次才能量到新行高。
+// 用 WeakRef 持有，标签页关掉的网格会自然被回收，不会因为这张表而泄漏。
+const liveGrids = new Set();
+
+/** 重排所有还活着的网格（行高档位切换时调用） */
+export function refreshAllGrids() {
+  for (const ref of [...liveGrids]) {
+    const grid = ref.deref();
+    if (!grid) { liveGrids.delete(ref); continue; }
+    try { grid.render(); } catch (e) { console.error('[grid] 重排失败:', e); }
+  }
+}
+
 /** 多格式复制文本构建：tsv / tsvHeader / csv / markdown / insert */
 function buildCopyText(format, names, rows, ctx) {
   const plain = (v) => (v === null || v === undefined) ? ''
@@ -65,14 +86,27 @@ export class DataGrid {
     this.selection = new Set();
     this.lastSel = null;
     this.focus = null; // {dr: 显示行序号(含新行), c: 列序号}
+    this._rowHeight = 0;             // 实测行高，0 表示尚未测量
+    this._window = { start: 0, end: 0 }; // 当前已渲染的显示行区间 [start, end)
+    this._topSpacer = null;
+    this._bottomSpacer = null;
     this.wrap = el('div', { class: 'grid-wrap', tabindex: '0' });
     host.append(this.wrap);
     this.wrap.addEventListener('scroll', () => {
       // 编辑器滚动或文本选择过程中不能误关闭浮动 textarea。
-      if (this._editor && document.activeElement === this._editor.ta) return;
-      this._removeEditor(false);
+      if (!(this._editor && document.activeElement === this._editor.ta)) {
+        this._removeEditor(false);
+      }
+      this._renderWindow();
     });
     this.wrap.addEventListener('keydown', (e) => this._onKeyDown(e));
+    // 视口尺寸变化要重算窗口：窗口缩放会改变可见行数；更重要的是标签页从隐藏
+    // 变为可见时 clientHeight 才有值，否则整张表会一直只渲染出最初的十几行。
+    if (typeof ResizeObserver === 'function') {
+      this._resizeObserver = new ResizeObserver(() => this._renderWindow());
+      this._resizeObserver.observe(this.wrap);
+    }
+    if (typeof WeakRef === 'function') liveGrids.add(new WeakRef(this));
   }
 
   get editable() { return !!this.opts.editable && this.pk.length > 0; }
@@ -149,17 +183,116 @@ export class DataGrid {
     });
     table.append(el('thead', {}, thr));
 
-    // 数据行
+    // 数据行：上下各一个占位行撑出总高度，中间只放可见区间的真实行
     const tbody = el('tbody');
-    this.rows.forEach((row, r) => tbody.append(this._renderRow(row, r, false)));
-    this.newRows.forEach((nr, j) => tbody.append(this._renderRow(nr.values, j, true)));
+    this._topSpacer = this._makeSpacer();
+    this._bottomSpacer = this._makeSpacer();
+    tbody.append(this._topSpacer, this._bottomSpacer);
     table.append(tbody);
     this.wrap.append(table);
     this.tbody = tbody;
+    // 行高按 CSS 走，但字号/缩放变化后可能不同，每次整表渲染重新实测一次
+    this._rowHeight = 0;
+    this._window = { start: 0, end: 0 };
+    this._renderWindow({ force: true });
     if (!this.rows.length && !this.newRows.length) {
       this.wrap.append(el('div', { class: 'grid-empty' }, '(0 行)'));
     }
     if (this.focus) this._setFocus(this.focus.dr, this.focus.c, { scroll: false, select: false });
+  }
+
+  // ---------- 虚拟滚动 ----------
+  _makeSpacer() {
+    return el('tr', { class: 'grid-spacer' },
+      el('td', { colspan: this.columns.length + 1, style: { height: '0px' } }));
+  }
+
+  _setSpacer(tr, px) {
+    const height = `${Math.max(0, Math.round(px))}px`;
+    tr.style.height = height;
+    if (tr.firstChild) tr.firstChild.style.height = height;
+  }
+
+  /** 粘性表头占据的高度：行 dr 在滚动内容里的起点是 表头高 + dr * 行高 */
+  _theadHeight() {
+    const thead = this.tbody && this.tbody.previousElementSibling;
+    return thead ? thead.getBoundingClientRect().height : 0;
+  }
+
+  /** 当前应该渲染的显示行区间。行数少时退化为全量渲染。 */
+  _visibleRange() {
+    const total = this.rows.length + this.newRows.length;
+    if (total <= VIRTUAL_MIN_ROWS) return { start: 0, end: total };
+    const rowHeight = this._rowHeight || FALLBACK_ROW_HEIGHT;
+    const offset = this.wrap.scrollTop - this._theadHeight();
+    const viewHeight = this.wrap.clientHeight || 0;
+    const start = Math.max(0, Math.floor(offset / rowHeight) - OVERSCAN);
+    const end = Math.min(total, Math.ceil((offset + viewHeight) / rowHeight) + OVERSCAN);
+    return { start, end: Math.max(start, end) };
+  }
+
+  /** 重建可见区间内的行。区间没变化时直接返回，滚动时的开销可以忽略。 */
+  _renderWindow({ force = false } = {}) {
+    if (!this.tbody || !this._topSpacer || !this._bottomSpacer) return;
+    const { start, end } = this._visibleRange();
+    if (!force && start === this._window.start && end === this._window.end) return;
+
+    let node = this._topSpacer.nextSibling;
+    while (node && node !== this._bottomSpacer) {
+      const next = node.nextSibling;
+      node.remove();
+      node = next;
+    }
+    const frag = document.createDocumentFragment();
+    for (let dr = start; dr < end; dr++) {
+      const { r, isNew } = this._fromDisplay(dr);
+      const values = isNew ? this.newRows[r].values : this.rows[r];
+      if (!values) continue;
+      frag.append(this._renderRow(values, r, isNew, dr));
+    }
+    this._bottomSpacer.before(frag);
+    this._window = { start, end };
+
+    const rowHeight = this._rowHeight || FALLBACK_ROW_HEIGHT;
+    const total = this.rows.length + this.newRows.length;
+    this._setSpacer(this._topSpacer, start * rowHeight);
+    this._setSpacer(this._bottomSpacer, (total - end) * rowHeight);
+
+    this._measureRowHeight();
+    // 焦点单元格所在的行可能刚被重建，高亮要跟着回来
+    if (this.focus) {
+      const td = this._tdAt(this.focus.dr, this.focus.c);
+      if (td) td.classList.add('cell-focus');
+    }
+    // 正在编辑的单元格若被回收/重建，重新挂到新的 td 上；滚出窗口则置空，
+    // _setCell 对空 td 已有保护，模型照样更新。
+    if (this._editor) {
+      this._editor.td = this._tdAt(this._editor.dr, this._editor.i);
+    }
+  }
+
+  /** 首次渲染后实测真实行高；与估算值不同则按真实值重排一次 */
+  _measureRowHeight() {
+    if (this._rowHeight) return;
+    const first = this._topSpacer && this._topSpacer.nextSibling;
+    if (!first || first === this._bottomSpacer) return;
+    const height = first.getBoundingClientRect().height;
+    if (!height) return;
+    this._rowHeight = height;
+    if (Math.abs(height - FALLBACK_ROW_HEIGHT) > 0.5) this._renderWindow({ force: true });
+  }
+
+  /** 把某个显示行滚进视口（必要时先滚动再重建窗口，否则它根本没有 DOM） */
+  _scrollRowIntoView(dr) {
+    if (this._tdAt(dr, 0)) return;
+    const rowHeight = this._rowHeight || FALLBACK_ROW_HEIGHT;
+    const headHeight = this._theadHeight();
+    const top = headHeight + dr * rowHeight;
+    const viewHeight = this.wrap.clientHeight || 0;
+    this.wrap.scrollTop = top < this.wrap.scrollTop + headHeight
+      ? Math.max(0, top - headHeight)
+      : Math.max(0, top + rowHeight - viewHeight);
+    this._renderWindow();
   }
 
   // ---------- 单元格焦点 / 键盘导航 ----------
@@ -168,8 +301,9 @@ export class DataGrid {
     return dr < this.rows.length ? { r: dr, isNew: false } : { r: dr - this.rows.length, isNew: true };
   }
 
+  /** 显示行序号 → 单元格。行可能不在渲染窗口内，此时返回 null（调用方都有保护）。 */
   _tdAt(dr, c) {
-    const tr = this.tbody && this.tbody.querySelectorAll('tr')[dr];
+    const tr = this.tbody && this.tbody.querySelector(`tr[data-dr="${dr}"]`);
     return (tr && tr.children[c + 1]) || null;
   }
 
@@ -181,6 +315,9 @@ export class DataGrid {
     const old = this.tbody.querySelector('td.cell-focus');
     if (old) old.classList.remove('cell-focus');
     this.focus = { dr, c };
+    // 目标行可能在渲染窗口之外（键盘导航翻到远处），先把它滚进来再取 DOM
+    if (scroll) this._scrollRowIntoView(dr);
+    else this._renderWindow();
     const td = this._tdAt(dr, c);
     if (td) {
       td.classList.add('cell-focus');
@@ -267,12 +404,14 @@ export class DataGrid {
     }
   }
 
-  _renderRow(values, r, isNew) {
-    const tr = el('tr', { 'data-r': r, 'data-new': isNew ? '1' : '' });
+  _renderRow(values, r, isNew, dr) {
+    // data-dr 是全局唯一的显示行序号；虚拟化后 DOM 里的位置不再等于行号，
+    // 所有按行号找单元格的地方都要靠它来定位。
+    const tr = el('tr', { 'data-r': r, 'data-dr': dr, 'data-new': isNew ? '1' : '' });
     if (isNew) tr.classList.add('row-new');
     if (!isNew && this.deletedRows.has(r)) tr.classList.add('row-deleted');
     if (!isNew && this.selection.has(r)) tr.classList.add('selected');
-    const rn = el('td', { class: 'rownum' }, String(isNew ? this.rows.length + r + 1 : r + 1));
+    const rn = el('td', { class: 'rownum' }, String(dr + 1));
     rn.addEventListener('click', (e) => this._selectRow(r, isNew, e));
     tr.append(rn);
     this.columns.forEach((c, i) => {
@@ -332,8 +471,8 @@ export class DataGrid {
       this.selection.add(r);
     }
     this.lastSel = r;
-    // 更新行高亮
-    for (const tr of this.tbody.querySelectorAll('tr:not(.row-new)')) {
+    // 更新行高亮（只需处理窗口内的行；滚进来的新行在 _renderRow 里按 selection 上色）
+    for (const tr of this.tbody.querySelectorAll('tr[data-dr]:not(.row-new)')) {
       tr.classList.toggle('selected', this.selection.has(Number(tr.dataset.r)));
     }
     if (this.opts.onSelect) this.opts.onSelect([...this.selection]);
@@ -362,7 +501,8 @@ export class DataGrid {
     ta.style.top = (rect.top - wrapRect.top + this.wrap.scrollTop) + 'px';
     ta.style.width = Math.max(rect.width, 120) + 'px';
     ta.style.height = Math.max(rect.height + 2, 28) + 'px';
-    this._editor = { ta, td, r, i, isNew, orig: cur };
+    // 记下显示行序号：窗口重建后要靠它把编辑器重新挂回正确的 td
+    this._editor = { ta, td, r, i, isNew, orig: cur, dr: isNew ? this.rows.length + r : r };
     ta.addEventListener('keydown', (e) => {
       // 阻止网格和页面级快捷键抢占编辑器按键；Delete/Backspace 不拦截，
       // 让 textarea 原生删除当前选中的长文本。
@@ -500,14 +640,11 @@ export class DataGrid {
       { label: '复制为 Markdown', icon: 'copy', onClick: () => this._copyRows('markdown', r) },
       { sep: true },
       canEdit && { label: '编辑', icon: 'edit', onClick: () => {
-        const tr = this.tbody && this.tbody.querySelector(`tr[data-r="${r}"]${isNew ? '[data-new="1"]' : ':not([data-new="1"])'}`);
-        const td = tr && tr.children[i + 1];
+        const td = this._tdAt(isNew ? this.rows.length + r : r, i);
         if (td) this._beginEdit(td, r, i, isNew);
       } },
       canEdit && { label: '设为 NULL', onClick: () => {
-        const tr = this.tbody && this.tbody.querySelectorAll('tr')[isNew ? this.rows.length + r : r];
-        const td = tr && tr.children[i + 1];
-        this._setCell(r, i, null, isNew, td);
+        this._setCell(r, i, null, isNew, this._tdAt(isNew ? this.rows.length + r : r, i));
       } },
     ].filter(Boolean));
   }
@@ -532,13 +669,13 @@ export class DataGrid {
   addNewRow() {
     this.newRows.push({ values: new Array(this.columns.length).fill(undefined) });
     this.render();
-    // 聚焦新行第一个单元格
-    const trs = this.tbody.querySelectorAll('tr');
-    const tr = trs[trs.length - 1];
-    if (tr) {
-      tr.scrollIntoView({ block: 'nearest' });
-      const td = tr.children[1];
-      if (td) this._beginEdit(td, this.newRows.length - 1, 0, true);
+    // 聚焦新行第一个单元格。新行排在最后，大表里通常不在初始窗口内，先滚进来。
+    const dr = this.rows.length + this.newRows.length - 1;
+    this._scrollRowIntoView(dr);
+    const td = this._tdAt(dr, 0);
+    if (td) {
+      td.scrollIntoView({ block: 'nearest' });
+      this._beginEdit(td, this.newRows.length - 1, 0, true);
     }
     if (this.opts.onChange) this.opts.onChange();
   }

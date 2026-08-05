@@ -15,6 +15,13 @@ import * as actions from './actions.js';
 import { openQueryTab } from './queryTab.js';
 import { openTableTab } from './tableTab.js';
 import { statusbar } from './statusbar.js';
+import {
+  registerCommands, runCommand, matchShortcut, isEnabled,
+  setCommandContextProvider, accelHint, applyKeymap, accelConflicts,
+} from './commands.js';
+import { KEYMAPS, DEFAULT_KEYMAP } from './keymaps.js';
+import { buildMenuBar } from './menubar.js';
+import { loadSettings, getSetting, updateSettings, onSettingsChange } from './settings.js';
 
 // ---------------- 工具栏（Navicat 风格大图标） ----------------
 function newQueryFromToolbar() {
@@ -26,6 +33,11 @@ function newQueryFromToolbar() {
 async function openHistory() {
   const { openHistoryTab } = await import('./historyTab.js');
   return openHistoryTab();
+}
+
+/** 编辑菜单的剪贴板动作交给浏览器原生实现（按键本身也由浏览器处理） */
+function execEditCommand(cmd) {
+  try { document.execCommand(cmd); } catch (e) { /* ignore */ }
 }
 
 async function openAiPanelFromToolbar() {
@@ -198,15 +210,11 @@ function renderToolbarContext(target) {
   });
 }
 
+// 工具栏按钮的灰不灰由命令注册表的 enabled() 决定，和菜单用的是同一份判断
 function updateToolbarActions() {
-  const hasOpen = state.open.size > 0;
-  const hasDb = !!getActiveTarget({ requireOpen: true, requireDb: true });
-  if (toolbarActionEls.refresh) toolbarActionEls.refresh.disabled = !hasOpen;
-  if (toolbarActionEls.search) toolbarActionEls.search.disabled = !hasOpen;
-  if (toolbarActionEls.transfer) toolbarActionEls.transfer.disabled = !hasOpen;
-  if (toolbarActionEls.sync) toolbarActionEls.sync.disabled = !hasOpen;
-  if (toolbarActionEls.import) toolbarActionEls.import.disabled = !hasDb;
-  if (toolbarActionEls.dump) toolbarActionEls.dump.disabled = !hasDb;
+  for (const [commandId, btn] of Object.entries(toolbarActionEls)) {
+    if (btn) btn.disabled = !isEnabled(commandId);
+  }
 }
 
 function updateToolbarContext(target = state.activeTarget) {
@@ -260,6 +268,7 @@ function showToolbarMoreMenu(anchor) {
     { label: '转储 SQL 文件…', icon: 'exportIcon', onClick: () => runMenuAction('dump') },
     { label: '进程列表', icon: 'monitor', onClick: () => runMenuAction('processes') },
     { sep: true },
+    { label: '选项…', icon: 'theme', onClick: () => runMenuAction('open-settings') },
     { label: 'AI 助手设置…', icon: 'ai', onClick: () => runMenuAction('ai-config') },
     { label: '快捷键说明', icon: 'info', onClick: () => showAbout() },
   ]);
@@ -277,9 +286,15 @@ function buildToolbar() {
     }, iconEl(icon), el('span', { class: 'tbtn-label' }, label));
   };
 
+  // 提示里的快捷键统一从注册表取，避免按钮上写的和实际生效的对不上
+  const tip = (commandId, text) => {
+    const accel = accelHint(commandId);
+    return accel ? `${text} (${accel})` : text;
+  };
+
   const btnConn = main('connection', '连接', () => showConnMenu(btnConn), '新建连接', 'toolbar-connection');
   btnConn.querySelector('.tbtn-label').append(el('span', { class: 'caret' }, ' ▾'));
-  const btnQuery = main('query', '新建查询', newQueryFromToolbar, '新建查询 (Ctrl+Q)', 'toolbar-query');
+  const btnQuery = main('query', '新建查询', newQueryFromToolbar, tip('new-query', '新建查询'), 'toolbar-query');
 
   toolbarContextLabel = el('span', { class: 'toolbar-context-label' });
   toolbarContextEnv = el('span', { class: 'toolbar-context-env', style: { display: 'none' } });
@@ -291,8 +306,8 @@ function buildToolbar() {
     'aria-label': '当前数据库上下文',
   }, iconEl('connection', 'toolbar-context-icon'), toolbarContextLabel, toolbarContextEnv);
 
-  const btnRefresh = main('refresh', '刷新', () => runMenuAction('refresh'), '刷新当前对象 (F5)');
-  const btnSearch = main('filter', '查找', () => runMenuAction('search'), '在库中查找 (Ctrl+F)');
+  const btnRefresh = main('refresh', '刷新', () => runMenuAction('refresh'), tip('refresh', '刷新当前对象'));
+  const btnSearch = main('filter', '查找', () => runMenuAction('search'), tip('search', '在库中查找'));
   const btnTransfer = main('transfer', '传输', () => runMenuAction('transfer'), '数据传输');
   const btnSync = main('sync', '同步', () => runMenuAction('sync'), '结构/数据同步');
   const btnAi = main('ai', 'AI 助手', openAiPanelFromToolbar, 'AI 助手：优化 / 解释 / 生成 SQL');
@@ -314,10 +329,10 @@ function buildToolbar() {
 }
 
 // ---------------- 主题 ----------------
+/** 只负责改 DOM。持久化统一走设置中心（setTheme），避免两套存储各写各的。 */
 export function applyTheme(t) {
   if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
   else document.documentElement.removeAttribute('data-theme');
-  try { localStorage.setItem('dbc-theme', t); } catch (e) { /* ignore */ }
   // Chromium 对 sticky 合成层在 CSS 变量切换后可能不重绘：整页强制重排（单帧内完成，无闪烁）
   const b = document.body;
   if (b) {
@@ -326,9 +341,59 @@ export function applyTheme(t) {
     b.style.display = '';
   }
 }
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+}
+
+// 系统深浅色由主进程的 nativeTheme 判定；这里缓存最近一次结果，
+// 设置为「跟随系统」时用它决定实际主题。
+let systemPrefersDark = false;
+
+/** 把设置里的 theme（light/dark/system）解析成实际要应用的主题 */
+function resolveTheme(value) {
+  const setting = value || getSetting('theme');
+  if (setting === 'system') return systemPrefersDark ? 'dark' : 'light';
+  return setting === 'dark' ? 'dark' : 'light';
+}
+
+/** 写设置；实际的 DOM 切换由 onSettingsChange 订阅统一执行，不会重复重排。 */
+async function setTheme(next) {
+  try { await updateSettings({ theme: next }); }
+  catch (error) { toast.error('主题保存失败：' + (error && error.message ? error.message : error)); }
+}
+/** 手动切换总是切到明确的浅色/深色，从「跟随系统」里跳出来 */
 function toggleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-  applyTheme(cur === 'dark' ? 'light' : 'dark');
+  return setTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+}
+
+/** 界面缩放：走 Electron 的 setZoomFactor，整体等比放大，不用逐处改 px */
+function applyUiScale(percent) {
+  const value = Number(percent) || 100;
+  if (window.api.app.setZoom) {
+    window.api.app.setZoom(value).catch(() => { /* 缩放失败不影响其它功能 */ });
+  }
+}
+
+/** 套用快捷键方案，并在开发期把键位冲突暴露出来 */
+function applyKeymapSetting(name) {
+  const scheme = KEYMAPS[name] || KEYMAPS[DEFAULT_KEYMAP];
+  applyKeymap(scheme.overrides);
+  const conflicts = accelConflicts();
+  if (conflicts.length) {
+    console.error('[keymap] 键位冲突:', conflicts.map((c) => `${c.accel} → ${c.ids.join(' / ')}`).join('；'));
+  }
+  // 菜单里的快捷键提示直接来自注册表，换方案后要重建才能显示新键位
+  const bar = $('#menubar');
+  if (bar && bar.childElementCount) buildMenuBar();
+  if (toolbarContextButton) buildToolbar();
+}
+
+/** 网格行高档位：只改 CSS 变量，已打开的网格需要重排一次才能量到新行高 */
+async function applyGridDensity(density) {
+  const value = ['compact', 'default', 'comfortable'].includes(density) ? density : 'default';
+  document.documentElement.setAttribute('data-density', value);
+  const { refreshAllGrids } = await import('./grid.js');
+  refreshAllGrids();
 }
 
 async function showAbout() {
@@ -353,10 +418,8 @@ async function showAbout() {
 function setupSplitter() {
   const splitter = $('#splitter-v');
   const sidebar = $('#sidebar');
-  try {
-    const savedWidth = Number(localStorage.getItem('dbpanda-sidebar-width'));
-    if (Number.isFinite(savedWidth) && savedWidth >= 170 && savedWidth <= 560) sidebar.style.width = `${savedWidth}px`;
-  } catch (e) { /* localStorage may be unavailable */ }
+  const savedWidth = Number(getSetting('sidebarWidth'));
+  if (Number.isFinite(savedWidth) && savedWidth >= 170 && savedWidth <= 560) sidebar.style.width = `${savedWidth}px`;
   splitter.addEventListener('mousedown', (e) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -367,7 +430,8 @@ function setupSplitter() {
     const up = () => {
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
-      try { localStorage.setItem('dbpanda-sidebar-width', String(Math.round(sidebar.getBoundingClientRect().width))); } catch (e) { /* ignore */ }
+      updateSettings({ sidebarWidth: Math.round(sidebar.getBoundingClientRect().width) })
+        .catch(() => { /* 宽度保存失败不影响本次拖拽结果 */ });
     };
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
@@ -375,29 +439,19 @@ function setupSplitter() {
 }
 
 // ---------------- 快捷键 ----------------
+// 键位不再写死在这里：全部来自命令注册表的 accel 字段，
+// 菜单上显示的提示和实际生效的按键因此永远是同一份数据。
 function setupShortcuts() {
   document.addEventListener('keydown', (e) => {
     if (window.__APP_READY !== true) return;
     const t = e.target;
-    // SQL 编辑器内的按键交给 CodeMirror（F5 运行、Ctrl+F 编辑器内查找等）
+    // SQL 编辑器内的按键交给 CodeMirror（Ctrl+R 运行、Ctrl+F 编辑器内查找等）
     const inEditor = !!(t && t.closest && t.closest('.CodeMirror'));
     const inInput = inEditor || !!(t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable));
-    if (e.key === 'F5' && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-      if (!inEditor) { e.preventDefault(); runMenuAction('refresh'); }
-      return;
-    }
-    if (e.ctrlKey && !e.altKey && e.key === 'Tab') {
-      e.preventDefault();
-      activateRelative(e.shiftKey ? -1 : 1);
-      return;
-    }
-    if (!e.ctrlKey || e.shiftKey || e.altKey) return;
-    const k = e.key.toLowerCase();
-    if (k === 'w') { e.preventDefault(); closeActive(); }
-    else if (k === 'n') { e.preventDefault(); runMenuAction('new-conn'); }
-    else if (k === 'q') { e.preventDefault(); runMenuAction('new-query'); }
-    else if (k === 'd') { if (!inInput) { e.preventDefault(); runMenuAction('design-table'); } }
-    else if (k === 'f') { if (!inEditor) { e.preventDefault(); runMenuAction('search'); } }
+    const cmd = matchShortcut(e, { inEditor, inInput });
+    if (!cmd) return;
+    e.preventDefault();
+    runCommand(cmd.id);
   });
 }
 
@@ -421,67 +475,178 @@ function firstOpenTarget(notify = false) {
   return target;
 }
 
+/** 执行一条命令。保留这个名字是为了让既有调用点（工具栏等）不必全改。 */
 export async function runMenuAction(id) {
-  const t = firstOpenTarget();
-  const needConn = () => {
-    if (t) return true;
-    firstOpenTarget(true);
-    return false;
-  };
-  switch (id) {
-      case 'new-conn': openConnDialog(); break;
-      case 'import-navicat': (await import('./navicatImport.js')).openNavicatImport(); break;
-      case 'new-query': newQueryFromToolbar(); break;
-      case 'search': {
-        if (!needConn()) break;
-        const { openSearchDialog } = await import('./searchDialog.js');
-        openSearchDialog(t);
-        break;
-      }
-      case 'run-sql-file': if (needConn()) (await import('./dbaTools.js')).openRunSqlFileDialog(t); break;
-      case 'transfer': if (needConn()) (await import('./dbaTools.js')).openTransferDialog(t); break;
-      case 'sync': if (needConn()) (await import('./syncDialog.js')).openSyncDialog(t); break;
-      case 'dump': if (needConn() && t.db) (await import('./dbaTools.js')).openDumpDialog(t); else if (t && !t.db) toast.info('请先在左侧选择数据库'); break;
-      case 'import': if (needConn() && t.db) (await import('./importWizard.js')).openImportWizard(t); else if (t && !t.db) toast.info('请先在左侧选择数据库'); break;
-      case 'history': openHistory(); break;
-      case 'ai-panel': openAiPanelFromToolbar(); break;
-      case 'ai-config': { const { openAiConfigDialog } = await import('./aiConfigDialog.js'); openAiConfigDialog(); break; }
-      case 'processes': {
-        if (!needConn()) break;
-        const conn = state.connections.find((c) => c.id === t.connId);
-        if (conn && ['mysql', 'oceanbase', 'postgres', 'mssql', 'clickhouse'].includes(conn.type)) {
-          (await import('./procTab.js')).openProcTab(t.connId);
-        } else {
-          toast.info('当前连接类型不支持进程列表');
-        }
-        break;
-      }
-      case 'refresh': if (t && t.db) emit('objects-changed', t); break;
-      case 'design-table': {
+  return runCommand(id);
+}
+
+// ---------------- 命令登记 ----------------
+// 全应用的功能表。新增功能在这里加一条即可：菜单项、快捷键提示、
+// 可用状态和（后续的）命令面板都会自动跟上，不必再分头去改三个地方。
+const hasOpenConnection = () => state.open.size > 0;
+
+function openEditorSearchFor(replace) {
+  const active = getActiveTab();
+  const cmi = active && active.handle && active.handle._cm;
+  if (!cmi) { toast.info('请先打开一个查询标签页'); return null; }
+  return import('./editorSearch.js').then(({ openEditorSearch }) => openEditorSearch(cmi, { replace }));
+}
+
+function registerAppCommands() {
+  // 每次执行命令时重新解析当前上下文，语义与改造前 runMenuAction 开头的那两行完全一致
+  setCommandContextProvider(() => {
+    const target = firstOpenTarget();
+    return {
+      target,
+      needConn: () => {
+        if (target) return true;
+        firstOpenTarget(true);
+        return false;
+      },
+    };
+  });
+
+  registerCommands([
+    // ---- 文件 ----
+    { id: 'new-conn', label: '新建连接…', menu: '文件', accel: 'Ctrl+N', run: () => openConnDialog() },
+    { id: 'import-navicat', label: '导入 Navicat 连接…', menu: '文件', run: async () => (await import('./navicatImport.js')).openNavicatImport() },
+    { id: 'new-query', label: '新建查询', menu: '文件', accel: 'Ctrl+Q', run: () => newQueryFromToolbar() },
+    { id: 'exit', label: '退出', menu: '文件', sepBefore: true, run: () => window.api.app.winCmd('close') },
+
+    // ---- 编辑（由浏览器/CodeMirror 自己处理按键，这里只登记菜单项与提示） ----
+    { id: 'edit-undo', label: '撤销', menu: '编辑', accel: 'Ctrl+Z', bind: false, run: () => execEditCommand('undo') },
+    { id: 'edit-redo', label: '重做', menu: '编辑', accel: 'Ctrl+Y', bind: false, run: () => execEditCommand('redo') },
+    { id: 'edit-cut', label: '剪切', menu: '编辑', accel: 'Ctrl+X', bind: false, sepBefore: true, run: () => execEditCommand('cut') },
+    { id: 'edit-copy', label: '复制', menu: '编辑', accel: 'Ctrl+C', bind: false, run: () => execEditCommand('copy') },
+    { id: 'edit-paste', label: '粘贴', menu: '编辑', accel: 'Ctrl+V', bind: false, run: () => execEditCommand('paste') },
+    { id: 'edit-select-all', label: '全选', menu: '编辑', accel: 'Ctrl+A', bind: false, run: () => execEditCommand('selectAll') },
+    // 改名以和「工具 → 在库中查找」区分：两者都是 Ctrl+F，差别在焦点是否在 SQL 编辑器里
+    { id: 'editor-find', label: '在编辑器中查找…', menu: '编辑', accel: 'Ctrl+F', bind: false, sepBefore: true, run: () => openEditorSearchFor(false) },
+    { id: 'editor-replace', label: '在编辑器中替换…', menu: '编辑', accel: 'Ctrl+H', bind: false, run: () => openEditorSearchFor(true) },
+
+    // ---- 查看 ----
+    {
+      id: 'refresh', label: '刷新当前库对象', menu: '查看', accel: 'F5', scope: 'notInEditor',
+      enabled: hasOpenConnection,
+      run: ({ target }) => { if (target && target.db) emit('objects-changed', target); },
+    },
+    {
+      id: 'design-table', label: '设计表', menu: '查看', accel: 'Ctrl+D', scope: 'notInInput',
+      run: () => {
         const cur = state.activeTarget;
-        if (!cur || !cur.table || !state.open.has(cur.connId)) { toast.info('请先在左侧选择一个表'); break; }
+        if (!cur || !cur.table || !state.open.has(cur.connId)) { toast.info('请先在左侧选择一个表'); return; }
         const oc = state.open.get(cur.connId);
         const objs = oc && oc.objectsCache && oc.objectsCache.get(objectsCacheKey(cur.db, cur.schema));
         const isView = !!(objs && objs.views && objs.views.some((v) => v.name === cur.table));
         actions.designTable({ connId: cur.connId, db: cur.db, schema: cur.schema, table: cur.table }, isView);
-        break;
-      }
-      case 'editor-find':
-      case 'editor-replace': {
-        const active = getActiveTab();
-        const cmi = active && active.handle && active.handle._cm;
-        if (!cmi) { toast.info('请先打开一个查询标签页'); break; }
-        const { openEditorSearch } = await import('./editorSearch.js');
-        openEditorSearch(cmi, { replace: id === 'editor-replace' });
-        break;
-      }
-      case 'next-tab': activateRelative(1); break;
-      case 'prev-tab': activateRelative(-1); break;
-      case 'toggle-theme': toggleTheme(); break;
-      case 'about': showAbout(); break;
-      case 'check-update': checkForUpdates(true); break;
-      default: break;
-    }
+      },
+    },
+    {
+      id: 'open-table', label: '打开表', menu: '查看', accel: 'Ctrl+Shift+O', scope: 'notInInput',
+      run: () => {
+        const cur = state.activeTarget;
+        if (!cur || !cur.table || !state.open.has(cur.connId)) { toast.info('请先在左侧选择一个表'); return; }
+        openTableTab({ connId: cur.connId, db: cur.db, schema: cur.schema, table: cur.table });
+      },
+    },
+    { id: 'toggle-theme', label: '切换浅色 / 深色主题', menu: '查看', run: () => toggleTheme() },
+    { id: 'devtools', label: '开发者工具', menu: '查看', accel: 'F12', bind: false, sepBefore: true, run: () => window.api.app.winCmd('devtools') },
+
+    // ---- 工具 ----
+    { id: 'ai-panel', label: 'AI 助手', menu: '工具', run: () => openAiPanelFromToolbar() },
+    { id: 'ai-config', label: 'AI 助手设置…', menu: '工具', run: async () => (await import('./aiConfigDialog.js')).openAiConfigDialog() },
+    {
+      id: 'search', label: '在库中查找…', menu: '工具', accel: 'Ctrl+F', scope: 'notInEditor', sepBefore: true,
+      enabled: hasOpenConnection,
+      run: async ({ target, needConn }) => {
+        if (!needConn()) return;
+        const { openSearchDialog } = await import('./searchDialog.js');
+        openSearchDialog(target);
+      },
+    },
+    {
+      id: 'transfer', label: '数据传输…', menu: '工具', sepBefore: true, enabled: hasOpenConnection,
+      run: async ({ target, needConn }) => { if (needConn()) (await import('./dbaTools.js')).openTransferDialog(target); },
+    },
+    {
+      id: 'sync', label: '结构同步 / 数据同步…', menu: '工具', enabled: hasOpenConnection,
+      run: async ({ target, needConn }) => { if (needConn()) (await import('./syncDialog.js')).openSyncDialog(target); },
+    },
+    {
+      id: 'goto-table', label: '跳转到表…', menu: '工具', accel: 'Ctrl+P', scope: 'notInInput', sepBefore: true,
+      run: async () => (await import('./commandPalette.js')).openCommandPalette('object'),
+    },
+    {
+      id: 'command-palette', label: '命令面板…', menu: '工具', accel: 'Ctrl+Shift+P',
+      run: async () => (await import('./commandPalette.js')).openCommandPalette('command'),
+    },
+    { id: 'history', label: '查询历史', menu: '工具', sepBefore: true, run: () => openHistory() },
+    {
+      id: 'audit-log', label: '操作审计…', menu: '工具',
+      run: async () => (await import('./auditTab.js')).openAuditTab(),
+    },
+    {
+      id: 'security-review', label: '连接安全体检…', menu: '工具',
+      run: async () => (await import('./securityDialog.js')).openSecurityDialog(),
+    },
+    {
+      id: 'data-dict', label: '导出数据字典…', menu: '工具', sepBefore: true,
+      run: async ({ target, needConn }) => {
+        if (!needConn()) return;
+        if (!target.db) { toast.info('请先在左侧选择数据库'); return; }
+        (await import('./dataDictDialog.js')).openDataDictDialog(target);
+      },
+    },
+    { id: 'open-settings', label: '选项…', menu: '工具', sepBefore: true, run: async () => (await import('./settingsDialog.js')).openSettingsDialog() },
+
+    // ---- 窗口 ----
+    { id: 'next-tab', label: '下一个标签页', menu: '窗口', accel: 'Ctrl+Tab', run: () => activateRelative(1) },
+    { id: 'prev-tab', label: '上一个标签页', menu: '窗口', accel: 'Ctrl+Shift+Tab', run: () => activateRelative(-1) },
+    // Ctrl+W 一直是生效的，但过去没出现在任何菜单里，用户无从发现
+    { id: 'close-tab', label: '关闭当前标签页', menu: '窗口', accel: 'Ctrl+W', run: () => closeActive() },
+    { id: 'win-minimize', label: '最小化', menu: '窗口', sepBefore: true, run: () => window.api.app.winCmd('minimize') },
+    { id: 'win-maximize', label: '最大化 / 还原', menu: '窗口', run: () => window.api.app.winCmd('maximize') },
+    { id: 'win-close', label: '关闭窗口', menu: '窗口', sepBefore: true, run: () => window.api.app.winCmd('close') },
+
+    // ---- 帮助 ----
+    { id: 'check-update', label: '检查更新', menu: '帮助', run: () => checkForUpdates(true) },
+    { id: 'github', label: 'GitHub 仓库', menu: '帮助', sepBefore: true, run: () => window.api.app.openExternal('https://github.com/hufafu1-cloud/dbconnect') },
+    { id: 'about', label: '关于 DBPanda', menu: '帮助', sepBefore: true, run: () => showAbout() },
+
+    // ---- 不进菜单：只从工具栏「更多」或其它入口调用 ----
+    {
+      id: 'run-sql-file', label: '运行 SQL 文件…', enabled: hasOpenConnection,
+      run: async ({ target, needConn }) => { if (needConn()) (await import('./dbaTools.js')).openRunSqlFileDialog(target); },
+    },
+    {
+      id: 'import', label: '导入向导…',
+      run: async ({ target, needConn }) => {
+        if (!needConn()) return;
+        if (!target.db) { toast.info('请先在左侧选择数据库'); return; }
+        (await import('./importWizard.js')).openImportWizard(target);
+      },
+    },
+    {
+      id: 'dump', label: '转储 SQL 文件…',
+      run: async ({ target, needConn }) => {
+        if (!needConn()) return;
+        if (!target.db) { toast.info('请先在左侧选择数据库'); return; }
+        (await import('./dbaTools.js')).openDumpDialog(target);
+      },
+    },
+    {
+      id: 'processes', label: '进程列表', enabled: hasOpenConnection,
+      run: async ({ target, needConn }) => {
+        if (!needConn()) return;
+        const conn = state.connections.find((c) => c.id === target.connId);
+        if (conn && ['mysql', 'oceanbase', 'postgres', 'mssql', 'clickhouse'].includes(conn.type)) {
+          (await import('./procTab.js')).openProcTab(target.connId);
+        } else {
+          toast.info('当前连接类型不支持进程列表');
+        }
+      },
+    },
+  ]);
 }
 
 // ---------------- 退出确认 ----------------
@@ -616,6 +781,12 @@ function setupTestHooks() {
       openAiConfigDialog();
       return true;
     },
+    openSettings: async () => {
+      const { openSettingsDialog } = await import('./settingsDialog.js');
+      openSettingsDialog();
+      return true;
+    },
+    runCommand: (id) => runCommand(id),
     analyzeDanger: async (sql) => {
       const { analyzeDanger } = await import('./danger.js');
       return analyzeDanger(sql);
@@ -652,9 +823,29 @@ const pendingRestoreConnectionIds = new Set();
 async function boot() {
   window.__APP_READY = false;
   $('#app').classList.add('workspace-loading');
-  try { applyTheme(localStorage.getItem('dbc-theme') || 'light'); } catch (e) { /* ignore */ }
-  const { buildMenuBar } = await import('./menubar.js');
-  buildMenuBar(runMenuAction);
+  // 设置先于任何界面构建载入：主题、侧栏宽度都要用到，晚一步就会先闪一下默认样式
+  await loadSettings();
+  try { systemPrefersDark = await window.api.app.systemDark(); } catch (e) { /* 取不到就按浅色 */ }
+  applyTheme(resolveTheme());
+  applyUiScale(getSetting('uiScale'));
+  document.documentElement.setAttribute('data-density', getSetting('gridDensity') || 'default');
+  onSettingsChange((next, changed) => {
+    if (changed.includes('theme')) applyTheme(resolveTheme(next.theme));
+    if (changed.includes('uiScale')) applyUiScale(next.uiScale);
+    if (changed.includes('gridDensity')) applyGridDensity(next.gridDensity);
+    if (changed.includes('keymap')) applyKeymapSetting(next.keymap);
+  });
+  // 系统深浅色变了，只有设置为「跟随系统」时才跟着切
+  if (window.api.app.onSystemTheme) {
+    window.api.app.onSystemTheme((dark) => {
+      systemPrefersDark = dark;
+      if (getSetting('theme') === 'system') applyTheme(resolveTheme());
+    });
+  }
+  // 菜单栏和工具栏都从命令注册表生成，必须先登记
+  registerAppCommands();
+  applyKeymapSetting(getSetting('keymap'));
+  buildMenuBar();
   buildToolbar();
   setupUpdaterEvents();
   // 侧栏标题（Navicat 的“我的连接”）

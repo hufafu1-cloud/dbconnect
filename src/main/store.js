@@ -325,6 +325,8 @@ function save(conn) {
     }
   }
   const record = { ...conn, id, savePassword, password: encryptedDbPassword };
+  // 只读标记必须归一成严格布尔：渲染进程传什么都不能变成「真值即只读」的模糊状态
+  record.readOnly = conn.readOnly === true;
   if (!conn.id) record.createdAt = new Date().toISOString();
   if (conn.type === 'sqlite') delete record.savePassword;
   // Approval capabilities are single-use IPC data and must never reach disk.

@@ -445,6 +445,68 @@ function describe(operation, payload) {
   };
 }
 
+// ---------------- 只读连接 ----------------
+//
+// 与「生产库审批」互补：审批是重手段（每次要输连接名 + 原生弹窗），只读是常态防线
+// （设一次，之后全程生效）。日常查数才是高频场景，现在只能靠自觉。
+//
+// 判定和拒绝都在主进程完成，渲染进程无法绕过——和审批走的是同一个卡点 consume()。
+//
+// 只读 = 不修改数据库。导出到本地文件（db.exportTable / dba.dump）只读库，因此允许。
+const READ_ONLY_BLOCKED = {
+  'db.action': '数据库对象操作',
+  'db.applyEdits': '表数据修改',
+  'design.apply': '表结构变更',
+  'import.run': '数据导入',
+  'dba.execSqls': '结构同步执行',
+  'dba.runSqlFile': 'SQL 文件执行',
+  'db.killProcess': '结束数据库会话',
+  'db.killProcesses': '结束数据库会话',
+};
+
+function readOnlyConnection(id) {
+  if (!id) return null;
+  let cfg = null;
+  try { cfg = store.getById(id); } catch (e) { return null; }
+  return cfg && cfg.readOnly === true ? { id: cfg.id, name: cfg.name || cfg.id } : null;
+}
+
+function refuseReadOnly(name, what) {
+  throw new Error(`连接「${name}」已设为只读，${what}已被拦截。如需修改，请先在连接设置中取消「只读连接」。`);
+}
+
+/** 只读连接拦截。任何受保护操作执行前都会先过这里。 */
+function assertNotReadOnly(operation, payload) {
+  const p = payload || {};
+  const blocked = READ_ONLY_BLOCKED[operation];
+  if (blocked) {
+    const target = readOnlyConnection(p.connId);
+    if (target) refuseReadOnly(target.name, blocked);
+    return;
+  }
+  if (operation === 'db.query') {
+    const target = readOnlyConnection(p.connId);
+    if (!target) return;
+    // 复用既有的保守只读判定：MySQL 可执行注释、SELECT INTO、FOR UPDATE、
+    // 未知函数调用一律不算只读，宁可误拦也不放过写操作。
+    for (const statement of splitStatements(p.sql)) {
+      if (!isExplicitlyReadOnly(statement)) refuseReadOnly(target.name, '写操作 SQL');
+    }
+    return;
+  }
+  if (operation === 'dba.transfer') {
+    const target = readOnlyConnection(p.dstConnId);
+    if (target) refuseReadOnly(target.name, '数据传输写入');
+    return;
+  }
+  if (operation === 'dba.dataSync') {
+    // 仅统计差异、只生成脚本都不写目标库
+    if (p.mode === 'count' || p.mode === 'script') return;
+    const target = readOnlyConnection(p.dstConnId);
+    if (target) refuseReadOnly(target.name, '数据同步写入');
+  }
+}
+
 function purgeExpired() {
   const now = Date.now();
   for (const [token, approval] of approvals) {
@@ -458,6 +520,8 @@ function normalizeConfirmation(value) {
 
 function issue(event, operation, payload, confirmation, expectedFingerprint) {
   purgeExpired();
+  // 只读连接直接拒绝签发：否则用户会先输一遍连接名，最后仍然被 consume 拦掉
+  assertNotReadOnly(operation, payload);
   const info = describe(operation, payload);
   if (!info.required) return null;
   const boundFile = fileStamp(operation, payload);
@@ -480,6 +544,8 @@ function issue(event, operation, payload, confirmation, expectedFingerprint) {
 }
 
 function consume(event, operation, payload) {
+  // 只读拦截先于审批：它对所有连接生效，不只是生产库
+  assertNotReadOnly(operation, payload);
   const info = describe(operation, payload);
   if (!info.required) return;
   purgeExpired();
@@ -506,6 +572,7 @@ module.exports = {
   assertReadOnlyQuery,
   assertWhereFragment,
   splitStatements,
+  assertNotReadOnly,
   describe,
   fingerprint,
   issue,

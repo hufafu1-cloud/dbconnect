@@ -1,6 +1,6 @@
 // IPC 处理器：渲染进程通过 window.api 调用这里的方法
 // 所有处理器统一返回 {ok:true, data} / {ok:false, error}，避免 invoke 报错信息被包一层前缀
-const { ipcMain, dialog, app } = require('electron');
+const { ipcMain, dialog, app, nativeTheme } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -15,6 +15,9 @@ const safety = require('./safety');
 const fileAccess = require('./fileAccess');
 const sshHostKeys = require('./sshHostKeys');
 const workspaceStore = require('./workspaceStore');
+const settings = require('./settings');
+const auditLog = require('./auditLog');
+const impact = require('./impact');
 const { parseNcxBuffer, targetLabel, MAX_FILE_BYTES } = require('./navicatNcx');
 const connectionLocks = new Map();
 const navicatImportSessions = new Map();
@@ -186,13 +189,20 @@ function assertConnectionFilesAuthorized(cfg) {
   }
 }
 
+// 绝大多数处理器都从这里穿过去，因此审计日志只需要在这一处埋点：
+// 后续新增的功能会自动被记录，不必回头逐个补。
 function h(channel, fn, approvalOperation, passEvent = false) {
   ipcMain.handle(channel, async (event, ...args) => {
+    const startedAt = Date.now();
     try {
       if (approvalOperation) safety.consume(event, approvalOperation, args[0]);
-      return { ok: true, data: await (passEvent ? fn(event, ...args) : fn(...args)) };
+      const data = await (passEvent ? fn(event, ...args) : fn(...args));
+      auditLog.record({ channel, payload: args[0], approvalOperation, ms: Date.now() - startedAt, ok: true });
+      return { ok: true, data };
     } catch (err) {
-      return { ok: false, error: (err && err.message) || String(err) };
+      const error = (err && err.message) || String(err);
+      auditLog.record({ channel, payload: args[0], approvalOperation, ms: Date.now() - startedAt, ok: false, error });
+      return { ok: false, error };
     }
   });
 }
@@ -334,6 +344,7 @@ function register(getWin) {
     }
   });
   ipcMain.handle('conn:save', async (event, conn) => {
+    const startedAt = Date.now();
     try {
       const data = await withConnectionLock(conn && conn.id, async () => {
         // Validate inside the per-connection lock so a queued save cannot consume
@@ -351,9 +362,12 @@ function register(getWin) {
         if (dbm.isOpen(saved.id) && saved.savePassword === false) store.clearSessionPassword(saved.id);
         return { ...saved, connectionClosed: shouldClose };
       });
+      auditLog.record({ channel: 'conn:save', payload: conn, approvalOperation: 'conn.save', ms: Date.now() - startedAt, ok: true });
       return { ok: true, data };
     } catch (err) {
-      return { ok: false, error: (err && err.message) || String(err) };
+      const error = (err && err.message) || String(err);
+      auditLog.record({ channel: 'conn:save', payload: conn, approvalOperation: 'conn.save', ms: Date.now() - startedAt, ok: false, error });
+      return { ok: false, error };
     }
   });
   h('conn:delete', (id) => withConnectionLock(id, async () => { await dbm.close(id); store.remove(id); }));
@@ -460,6 +474,25 @@ function register(getWin) {
       throw err;
     }
   }, 'db.query', true);
+
+  // ---- 影响范围预检：执行 UPDATE/DELETE 前先算受影响行数 ----
+  // 只跑由原语句安全改写出来的 SELECT COUNT(*)；无法保证等价的语句直接返回「无法预估」。
+  h('db:impactPreview', async (event, a) => {
+    const adapter = dbm.get(a.connId);
+    const runCount = async (countSql) => {
+      // 预检本身也要过只读闸门：WHERE 里可能藏着有副作用的函数
+      safety.assertNotReadOnly('db.query', { connId: a.connId, sql: countSql });
+      const options = { maxRows: 1, schema: a.schema };
+      if (a.transactionId) {
+        await transactionOwnerReady(event);
+        return adapter.runQuerySessionScript(
+          rendererTransactionId(event, a.transactionId), a.db, countSql, options,
+        );
+      }
+      return adapter.runScript(a.db, countSql, options);
+    };
+    return impact.preview(a.sql, { splitStatements: safety.splitStatements, runCount });
+  }, null, true);
 
   // ---- 取消查询 / 列补全 / 外键 / BLOB ----
   h('db:cancel', (event, a) => dbm.get(a.connId).cancel(rendererRequestId(event, a.requestId)), null, true);
@@ -615,23 +648,29 @@ function register(getWin) {
 
   // ---- DBA 工具：数据传输 / 转储 / 运行 SQL 文件（带进度推送） ----
   const transfer = require('./transfer');
-  const dbaHandler = (fn, approvalOperation) => async (event, a) => {
+  // DBA 工具的第二个统一入口：与 h() 一样在这里埋审计，传输/转储/同步都会被记录
+  const dbaHandler = (fn, approvalOperation, channel) => async (event, a) => {
+    const startedAt = Date.now();
     try {
       const approval = approvalOperation ? safety.consume(event, approvalOperation, a) : null;
       const prog = (p) => {
         try { event.sender.send('dba:progress', { ...p, taskId: a && a.taskId || null }); } catch (e) { /* ignore */ }
       };
-      return { ok: true, data: await fn(a, prog, approval, event) };
+      const data = await fn(a, prog, approval, event);
+      auditLog.record({ channel, payload: a, approvalOperation, ms: Date.now() - startedAt, ok: true });
+      return { ok: true, data };
     } catch (err) {
-      return { ok: false, error: (err && err.message) || String(err) };
+      const error = (err && err.message) || String(err);
+      auditLog.record({ channel, payload: a, approvalOperation, ms: Date.now() - startedAt, ok: false, error });
+      return { ok: false, error };
     }
   };
   ipcMain.handle('dba:transfer', dbaHandler((a, prog) =>
-    transfer.runTransfer(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog), 'dba.transfer'));
+    transfer.runTransfer(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog), 'dba.transfer', 'dba:transfer'));
   ipcMain.handle('dba:dump', dbaHandler((a, prog) => {
     fileAccess.assertAllowed(a.file, 'write');
     return transfer.dumpSql(dbm.get(a.connId), a, prog);
-  }, 'dba.dump'));
+  }, 'dba.dump', 'dba:dump'));
   ipcMain.handle('dba:runSqlFile', dbaHandler(async (a, prog, approval, event) => {
     const snapshot = await fileAccess.snapshot(a.file, approval && approval.file && approval.file.sha256);
     try {
@@ -643,20 +682,34 @@ function register(getWin) {
     } finally {
       await snapshot.cleanup();
     }
-  }, 'dba.runSqlFile'));
+  }, 'dba.runSqlFile', 'dba:runSqlFile'));
   h('dba:cancelSqlFile', (event, a) =>
     dbm.get(a.connId).cancelOperation(rendererRequestId(event, a.taskId)), null, true);
+
+  // ---- 数据字典导出（走 dbaHandler：自带进度推送与审计） ----
+  const dataDict = require('./dataDict');
+  ipcMain.handle('dba:dataDict', dbaHandler((a, prog) => {
+    fileAccess.assertAllowed(a.file, 'write');
+    return dataDict.exportDict(dbm.get(a.connId), {
+      db: a.db,
+      schema: a.schema,
+      format: a.format,
+      file: a.file,
+      includeViews: !!a.includeViews,
+      onProgress: (p) => prog({ phase: '读取表结构', ...p }),
+    });
+  }, null, 'dba:dataDict'));
 
   // ---- 结构同步 / 数据同步 ----
   const sync = require('./sync');
   ipcMain.handle('dba:structDiff', dbaHandler((a, prog) =>
-    sync.diffStructure(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog)));
+    sync.diffStructure(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog), null, 'dba:structDiff'));
   ipcMain.handle('dba:execSqls', dbaHandler((a, prog) =>
-    sync.execMany(dbm.get(a.connId), a.db, a.sqls, prog), 'dba.execSqls'));
+    sync.execMany(dbm.get(a.connId), a.db, a.sqls, prog), 'dba.execSqls', 'dba:execSqls'));
   ipcMain.handle('dba:dataSync', dbaHandler((a, prog) => {
     if (a.mode === 'script') fileAccess.assertAllowed(a.file, 'write');
     return sync.syncData(dbm.get(a.srcConnId), dbm.get(a.dstConnId), a, prog);
-  }, 'dba.dataSync'));
+  }, 'dba.dataSync', 'dba:dataSync'));
 
   // ---- 保存的查询 ----
   const queries = require('./queries');
@@ -737,6 +790,7 @@ function register(getWin) {
   });
   // import:run 需要 event.sender 推送进度，不走 h() 包装
   ipcMain.handle('import:run', async (event, a) => {
+    const startedAt = Date.now();
     try {
       const approval = safety.consume(event, 'import.run', a);
       const snapshot = await fileAccess.snapshot(a.file, approval && approval.file && approval.file.sha256);
@@ -747,12 +801,15 @@ function register(getWin) {
         const data = await importer.runImport(ad, a, parsed.rows, (done, total) => {
           event.sender.send('import:progress', { done, total });
         });
+        auditLog.record({ channel: 'import:run', payload: a, approvalOperation: 'import.run', ms: Date.now() - startedAt, ok: true });
         return { ok: true, data };
       } finally {
         await snapshot.cleanup();
       }
     } catch (err) {
-      return { ok: false, error: (err && err.message) || String(err) };
+      const error = (err && err.message) || String(err);
+      auditLog.record({ channel: 'import:run', payload: a, approvalOperation: 'import.run', ms: Date.now() - startedAt, ok: false, error });
+      return { ok: false, error };
     }
   });
 
@@ -842,6 +899,41 @@ function register(getWin) {
   });
 
   // ---- 工作区崩溃恢复（固定 userData 路径、原子写入，不接受任意文件路径） ----
+  // ---- 连接安全体检：把散在各处的事实汇总成一屏 ----
+  // SSH 指纹只有主进程知道（known-hosts 文件禁止 Renderer 访问），因此在这里汇总，
+  // 返回的全是结论性布尔值，不含任何凭据。
+  h('security:review', () => store.listPublic().map((conn) => {
+    const ssh = conn.ssh && conn.ssh.enabled ? conn.ssh : null;
+    let sshHost = null;
+    if (ssh) {
+      const known = sshHostKeys.getKnownHost(ssh.host, ssh.port);
+      sshHost = {
+        host: ssh.host || '',
+        port: ssh.port || 22,
+        authType: ssh.authType || 'password',
+        verified: !!known,
+      };
+    }
+    return {
+      id: conn.id,
+      name: conn.name || conn.id,
+      type: conn.type,
+      env: conn.env || '',
+      readOnly: conn.readOnly === true,
+      // SQLite 是本地文件，没有密码概念
+      needsPassword: conn.type !== 'sqlite',
+      passwordOnDisk: conn.hasPassword === true,
+      ssh: sshHost,
+    };
+  }));
+
+  // ---- 审计日志（只读。审计日志不提供清空接口，要清理请直接删除本机文件） ----
+  h('audit:read', (a) => auditLog.read(a || {}));
+
+  // ---- 应用设置（主进程唯一来源；渲染进程只能改白名单内的键） ----
+  h('settings:read', () => settings.all());
+  h('settings:patch', (partial) => settings.patch(partial));
+
   h('workspace:read', () => workspaceStore.read());
   h('workspace:write', (snapshot) => workspaceStore.write(snapshot));
   h('workspace:clear', () => workspaceStore.clear());
@@ -855,6 +947,24 @@ function register(getWin) {
 
   h('app:openExternal', (url) => {
     if (/^https?:\/\//i.test(String(url))) require('electron').shell.openExternal(url);
+  });
+
+  // ---- 外观：跟随系统主题 / 界面缩放 ----
+  // 系统深浅色只有主进程知道，渲染进程的 prefers-color-scheme 在 Electron 里
+  // 未必跟随系统设置变化，所以统一由这里判定并推送。
+  h('app:systemDark', () => nativeTheme.shouldUseDarkColors);
+  nativeTheme.on('updated', () => {
+    const w = getWin();
+    if (w && !w.isDestroyed()) {
+      try { w.webContents.send('app:system-theme', nativeTheme.shouldUseDarkColors); }
+      catch (e) { /* 窗口正在销毁 */ }
+    }
+  });
+  h('app:setZoom', (percent) => {
+    const value = Number(percent);
+    if (!Number.isFinite(value) || value < 50 || value > 300) throw new Error('缩放比例超出允许范围');
+    const w = getWin();
+    if (w && !w.isDestroyed()) w.webContents.setZoomFactor(value / 100);
   });
 
   h('app:winCmd', (cmd) => {

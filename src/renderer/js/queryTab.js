@@ -7,6 +7,8 @@ import { toast, promptDialog, openModal } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { showMenu } from './contextmenu.js';
 import { openEditorSearch, closeEditorSearch, editorSearchNext } from './editorSearch.js';
+import { getSetting, updateSettings } from './settings.js';
+import { editorRunsOnF5 } from './keymaps.js';
 
 const CM_MODES = { mysql: 'text/x-mysql', postgres: 'text/x-pgsql', mssql: 'text/x-mssql', sqlite: 'text/x-sqlite', clickhouse: 'text/x-mysql', oceanbase: 'text/x-mysql', oboracle: 'text/x-plsql' };
 let queryNo = 0;
@@ -333,14 +335,22 @@ export function openQueryTab(target, initialSql, opts) {
     touchRecovery();
   });
 
+  const MAX_ROWS_CHOICES = ['200', '2000', '10000'];
   const maxRowsSel = el('select', { title: '结果行数上限' },
     el('option', { value: '200' }, '200 行'),
-    el('option', { value: '2000', selected: 'selected' }, '2000 行'),
+    el('option', { value: '2000' }, '2000 行'),
     el('option', { value: '10000' }, '10000 行'));
-  if (restoreState && ['200', '2000', '10000'].includes(String(restoreState.maxRows))) {
+  // 默认值来自「选项」，不再写死 2000
+  const configuredMaxRows = String(getSetting('queryMaxRows'));
+  maxRowsSel.value = MAX_ROWS_CHOICES.includes(configuredMaxRows) ? configuredMaxRows : '2000';
+  if (restoreState && MAX_ROWS_CHOICES.includes(String(restoreState.maxRows))) {
     maxRowsSel.value = String(restoreState.maxRows);
   }
-  maxRowsSel.addEventListener('change', () => touchRecovery());
+  maxRowsSel.addEventListener('change', () => {
+    // 同时记成新的默认值：新建的查询标签页会沿用，重启后依然保留
+    updateSettings({ queryMaxRows: Number(maxRowsSel.value) }).catch(() => { /* 保存失败不影响本次查询 */ });
+    touchRecovery();
+  });
 
   const mkBtn = (icon, label, onClick, cls) =>
     el('button', { class: 'pbtn' + (cls ? ' ' + cls : ''), onClick }, iconEl(icon), label);
@@ -499,9 +509,16 @@ export function openQueryTab(target, initialSql, opts) {
     autoCloseBrackets: true,
     styleActiveLine: true,
     extraKeys: {
-      'F5': () => run('current'),
+      // 键位方案在这里实时生效：Navicat 方案下 F5 放行给全局的「刷新对象」，
+      // 不需要重新绑定，已经打开的查询标签页也会立刻跟着变。
+      'F5': () => {
+        if (!editorRunsOnF5()) return CodeMirror.Pass;
+        run('current');
+        return undefined;
+      },
       'Ctrl-Enter': () => run('current'),
       'Ctrl-R': () => run('current'),
+      'Ctrl-/': (cmi) => cmi.toggleComment(),
       'Shift-Ctrl-R': () => run('selection'),
       'Ctrl-Space': () => triggerHint(),
       'Ctrl-S': () => saveQuery(),

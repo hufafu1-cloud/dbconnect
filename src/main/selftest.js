@@ -1301,6 +1301,59 @@ async function runSelfTest() {
   check('SQLite 省略父栏位的入站外键补齐目标主键', sqliteImplicitRefs.some((item) => (
     item.table === 'fk_child_implicit' && item.refColumns.length === 1 && item.refColumns[0] === 'id'
   )), sqliteImplicitRefs);
+  // ---- 数据字典：结构必须完整，格式必须不被内容撑坏 ----
+  const dataDict = require('./dataDict');
+  await ad.runScript('main', `
+    CREATE TABLE dict_demo (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT 'x',
+      note TEXT
+    );
+    CREATE UNIQUE INDEX idx_dict_name ON dict_demo(name);
+    CREATE VIEW dict_view AS SELECT id FROM dict_demo;
+  `);
+  const dict = await dataDict.collect(ad, { db: 'main', includeViews: false });
+  const demo = dict.tables.find((x) => x.name === 'dict_demo');
+  check('dict 收集到表与字段', !!demo && demo.columns.length === 3);
+  check('dict 主键被标出', !!demo && (demo.pk || []).includes('id'));
+  check('dict 默认不含视图', !dict.tables.some((x) => x.name === 'dict_view'));
+  const dictWithViews = await dataDict.collect(ad, { db: 'main', includeViews: true });
+  check('dict 可选包含视图', dictWithViews.tables.some((x) => x.name === 'dict_view'));
+  const md = dataDict.toMarkdown(dict);
+  check('dict Markdown 含表名与字段', md.includes('## dict_demo') && md.includes('| name |'));
+  check('dict Markdown 含索引', md.includes('idx_dict_name'));
+  const html = dataDict.toHtml(dict);
+  check('dict HTML 结构完整', html.startsWith('<!doctype html>') && html.includes('<td>name</td>'));
+  // 表名/注释里带竖线或尖括号时，不能把表格或 HTML 撑坏
+  const nasty = {
+    db: 'main', generatedAt: new Date().toISOString(),
+    tables: [{
+      name: 'a|b', kind: 'table', comment: '<script>x</script>', pk: ['id'],
+      columns: [{ name: 'c|d', type: 'TEXT', nullable: true, comment: 'line1\nline2' }],
+      indexes: [], foreignKeys: [],
+    }],
+  };
+  const nastyMd = dataDict.toMarkdown(nasty);
+  check('dict Markdown 转义竖线与换行',
+    nastyMd.includes('c\\|d') && nastyMd.includes('line1<br>line2'));
+  check('dict HTML 转义尖括号',
+    dataDict.toHtml(nasty).includes('&lt;script&gt;') && !dataDict.toHtml(nasty).includes('<script>x</script>'));
+  // 单表读失败不能让整份字典失败
+  const brokenAdapter = {
+    listObjects: async () => ({ tables: [{ name: 'ok_table' }, { name: 'boom' }], views: [] }),
+    tableInfo: async (db, schema, table) => {
+      if (table === 'boom') throw new Error('模拟元数据读取失败');
+      return { columns: [{ name: 'id', type: 'INT' }], indexes: [], pk: ['id'] };
+    },
+    listForeignKeys: async () => [],
+  };
+  const partial = await dataDict.collect(brokenAdapter, { db: 'main' });
+  check('dict 单表失败不影响整份字典',
+    partial.tables.length === 2
+    && partial.tables.find((x) => x.name === 'ok_table').columns.length === 1
+    && /模拟元数据读取失败/.test(partial.tables.find((x) => x.name === 'boom').error));
+
+  await ad.runScript('main', 'DROP VIEW dict_view; DROP TABLE dict_demo;');
   await ad.runScript('main', 'DROP TABLE fk_child_implicit; DROP TABLE fk_child; DROP TABLE fk_parent;');
   await ad.runScript('main', `
     CREATE TABLE idx_advanced (name TEXT, amount INTEGER);
@@ -2005,6 +2058,112 @@ async function runSelfTest() {
   let whereInjectionDenied = false;
   try { safety.assertWhereFragment('1=1; DROP TABLE users; --'); } catch (e) { whereInjectionDenied = /筛选条件/.test(e.message); }
   check('safety 拒绝筛选条件附加 SQL', whereInjectionDenied);
+
+  // ---- 只读连接：与生产审批互补的常态防线，拦截同样在主进程完成 ----
+  const roConn = store.save({ name: '只读自检', type: 'sqlite', file: 'ro.db', readOnly: true });
+  const rwConn = store.save({ name: '可写自检', type: 'sqlite', file: 'rw.db' });
+  const readOnlyDenied = (operation, payload) => {
+    try { safety.assertNotReadOnly(operation, payload); return false; }
+    catch (e) { return /已设为只读/.test(e.message); }
+  };
+  const readOnlyAllowed = (operation, payload) => {
+    try { safety.assertNotReadOnly(operation, payload); return true; }
+    catch (e) { return false; }
+  };
+  check('readonly 标记归一为严格布尔', store.getById(roConn.id).readOnly === true
+    && store.getById(rwConn.id).readOnly === false);
+  check('readonly 拒绝表数据修改', readOnlyDenied('db.applyEdits', { connId: roConn.id, edits: [{}] }));
+  check('readonly 拒绝对象操作', readOnlyDenied('db.action', { connId: roConn.id, action: 'dropTable' }));
+  check('readonly 拒绝表结构变更', readOnlyDenied('design.apply', { connId: roConn.id }));
+  check('readonly 拒绝数据导入', readOnlyDenied('import.run', { connId: roConn.id }));
+  check('readonly 拒绝 SQL 文件执行', readOnlyDenied('dba.runSqlFile', { connId: roConn.id }));
+  check('readonly 拒绝结束会话', readOnlyDenied('db.killProcesses', { connId: roConn.id, pids: [1] }));
+  check('readonly 拒绝写操作 SQL', readOnlyDenied('db.query', { connId: roConn.id, sql: 'DELETE FROM users' }));
+  check('readonly 拒绝多语句中夹带的写操作',
+    readOnlyDenied('db.query', { connId: roConn.id, sql: 'SELECT 1; UPDATE users SET a=1' }));
+  check('readonly 拒绝 MySQL 可执行注释绕过',
+    readOnlyDenied('db.query', { connId: roConn.id, sql: '/*!50000 DROP TABLE users */' }));
+  check('readonly 拒绝 SELECT INTO 绕过',
+    readOnlyDenied('db.query', { connId: roConn.id, sql: "SELECT * INTO OUTFILE '/tmp/x' FROM users" }));
+  check('readonly 拒绝 CTE 中的写操作',
+    readOnlyDenied('db.query', { connId: roConn.id, sql: 'WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x' }));
+  check('readonly 允许只读查询', readOnlyAllowed('db.query', { connId: roConn.id, sql: 'SELECT * FROM users' }));
+  check('readonly 允许导出到本地文件', readOnlyAllowed('db.exportTable', { connId: roConn.id, table: 'users' }));
+  check('readonly 允许转储', readOnlyAllowed('dba.dump', { connId: roConn.id, file: 'x.sql' }));
+  check('readonly 只拦目标端写入，源端只读不影响传出',
+    readOnlyDenied('dba.transfer', { srcConnId: rwConn.id, dstConnId: roConn.id })
+    && readOnlyAllowed('dba.transfer', { srcConnId: roConn.id, dstConnId: rwConn.id }));
+  check('readonly 数据同步仅统计/生成脚本不拦截',
+    readOnlyAllowed('dba.dataSync', { srcConnId: rwConn.id, dstConnId: roConn.id, mode: 'count' })
+    && readOnlyAllowed('dba.dataSync', { srcConnId: rwConn.id, dstConnId: roConn.id, mode: 'script' })
+    && readOnlyDenied('dba.dataSync', { srcConnId: rwConn.id, dstConnId: roConn.id, mode: 'apply' }));
+  check('readonly 不影响普通连接', readOnlyAllowed('db.applyEdits', { connId: rwConn.id, edits: [{}] }));
+  let readOnlyConsumeDenied = false;
+  try { safety.consume(sender, 'db.applyEdits', { connId: roConn.id, edits: [{}] }); }
+  catch (e) { readOnlyConsumeDenied = /已设为只读/.test(e.message); }
+  check('readonly 在 consume 卡点生效（渲染进程绕不过）', readOnlyConsumeDenied);
+  let readOnlyIssueDenied = false;
+  try { safety.issue(sender, 'db.applyEdits', { connId: roConn.id, edits: [{}] }, '只读自检'); }
+  catch (e) { readOnlyIssueDenied = /已设为只读/.test(e.message); }
+  check('readonly 审批签发阶段就拒绝，不让用户白输连接名', readOnlyIssueDenied);
+  store.remove(roConn.id);
+  store.remove(rwConn.id);
+
+  // ---- 影响范围预检：宁可说「无法预估」，也不能给一个可能是错的行数 ----
+  const impact = require('./impact');
+  const one = (sql) => impact.analyzeStatement(sql);
+  const countOf = (sql) => { const r = one(sql); return r && r.supported ? r.countSql : null; };
+  const refused = (sql) => { const r = one(sql); return !!r && r.supported === false; };
+  check('impact 非写操作不预检', one('SELECT * FROM users') === null);
+  check('impact DELETE 带 WHERE',
+    countOf('DELETE FROM users WHERE id > 100') === 'SELECT COUNT(*) AS dbpanda_impact FROM users WHERE id > 100');
+  check('impact UPDATE 带 WHERE',
+    countOf('UPDATE users SET a = 1 WHERE id = 5') === 'SELECT COUNT(*) AS dbpanda_impact FROM users WHERE id = 5');
+  check('impact DELETE 无 WHERE 统计整表',
+    countOf('DELETE FROM users') === 'SELECT COUNT(*) AS dbpanda_impact FROM users' && one('DELETE FROM users').hasWhere === false);
+  check('impact UPDATE 无 WHERE 统计整表',
+    countOf('UPDATE users SET a = 1') === 'SELECT COUNT(*) AS dbpanda_impact FROM users');
+  check('impact 保留模式限定的表名',
+    countOf('DELETE FROM app.users WHERE x = 1') === 'SELECT COUNT(*) AS dbpanda_impact FROM app.users WHERE x = 1');
+  check('impact 带引号的表名原样保留',
+    countOf('DELETE FROM "my table" WHERE x = 1') === 'SELECT COUNT(*) AS dbpanda_impact FROM "my table" WHERE x = 1');
+  // 最容易写错的一条：SET 里的子查询也有 WHERE，不能把它当成语句的 WHERE
+  check('impact 不把 SET 子查询里的 WHERE 当成语句条件',
+    countOf('UPDATE t SET a = (SELECT max(x) FROM y WHERE y.id = 1) WHERE t.id = 2')
+      === 'SELECT COUNT(*) AS dbpanda_impact FROM t WHERE t.id = 2');
+  check('impact 字符串字面量里的 where/join 不影响解析',
+    countOf("DELETE FROM t WHERE name = 'where join from'")
+      === "SELECT COUNT(*) AS dbpanda_impact FROM t WHERE name = 'where join from'");
+  check('impact 注释里的 join 不影响解析',
+    countOf('DELETE FROM t -- join b\n WHERE id = 1')
+      === 'SELECT COUNT(*) AS dbpanda_impact FROM t WHERE id = 1');
+  check('impact 拒绝 MySQL 多表删除', refused('DELETE a FROM a JOIN b ON a.id = b.id WHERE b.x = 1'));
+  check('impact 拒绝 USING 多表删除', refused('DELETE FROM a USING b WHERE a.id = b.id'));
+  check('impact 拒绝关联更新（UPDATE JOIN）', refused('UPDATE a JOIN b ON a.id = b.id SET a.x = 1'));
+  check('impact 拒绝关联更新（SET 后带 FROM）', refused('UPDATE a SET x = 1 FROM b WHERE a.id = b.id'));
+  check('impact 拒绝逗号多表更新', refused('UPDATE a, b SET a.x = 1 WHERE a.id = b.id'));
+  check('impact 拒绝 CTE 开头的写操作', refused('WITH x AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM x)'));
+  check('impact 拒绝 RETURNING', refused('DELETE FROM t WHERE id = 1 RETURNING *'));
+  check('impact 拒绝 OUTPUT', refused('DELETE FROM t OUTPUT deleted.id WHERE id = 1'));
+  check('impact 拒绝 LIMIT（实际影响受条数限制）', refused('DELETE FROM t WHERE x = 1 LIMIT 10'));
+  check('impact 拒绝 TOP', refused('DELETE TOP (10) FROM t WHERE x = 1'));
+  check('impact 子查询里的 LIMIT 不误判为条数限制',
+    countOf('DELETE FROM t WHERE id IN (SELECT id FROM y LIMIT 10)')
+      === 'SELECT COUNT(*) AS dbpanda_impact FROM t WHERE id IN (SELECT id FROM y LIMIT 10)');
+  check('impact 未闭合的字符串不会让掩码越界', typeof impact.maskLiterals("DELETE FROM t WHERE a = 'unclosed") === 'string');
+  // 端到端：在真实 SQLite 上跑一次预检，行数必须与实际删除数一致
+  const impactDb = new (require('better-sqlite3') || Object)(':memory:');
+  impactDb.exec('CREATE TABLE imp(id INTEGER PRIMARY KEY, v INTEGER)');
+  const insertImp = impactDb.prepare('INSERT INTO imp(v) VALUES (?)');
+  for (let i = 1; i <= 25; i++) insertImp.run(i);
+  const impactPreview = await impact.preview('DELETE FROM imp WHERE v > 10', {
+    splitStatements: safety.splitStatements,
+    runCount: async (countSql) => [{ rows: [impactDb.prepare(countSql).get()] }],
+  });
+  const actuallyDeleted = impactDb.prepare('DELETE FROM imp WHERE v > 10').run().changes;
+  check('impact 预估行数与实际影响行数一致',
+    impactPreview.length === 1 && impactPreview[0].rows === 15 && actuallyDeleted === 15);
+  impactDb.close();
   let safeWhereAccepted = true;
   try { safety.assertWhereFragment("name = 'a;b'"); } catch (e) { safeWhereAccepted = false; }
   check('safety 允许字符串中的分号', safeWhereAccepted);

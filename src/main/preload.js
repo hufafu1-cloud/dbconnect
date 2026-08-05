@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('api', {
     generateTableSql: (connId, t) => inv('db:generateTableSql', { connId, ...t }),
     tableData: (connId, t) => inv('db:tableData', { connId, ...t }),
     query: (connId, t) => inv('db:query', { connId, ...t }),
+    impactPreview: (connId, t) => inv('db:impactPreview', { connId, ...t }),
     applyEdits: (connId, t) => inv('db:applyEdits', { connId, ...t }),
     action: (connId, t) => inv('db:action', { connId, ...t }),
     exportTable: (connId, t) => inv('db:exportTable', { connId, ...t }),
@@ -71,6 +72,7 @@ contextBridge.exposeInMainWorld('api', {
   dba: {
     transfer: (t) => inv('dba:transfer', t),
     dump: (connId, t) => inv('dba:dump', { connId, ...t }),
+    dataDict: (connId, t) => inv('dba:dataDict', { connId, ...t }),
     runSqlFile: (connId, t) => inv('dba:runSqlFile', { connId, ...t }),
     cancelSqlFile: (connId, taskId) => inv('dba:cancelSqlFile', { connId, taskId }),
     structDiff: (t) => inv('dba:structDiff', t),
@@ -145,6 +147,16 @@ contextBridge.exposeInMainWorld('api', {
     format: (opts) => inv('sql:format', opts),
     statementAt: (sql, dialect, cursor) => inv('sql:statementAt', { sql, dialect, cursor }),
   },
+  audit: {
+    read: (opts) => inv('audit:read', opts || {}),
+  },
+  security: {
+    review: () => inv('security:review'),
+  },
+  settings: {
+    read: () => inv('settings:read'),
+    patch: (partial) => inv('settings:patch', partial),
+  },
   workspace: {
     read: () => inv('workspace:read'),
     write: (snapshot) => inv('workspace:write', snapshot),
@@ -159,6 +171,13 @@ contextBridge.exposeInMainWorld('api', {
     onMenuAction: (cb) => ipcRenderer.on('menu:action', (_e, id) => cb(id)),
     openExternal: (url) => inv('app:openExternal', url),
     winCmd: (cmd) => inv('app:winCmd', cmd),
+    systemDark: () => inv('app:systemDark'),
+    setZoom: (percent) => inv('app:setZoom', percent),
+    onSystemTheme: (cb) => {
+      const listener = (_event, dark) => cb(!!dark);
+      ipcRenderer.on('app:system-theme', listener);
+      return () => ipcRenderer.removeListener('app:system-theme', listener);
+    },
     updateCheck: () => inv('app:update-check'),
     updateDownload: () => inv('app:update-download'),
     updateCancel: () => inv('app:update-cancel'),

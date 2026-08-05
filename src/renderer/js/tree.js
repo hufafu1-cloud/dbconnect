@@ -181,6 +181,14 @@ function renderConnNode(conn) {
     const tag = el('span', { class: 'tree-env env-' + conn.env, title: conn.env === 'prod' ? '生产库：危险 SQL 需二次确认' : '测试库' }, conn.env === 'prod' ? '生产' : '测试');
     label.after(tag);
   }
+  if (conn.readOnly === true) {
+    // 只读是常态防线，必须一眼可见，否则用户会以为是功能坏了
+    const label = row.querySelector('.tree-label');
+    label.after(el('span', {
+      class: 'tree-env env-readonly',
+      title: '只读连接：拒绝一切写入操作（导出到本地文件不受影响）',
+    }, '只读'));
+  }
 
   const isOpenNow = () => state.open.has(conn.id);
 
@@ -990,6 +998,29 @@ function renderGroupNode(gname, conns) {
 }
 
 // ---------------- 入口与刷新 ----------------
+/**
+ * 首次启动引导：一棵空树对新用户没有任何指引。
+ * 「从 Navicat 导入」放在第一个——这是最省事的迁移路径，
+ * 原来埋在「文件」菜单二级里，基本没人找得到。
+ */
+function renderOnboarding() {
+  const action = (label, hint, onClick, primary) =>
+    el('button', { class: 'btn' + (primary ? ' primary' : ''), onClick, title: hint }, label);
+  return el('div', { class: 'tree-onboarding' },
+    el('div', { class: 'tree-onboarding-title' }, '还没有连接'),
+    el('div', { class: 'tree-onboarding-sub' }, '从下面任选一种方式开始。'),
+    el('div', { class: 'tree-onboarding-actions' },
+      action('从 Navicat 导入连接…', '读取 Navicat 导出的 .ncx，一次导入全部连接', async () => {
+        const { openNavicatImport } = await import('./navicatImport.js');
+        openNavicatImport();
+      }, true),
+      action('新建连接…', '手动填写连接信息', () => openConnDialog())),
+    el('div', { class: 'tree-onboarding-tips' },
+      el('b', {}, 'Ctrl+P'), ' 跳转到表', el('br'),
+      el('b', {}, 'Ctrl+Shift+P'), ' 命令面板', el('br'),
+      el('b', {}, 'Ctrl+Q'), ' 新建查询'));
+}
+
 export function renderTree() {
   treeRoot = $('#tree');
   if (!treeRoot.hasAttribute('tabindex')) {
@@ -998,10 +1029,7 @@ export function renderTree() {
   }
   treeRoot.innerHTML = '';
   connNodes.clear();
-  if (!state.connections.length) {
-    treeRoot.append(el('div', { style: { padding: '24px 16px', color: 'var(--text-muted)', fontSize: '12.5px', lineHeight: '1.8' } },
-      '还没有连接。', el('br'), '点击工具栏“新建连接”开始。'));
-  }
+  if (!state.connections.length) treeRoot.append(renderOnboarding());
   // 按分组渲染：声明的分组（含空组）+ 连接上使用的分组，未分组连接在根
   const groups = new Map();
   for (const g of state.groups || []) {

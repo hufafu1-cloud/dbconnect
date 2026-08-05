@@ -1,7 +1,8 @@
 // 危险 SQL 检测 + 生产库执行前二次确认（参考 SQLark 的链接类型/审批理念）
-import { el } from './util.js';
+import { el, fmtCount } from './util.js';
 import { openModal, toast } from './toast.js';
 import { connById } from './state.js';
+import { getSetting } from './settings.js';
 
 // 把脚本拆成单条语句（识别字符串/反引号/行注释/块注释里的分号，不误切）
 export function splitStatements(sql) {
@@ -145,6 +146,69 @@ export function confirmDangerExecution(connName, items, ctx = {}) {
   });
 }
 
+// ---------------- 影响范围预检 ----------------
+// 主进程把能安全改写的 UPDATE/DELETE 换成 COUNT(*) 跑一遍，回来的是每条语句的行数
+// 或「无法预估」的原因。这里只负责决定要不要拦一下、怎么说。
+const IMPACT_WARN_ROWS = 1000;
+
+/** 拉取预检结果；失败一律当作「没有预检信息」，绝不因此挡住用户执行 */
+async function fetchImpact(payload) {
+  if (getSetting('impactPreview') === 'off') return null;
+  if (!payload || !payload.sql) return null;
+  try {
+    const items = await window.api.db.impactPreview(payload.connId, {
+      db: payload.db, schema: payload.schema, sql: payload.sql, transactionId: payload.transactionId,
+    });
+    return Array.isArray(items) && items.length ? items : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function impactNeedsConfirm(items) {
+  if (!items) return false;
+  if (getSetting('impactPreview') === 'always') return true;
+  // risky 档：整表写入（没有 WHERE）、影响面过大、以及「算不出来」都要提示
+  return items.some((it) => !it.supported || it.hasWhere === false || (it.rows || 0) >= IMPACT_WARN_ROWS);
+}
+
+function impactLine(item) {
+  if (!item.supported) return `无法预估（${item.reason}）`;
+  const scope = item.hasWhere ? '' : '（整表，没有 WHERE 条件）';
+  return `将影响 ${fmtCount(item.rows)} 行${scope}`;
+}
+
+/** 非生产连接的轻确认：只报数，不要求输连接名 */
+function confirmImpact(items) {
+  return new Promise((resolve) => {
+    let done = false;
+    const severe = items.some((it) => !it.supported || it.hasWhere === false || (it.rows || 0) >= IMPACT_WARN_ROWS);
+    const body = el('div', { class: 'danger-body' },
+      el('div', { class: 'danger-head' },
+        el('span', { class: 'danger-badge impact' }, '影响范围'),
+        el('span', {}, `即将执行 ${items.length} 条写操作语句`)),
+      el('div', { class: 'danger-list' },
+        ...items.map((it) => el('div', { class: 'danger-item ' + (it.supported && it.hasWhere && (it.rows || 0) < IMPACT_WARN_ROWS ? 'lv-medium' : 'lv-high') },
+          el('div', { class: 'danger-reason' },
+            el('span', { class: 'danger-tag ' + (it.supported && it.hasWhere ? 'medium' : 'high') },
+              it.kind === 'delete' ? 'DELETE' : 'UPDATE'),
+            impactLine(it)),
+          el('pre', { class: 'danger-sql' }, snippet(it.sql))))),
+      el('div', { class: 'impact-note' },
+        '行数由同样的 WHERE 条件实时统计得出；无法保证等价改写的语句会明确标为「无法预估」，不会给出可能有误的数字。'));
+    openModal({
+      title: severe ? '⚠ 影响范围确认' : '影响范围确认',
+      width: 620,
+      body,
+      buttons: [
+        { label: '取消', onClick: () => { done = true; resolve(false); } },
+        { label: '确认执行', danger: severe, primary: !severe, onClick: () => { done = true; resolve(true); } },
+      ],
+      onClose: () => { if (!done) resolve(false); },
+    });
+  });
+}
+
 /** 是否为生产连接 */
 export function isProd(connId) {
   const c = connById(connId);
@@ -159,11 +223,21 @@ export function isProd(connId) {
  */
 export async function authorizeOperation(operation, payload, ctx = {}) {
   const info = await window.api.safety.inspect(operation, payload);
+  // 影响范围预检只对自由 SQL 有意义：表数据编辑等操作的影响行数本来就是已知的
+  const impact = operation === 'db.query' ? await fetchImpact(payload) : null;
   if (!info.required) {
+    if (impactNeedsConfirm(impact) && !(await confirmImpact(impact))) return null;
     if (ctx.confirmSafe && !(await ctx.confirmSafe())) return null;
     return { ...payload };
   }
-  const confirmation = await confirmDangerExecution(info.connName, info.items, {
+  // 生产库路径：把行数并进审批清单，用户在同一个弹窗里就能看到影响面
+  const items = impact
+    ? info.items.map((item) => {
+      const hit = impact.find((x) => x.sql && item.sql && x.sql.trim() === item.sql.trim());
+      return hit ? { ...item, reason: `${item.reason} · ${impactLine(hit)}` } : item;
+    })
+    : info.items;
+  const confirmation = await confirmDangerExecution(info.connName, items, {
     title: ctx.title || info.title,
     returnConfirmation: true,
   });

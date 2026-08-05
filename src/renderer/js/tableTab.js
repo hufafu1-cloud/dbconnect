@@ -6,8 +6,15 @@ import { DataGrid } from './grid.js';
 import { toast, confirmDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { authorizeOperation } from './danger.js';
+import { getSetting, updateSettings } from './settings.js';
 
 const PAGE_SIZES = [100, 500, 1000];
+
+/** 默认每页行数来自「选项」，不再是写死的 500——改过之后重启仍然生效 */
+function defaultPageSize() {
+  const configured = Number(getSetting('tablePageSize'));
+  return PAGE_SIZES.includes(configured) ? configured : 500;
+}
 
 export function openTableTab(target, openOpts) {
   setActiveTarget(target, 'table-tab');
@@ -21,7 +28,7 @@ export function openTableTab(target, openOpts) {
   }
 
   let page = restored && Number.isSafeInteger(Number(restored.page)) ? Math.max(1, Number(restored.page)) : 1;
-  let pageSize = restored && PAGE_SIZES.includes(Number(restored.pageSize)) ? Number(restored.pageSize) : 500;
+  let pageSize = restored && PAGE_SIZES.includes(Number(restored.pageSize)) ? Number(restored.pageSize) : defaultPageSize();
   let total = null;
   let where = (openOpts && openOpts.initialWhere) || (restored && typeof restored.where === 'string' ? restored.where : '');
   let orderBy = restored && typeof restored.orderBy === 'string' ? restored.orderBy : null;
@@ -268,7 +275,13 @@ export function openTableTab(target, openOpts) {
       (() => {
         const sel = el('select', {}, ...PAGE_SIZES.map((n) => el('option', { value: n, selected: n === pageSize ? 'selected' : null }, n)));
         sel.value = String(pageSize);
-        sel.addEventListener('change', () => { pageSize = Number(sel.value); page = 1; load(); });
+        sel.addEventListener('change', () => {
+          pageSize = Number(sel.value);
+          page = 1;
+          // 同时记成新的默认值：用户改一次，以后新打开的表和下次启动都沿用
+          updateSettings({ tablePageSize: pageSize }).catch(() => { /* 保存失败不影响本次翻页 */ });
+          load();
+        });
         return sel;
       })(), '行'),
     recEl,

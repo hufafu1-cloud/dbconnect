@@ -61,6 +61,23 @@ export function openConnDialog(existing, presetType, presetGroup) {
   envSel.addEventListener('change', () => { refreshEnvHint(); if (envSel.value === 'prod' && !pickedColor) setColor('#e5484d'); });
   refreshEnvHint();
 
+  // 只读连接：比「生产审批」更轻的常态防线——设一次之后全程生效，不用每次输连接名。
+  // 实际拦截在主进程完成（safety.assertNotReadOnly），这里只是开关。
+  const readOnlyCheck = el('input', { type: 'checkbox' });
+  readOnlyCheck.checked = cfg.readOnly === true;
+  const readOnlyHint = el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } });
+  const refreshReadOnlyHint = () => {
+    readOnlyHint.textContent = readOnlyCheck.checked
+      ? '已开启：表数据编辑、导入、结构变更、数据传输/同步写入、结束会话一律拒绝；查询页只允许只读 SQL。导出到本地文件不受影响。'
+      : '开启后本连接将拒绝一切写入操作，适合日常只查数的场景。';
+  };
+  readOnlyCheck.addEventListener('change', refreshReadOnlyHint);
+  refreshReadOnlyHint();
+  const readOnlyRow = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+    el('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '13px' } },
+      readOnlyCheck, el('span', {}, '只读连接（拒绝一切写入）')),
+    readOnlyHint);
+
   let pickedColor = cfg.color || '';
   const swatchEls = new Map();
   function setColor(c) {
@@ -234,6 +251,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       group: groupInput.value.trim(),
       color: pickedColor,
       env: envSel.value,
+      readOnly: readOnlyCheck.checked,
     };
     if (t === 'sqlite') {
       out.file = f.file.value.trim();
@@ -281,6 +299,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
     el('label', {}, '连接名'), nameInput,
     el('label', {}, '分组'), groupInput,
     el('label', {}, '链接类型'), el('div', {}, envSel, envHint),
+    el('label', {}, '访问权限'), readOnlyRow,
     el('label', {}, '颜色标记'), swatches,
     fieldsBox);
 
