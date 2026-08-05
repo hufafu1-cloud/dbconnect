@@ -24,7 +24,7 @@ export async function openBackupDialog(target) {
   }
 
   const listEl = el('div', { class: 'backup-list' });
-  const status = el('div', { class: 'settings-hint' });
+  const status = el('div', { class: 'settings-hint backup-status' });
   const rootEl = el('span', { class: 'audit-path' });
   const nameInput = el('input', {
     type: 'text', class: 'settings-select', spellcheck: false,
@@ -48,8 +48,14 @@ export async function openBackupDialog(target) {
     const scoped = items.filter((item) => item.db === target.db);
     listEl.replaceChildren();
     if (!scoped.length) {
+      // 同一连接下别的库有备份时说清楚，免得用户以为备份"丢了"
+      const otherDbs = [...new Set(items.map((item) => item.db))].filter((db) => db && db !== target.db);
       listEl.append(el('div', { class: 'obj-placeholder' },
-        t('这个库还没有备份。点上面的「立即备份」开始，默认保留最近 {n} 份。', { n: getSetting('backupKeep') })));
+        t('这个库还没有备份。点上面的「立即备份」开始，默认保留最近 {n} 份。', { n: getSetting('backupKeep') }),
+        otherDbs.length
+          ? el('div', { style: { marginTop: '6px' } },
+            t('该连接下另有 {n} 个库的备份：{list}', { n: otherDbs.length, list: otherDbs.join('、') }))
+          : null));
       return;
     }
     for (const item of scoped) listEl.append(backupRow(item));
@@ -103,13 +109,17 @@ export async function openBackupDialog(target) {
       const message = t('备份完成：{n} 个表，{size}', { n: result.tables, size: fmtBytes(result.bytes) })
         + (result.pruned ? t('（已清理 {n} 份旧备份）', { n: result.pruned }) : '');
       status.textContent = message;
+      status.classList.remove('error');
       task.done(message);
       toast.success(message);
       nameInput.value = '';
       await refresh();
     } catch (error) {
       const message = (error && error.message) || String(error);
+      // 常驻的红色错误块：toast 会自动消失，用户回头只会觉得「点了没反应」，
+      // 然后去问「备份的数据跑哪了」——失败原因必须留在界面上。
       status.textContent = t('备份失败：') + message;
+      status.classList.add('error');
       task.fail(error);
       toast.error(t('备份失败：') + message, 12000);
     } finally {
@@ -193,7 +203,8 @@ export async function openBackupDialog(target) {
       el('div', { class: 'settings-row' },
         el('label', { class: 'settings-label' }, t('目标')),
         el('div', { class: 'settings-control' },
-          el('div', {}, `${connLabel(target.connId)} / ${target.db}${target.schema ? ` / ${target.schema}` : ''}`),
+          el('div', { class: 'backup-target' },
+            `${connLabel(target.connId)} / ${target.db}${target.schema ? ` / ${target.schema}` : ''}`),
           // 按钮推到行尾并用普通样式：主色实心会和底部的「关闭」抢视觉重心，
           // 让整个对话框最扎眼的东西变成一个次级操作。
           el('div', { class: 'backup-run-row' },

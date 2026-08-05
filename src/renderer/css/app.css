@@ -896,7 +896,16 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 }
 
 /* 备份 / 还原 */
-.backup-run-row { display: flex; align-items: center; gap: 12px; }
+/* 与 .settings-label 的 padding-top 对齐，否则「目标」会比后面的库名低一截 */
+.backup-target { padding-top: 7px; font-weight: 500; line-height: 1.4; }
+.backup-status { margin-top: 2px; }
+/* 失败必须显眼且**不会自动消失**：toast 一闪而过，用户只会以为「点了没反应」 */
+.backup-status.error {
+  color: var(--err-text); background: var(--err-bg);
+  border: 1px solid var(--warn-border); border-radius: 5px;
+  padding: 6px 9px; white-space: pre-wrap;
+}
+.backup-run-row { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
 .backup-run-row .settings-select { flex: 1 1 auto; min-width: 0; }
 .backup-include {
   display: inline-flex; align-items: center; gap: 5px;

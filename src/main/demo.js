@@ -460,6 +460,16 @@ async function runDemo(createWindow) {
   // 备份 / 还原
   await ej(`(async () => { await (await import('./js/backupDialog.js')).openBackupDialog({ connId: ${id}, db: 'main', schema: null }); return true; })()`);
   await wait(600);
+  // 真的点一次「立即备份」，确认它出现在备份历史里——不能只截个空列表就当作能用
+  await ej(`(() => { document.querySelector('.backup-run').click(); return true; })()`);
+  await wait(4000);
+  const backupClick = await ej(`(() => ({
+    items: document.querySelectorAll('.backup-item').length,
+    status: (document.querySelector('.backup-status') || {}).textContent || '',
+    firstMeta: (document.querySelector('.backup-item .backup-meta') || {}).textContent || '',
+  }))()`);
+  console.log('[DEMO] 立即备份:', JSON.stringify(backupClick));
+  console.log('[DEMO] 立即备份后出现在历史里:', backupClick.items === 1 ? 'PASS' : 'FAIL');
   await shot('shot-31-backup.png');
   await ej(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
   await wait(300);
