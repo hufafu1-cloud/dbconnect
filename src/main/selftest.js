@@ -1420,6 +1420,35 @@ async function runSelfTest() {
   catch (e) { restoreBlocked = /已设为只读/.test(e.message); }
   check('backup 只读连接拒绝还原', restoreBlocked);
   const prodBackupConn = bkStore.save({ name: '生产还原自检', type: 'sqlite', file, env: 'prod' });
+  // 失败信息必须说清楚是哪一步、哪张表——否则只有一句原始驱动报错，无从排查
+  const failingAdapter = {
+    listObjects: async () => ({ tables: [{ name: 'ok_t' }, { name: 'bad_t' }], views: [] }),
+    tableInfo: async (d, s, table) => {
+      if (table === 'bad_t') throw new Error('Authentication failed');
+      return { columns: [{ name: 'id', type: 'INT' }], indexes: [], pk: ['id'], ddl: 'CREATE TABLE ok_t (id INT)' };
+    },
+    listForeignKeys: async () => [],
+    qualify: (d, s, t) => `"${t}"`,
+    quoteIdent: (n) => `"${n}"`,
+    pageSql: (sql) => sql,
+    exec: async () => ({ columns: [{ name: 'id', type: 'INT' }], rows: [] }),
+    dialect: 'clickhouse',
+  };
+  let backupFailDetail = '';
+  try {
+    await backup.create(failingAdapter, { connId: bkConn.id, connName: 'x', db: 'db_dict' });
+  } catch (e) { backupFailDetail = e.message; }
+  check('backup 失败信息包含阶段、表名与库名',
+    /读取表结构/.test(backupFailDetail) && /bad_t/.test(backupFailDetail)
+    && /db_dict/.test(backupFailDetail) && /Authentication failed/.test(backupFailDetail),
+    backupFailDetail);
+  let emptyDbMessage = '';
+  try {
+    await backup.create({ listObjects: async () => ({ tables: [], views: [] }) },
+      { connId: bkConn.id, connName: 'x', db: 'db_empty' });
+  } catch (e) { emptyDbMessage = e.message; }
+  check('backup 空库给出带库名的提示', /db_empty/.test(emptyDbMessage), emptyDbMessage);
+
   check('backup 生产连接还原必须审批',
     bkSafety.describe('backup.restore', { connId: prodBackupConn.id, id: made.id, db: 'main' }).required === true);
   bkStore.remove(bkConn.id);
