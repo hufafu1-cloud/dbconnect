@@ -26,12 +26,69 @@ function clickhouseTypeCore(type) {
   }
 }
 
-function clickhouseJson(value) {
+function jsonText(value) {
   try {
     return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item);
   } catch (e) {
     return String(value);
   }
+}
+const clickhouseJson = jsonText;
+
+// ---------------- PostgreSQL 数组字面量 ----------------
+// pg 驱动会把数组列解析成 JS 数组、json/jsonb 解析成 JS 对象。这些值在
+// PostgreSQL 里有确定的文本表示，可以照着生成；无法确定的元素类型
+// （如数组里的二进制）返回 null，让调用方退回报错，绝不猜。
+const UNSUPPORTED = Symbol('unsupported');
+
+function pgArrayQuote(text) {
+  return `"${String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function pgArrayElement(value) {
+  if (value === null || value === undefined) return 'NULL';
+  if (Array.isArray(value)) return pgArrayText(value);
+  // bytea[] 的元素在数组文本里还要再套一层转义，出错风险高于价值，直接不支持
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return UNSUPPORTED;
+  if (value instanceof Date) return pgArrayQuote(formatDate(value));
+  if (typeof value === 'object') return pgArrayQuote(jsonText(value));
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'bigint' || typeof value === 'number') return String(value);
+  const text = String(value);
+  // 空串、含分隔符/引号/反斜杠/空白的、以及字面量 NULL 都必须加引号，
+  // 否则会被 PostgreSQL 解析成分隔符或真正的 NULL
+  if (text === '' || /[{},"\\\s]/.test(text) || /^null$/i.test(text)) return pgArrayQuote(text);
+  return text;
+}
+
+function pgArrayText(value) {
+  const parts = [];
+  for (const item of value) {
+    const part = pgArrayElement(item);
+    if (part === UNSUPPORTED) return UNSUPPORTED;
+    parts.push(part);
+  }
+  return `{${parts.join(',')}}`;
+}
+
+/**
+ * 方言原生的数组 / JSON 字面量。命中返回 SQL 字面量，无法确定时返回 null。
+ * 生成的是带引号的文本，由目标列的类型完成隐式转换——pg_dump 的 --inserts
+ * 模式也是这么做的。
+ */
+function nativeObjectLiteral(adapter, value, type) {
+  const dialect = adapter && adapter.dialect;
+  const text = String(type || '').trim().toLowerCase();
+  if (dialect === 'postgres') {
+    if (text.endsWith('[]')) {
+      const arrayText = Array.isArray(value) ? pgArrayText(value) : UNSUPPORTED;
+      return arrayText === UNSUPPORTED ? null : textLiteral(adapter, arrayText);
+    }
+    if (text === 'json' || text === 'jsonb') return textLiteral(adapter, jsonText(value));
+  }
+  // MySQL / MariaDB / OceanBase 的 JSON 列同样会被驱动解析成对象
+  if (dialect === 'mysql' && text.startsWith('json')) return textLiteral(adapter, jsonText(value));
+  return null;
 }
 
 /** ClickHouse 原生支持 Array / Tuple / Map；这些值不能按普通跨方言标量处理。 */
@@ -71,6 +128,9 @@ function valueLiteral(adapter, value, type, fromClickHouse = false) {
   }
   if (typeof value === 'boolean') return adapter.boolLiteral(value);
   if (typeof value === 'object') {
+    // 先试目标方言的原生表示（PG 数组/JSON、MySQL JSON）；只有确实无法确定时才报错
+    const native = nativeObjectLiteral(adapter, value, type);
+    if (native !== null) return native;
     throw new Error('数组/对象值无法可靠生成为跨方言 SQL 字面量；请改用原生格式或先转换为文本列');
   }
   return textLiteral(adapter, value);

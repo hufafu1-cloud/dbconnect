@@ -2601,6 +2601,33 @@ async function runSelfTest() {
     && transfer.valueLiteral(ch, { key: 'value' }, 'Map(String, String)') === "map('key', 'value')"
     && transfer.valueLiteral(ch, { key: 1 }, 'JSON') === "'{\"key\":1}'");
 
+  // ---- PG 数组 / JSON、MySQL JSON：驱动会把它们解析成 JS 数组或对象。
+  //      之前一律报错，导致 PostgreSQL 只要有这类列就无法转储和备份。 ----
+  const pgLit = new (require('./db/postgres').PostgresAdapter)({});
+  const lit = (value, type) => transfer.valueLiteral(pgLit, value, type);
+  check('pg 整型数组字面量', lit([1, 2, 3], 'integer[]') === "'{1,2,3}'");
+  check('pg 文本数组转义分隔符与引号',
+    lit(['a', 'b,c', 'd"e', ''], 'text[]') === `'{a,"b,c","d\\"e",""}'`, lit(['a', 'b,c', 'd"e', ''], 'text[]'));
+  check('pg 数组中的 NULL 与字面量 NULL 能区分',
+    lit([null, 'NULL'], 'text[]') === `'{NULL,"NULL"}'`, lit([null, 'NULL'], 'text[]'));
+  check('pg 数组反斜杠加倍', lit(['a\\b'], 'text[]') === `'{"a\\\\b"}'`, lit(['a\\b'], 'text[]'));
+  check('pg 多维数组', lit([[1, 2], [3, 4]], 'integer[]') === "'{{1,2},{3,4}}'");
+  check('pg 布尔数组', lit([true, false, null], 'boolean[]') === "'{true,false,NULL}'");
+  check('pg 带类型修饰的数组也识别',
+    lit(['x'], 'character varying(50)[]') === "'{x}'");
+  check('pg jsonb 对象', lit({ a: 1, b: '中' }, 'jsonb') === `'{"a":1,"b":"中"}'`);
+  check('pg json 数组值按 JSON 而非数组文本生成',
+    lit([1, 2], 'json') === "'[1,2]'", lit([1, 2], 'json'));
+  check('mysql json 对象', transfer.valueLiteral(my, { a: 1 }, 'json')
+    === `_utf8mb4 X'${Buffer.from('{"a":1}', 'utf8').toString('hex')}'`);
+  // 类型不明或元素无法确定表示时，仍然报错而不是猜一个可能错的字面量
+  let unknownTypeStillThrows = false;
+  try { lit([1, 2], ''); } catch (e) { unknownTypeStillThrows = /无法可靠生成/.test(e.message); }
+  check('pg 列类型未知时仍然报错', unknownTypeStillThrows);
+  let byteaArrayStillThrows = false;
+  try { lit([Buffer.from([1])], 'bytea[]'); } catch (e) { byteaArrayStillThrows = /无法可靠生成/.test(e.message); }
+  check('pg 二进制数组不猜表示，仍然报错', byteaArrayStillThrows);
+
   // 传输端到端：sqlite → sqlite（结构 + 数据 + BLOB 保真）
   const fSrc = path.join(os.tmpdir(), `dbc-tr-src-${Date.now()}.db`);
   const fDst = path.join(os.tmpdir(), `dbc-tr-dst-${Date.now()}.db`);
