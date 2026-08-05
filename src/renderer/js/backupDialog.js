@@ -194,11 +194,12 @@ export async function openBackupDialog(target) {
         el('label', { class: 'settings-label' }, t('目标')),
         el('div', { class: 'settings-control' },
           el('div', {}, `${connLabel(target.connId)} / ${target.db}${target.schema ? ` / ${target.schema}` : ''}`),
-          el('div', { class: 'row-flex', style: { gap: '8px', alignItems: 'center' } },
+          // 按钮推到行尾并用普通样式：主色实心会和底部的「关闭」抢视觉重心，
+          // 让整个对话框最扎眼的东西变成一个次级操作。
+          el('div', { class: 'backup-run-row' },
             nameInput,
-            el('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12.5px' } },
-              includeData, el('span', {}, t('包含数据'))),
-            el('button', { class: 'btn primary', onClick: doBackup }, t('立即备份'))),
+            el('label', { class: 'backup-include' }, includeData, el('span', {}, t('包含数据'))),
+            el('button', { class: 'btn backup-run', onClick: doBackup }, t('立即备份'))),
           status))),
     el('div', { class: 'settings-group' },
       el('div', { class: 'settings-group-title' }, t('备份历史')),

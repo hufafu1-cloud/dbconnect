@@ -896,6 +896,14 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
 }
 
 /* 备份 / 还原 */
+.backup-run-row { display: flex; align-items: center; gap: 12px; }
+.backup-run-row .settings-select { flex: 1 1 auto; min-width: 0; }
+.backup-include {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12.5px; white-space: nowrap; color: var(--text-muted);
+}
+/* 与左侧控件明确拉开，不再紧贴复选框 */
+.backup-run { margin-left: 4px; flex: 0 0 auto; }
 .backup-list { max-height: 240px; overflow: auto; border: 1px solid var(--border-light); border-radius: 6px; }
 .backup-item { padding: 8px 10px; border-bottom: 1px solid var(--border-light); }
 .backup-item:last-child { border-bottom: 0; }

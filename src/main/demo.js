@@ -457,6 +457,13 @@ async function runDemo(createWindow) {
   await ej(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
   await wait(300);
 
+  // 备份 / 还原
+  await ej(`(async () => { await (await import('./js/backupDialog.js')).openBackupDialog({ connId: ${id}, db: 'main', schema: null }); return true; })()`);
+  await wait(600);
+  await shot('shot-31-backup.png');
+  await ej(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
+  await wait(300);
+
   // 深色模式：持久化后整页重载（等同用户重启后的暗色状态），再开表截屏
   await ej("window.__test.setTheme('dark')");
   await wait(300);
