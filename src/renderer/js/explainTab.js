@@ -67,8 +67,9 @@ export function openExplainTab(target, sql) {
   const tab = addTab({ id: uid('explain'), title: '执行计划', icon: 'explain', color: connColor(target.connId), tooltip: `${connLabel(target.connId)} 执行计划` });
   tab.setOnShow(() => setActiveTarget(target, 'explain-tab'));
   const pane = tab.pane;
-  pane.style.display = 'flex';
-  pane.style.flexDirection = 'column';
+  // 这里不能设内联 display：.tabpane 靠 .active 类切换显示，内联样式会把
+  // 「非活动标签隐藏」整个覆盖掉，导致执行计划面板永远盖在其它标签上面。
+  // 布局所需的 display:flex / flex-direction:column 由 css 的 .tabpane 规则提供。
 
   const sqlBox = el('div', { class: 'ddl-box', style: { margin: '8px 10px', maxHeight: '90px', overflow: 'auto', flex: '0 0 auto' } }, sql);
   const body = el('div', { class: 'plan-body', style: { flex: '1', minHeight: '0', overflow: 'auto' } }, '解析中…');
