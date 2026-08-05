@@ -22,6 +22,21 @@ async function fetchRawPage(ad, db, schema, table, columns, pkCols, page, pageSi
   return r;
 }
 
+/**
+ * 结果集列类型回落到表元数据的列类型。
+ *
+ * PostgreSQL 的驱动结果不带类型名（postgres.js 里结果列的 type 固定是空串），
+ * 而数组 / json 列必须知道类型才能生成正确的字面量——否则整张表都导不出来。
+ * 驱动给了类型就用驱动的，没给才用 tableInfo 的 format_type 结果。
+ */
+function withMetaTypes(resultColumns, infoColumns) {
+  const byName = new Map((infoColumns || []).map((column) => [column.name, column.type || '']));
+  return (resultColumns || []).map((column) => ({
+    ...column,
+    type: column.type || byName.get(column.name) || '',
+  }));
+}
+
 /** 批量插入一页数据（Oracle 方言逐行 + 事务，其余多行 VALUES） */
 async function insertRows(ad, db, schema, table, columns, rows) {
   if (!rows.length) return;
@@ -84,7 +99,7 @@ async function runTransfer(srcAd, dstAd, args, progress) {
         for (;;) {
           const r = await fetchRawPage(srcAd, srcDb, sSchema, table, info.columns, pkCols, page, batchSize);
           if (!r.rows.length) break;
-          await insertRows(dstAd, dstDb, dSchema, table, r.columns, r.rows);
+          await insertRows(dstAd, dstDb, dSchema, table, withMetaTypes(r.columns, info.columns), r.rows);
           item.rows += r.rows.length;
           progress({ table, phase: '复制数据', tablesDone: done, tablesTotal: tables.length, rows: item.rows });
           if (r.rows.length < batchSize) break;
@@ -149,7 +164,7 @@ async function dumpSql(ad, args, progress) {
           const r = await fetchRawPage(ad, db, sch, table, info.columns, pkCols, page, batchSize);
           if (!r.rows.length) break;
           const colSql = r.columns.map((c) => ad.quoteIdent(c.name)).join(', ');
-          const columnTypes = r.columns.map((column) => column.type || '');
+          const columnTypes = withMetaTypes(r.columns, info.columns).map((column) => column.type);
           for (const row of r.rows) {
             w(`INSERT INTO ${T} (${colSql}) VALUES (${row.map((v, i) => valueLiteral(ad, v, columnTypes[i])).join(', ')});`);
           }

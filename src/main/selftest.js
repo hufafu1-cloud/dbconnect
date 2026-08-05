@@ -2628,6 +2628,41 @@ async function runSelfTest() {
   try { lit([Buffer.from([1])], 'bytea[]'); } catch (e) { byteaArrayStillThrows = /无法可靠生成/.test(e.message); }
   check('pg 二进制数组不猜表示，仍然报错', byteaArrayStillThrows);
 
+  // 端到端复现：PostgreSQL 的驱动结果集不带类型名（type 恒为空串），
+  // 只有 tableInfo 的 format_type 有类型。转储必须回落到表元数据，
+  // 否则含 json/数组列的 PG 库整个备份不了。
+  const pgDump = new (require('./db/postgres').PostgresAdapter)({});
+  pgDump.tableInfo = async () => ({
+    columns: [
+      { name: 'id', type: 'integer' },
+      { name: 'tags', type: 'text[]' },
+      { name: 'meta', type: 'jsonb' },
+    ],
+    indexes: [],
+    pk: ['id'],
+    ddl: 'CREATE TABLE public.t (id integer, tags text[], meta jsonb)',
+  });
+  let pgPage = 0;
+  pgDump.exec = async () => (pgPage++ === 0
+    ? {
+      // 关键：这里的 type 全是空串，和真实 pg 驱动一致
+      columns: [{ name: 'id', type: '' }, { name: 'tags', type: '' }, { name: 'meta', type: '' }],
+      rows: [[1, ['a', 'b,c'], { k: 1 }]],
+    }
+    : { columns: [], rows: [] });
+  const pgDumpFile = path.join(os.tmpdir(), `dbc-pgdump-${Date.now()}.sql`);
+  let pgDumpErr = null;
+  try {
+    await transfer.dumpSql(pgDump, {
+      db: 'db', schema: 'public', tables: ['t'], file: pgDumpFile, includeData: true,
+    }, () => {});
+  } catch (e) { pgDumpErr = e.message; }
+  const pgDumpText = pgDumpErr ? '' : fs.readFileSync(pgDumpFile, 'utf8');
+  fs.rmSync(pgDumpFile, { force: true });
+  check('pg 含数组/JSON 列的表可以转储', !pgDumpErr, pgDumpErr);
+  check('pg 转储的数组字面量正确', pgDumpText.includes(`'{a,"b,c"}'`), pgDumpText.split('\n').find((l) => l.startsWith('INSERT')));
+  check('pg 转储的 JSON 字面量正确', pgDumpText.includes(`'{"k":1}'`));
+
   // 传输端到端：sqlite → sqlite（结构 + 数据 + BLOB 保真）
   const fSrc = path.join(os.tmpdir(), `dbc-tr-src-${Date.now()}.db`);
   const fDst = path.join(os.tmpdir(), `dbc-tr-dst-${Date.now()}.db`);
