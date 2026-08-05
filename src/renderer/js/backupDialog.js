@@ -27,13 +27,45 @@ export async function openBackupDialog(target) {
   const status = el('div', { class: 'settings-hint backup-status' });
   const rootEl = el('span', { class: 'audit-path' });
   const nameInput = el('input', {
-    type: 'text', class: 'settings-select', spellcheck: false,
+    type: 'text', class: 'backup-name', spellcheck: false,
     placeholder: t('备注（可选），如：上线前'),
-    style: { maxWidth: '240px' },
   });
   const includeData = el('input', { type: 'checkbox' });
   includeData.checked = true;
+  const runBtn = el('button', { class: 'btn backup-run' }, t('立即备份'));
+
+  // 备份要读完整库的数据，几十秒到几分钟都正常，必须有进度反馈
+  const progressFill = el('div', { class: 'backup-progress-fill' });
+  const progressText = el('div', { class: 'backup-progress-text' });
+  const progressBox = el('div', { class: 'backup-progress', hidden: true },
+    el('div', { class: 'backup-progress-track' }, progressFill),
+    progressText);
+
   let busy = false;
+
+  function setRunning(running) {
+    busy = running;
+    runBtn.disabled = running;
+    progressBox.hidden = !running;
+    nameInput.disabled = running;
+    includeData.disabled = running;
+    if (!running) { progressFill.style.width = '0%'; progressText.textContent = ''; }
+  }
+
+  /** 备份分多个阶段：枚举表 → 逐表读结构/数据 → 压缩 → 校验 */
+  function showProgress(payload) {
+    if (!payload) return;
+    const phase = payload.phase || t('备份中');
+    const hasTotal = Number.isFinite(payload.total) && payload.total > 0;
+    const percent = hasTotal ? Math.min(100, (payload.done / payload.total) * 100) : null;
+    progressFill.style.width = percent === null ? '100%' : `${percent}%`;
+    // 拿不到总数的阶段（压缩、校验）显示为不确定态，而不是假装 0%
+    progressFill.classList.toggle('indeterminate', percent === null);
+    progressText.textContent = hasTotal
+      ? `${phase} ${payload.done}/${payload.total}${payload.table ? ` · ${payload.table}` : ''}`
+      : phase;
+    return percent;
+  }
 
   try { rootEl.textContent = await window.api.backup.root(); } catch (e) { /* 忽略 */ }
 
@@ -84,19 +116,17 @@ export async function openBackupDialog(target) {
 
   async function doBackup() {
     if (busy) return;
-    busy = true;
-    status.textContent = t('正在备份…');
+    setRunning(true);
+    status.textContent = '';
+    status.classList.remove('error');
     const task = startTask({
       title: t('备份数据库'), kind: 'backup', connName: connLabel(target.connId), detail: target.db,
     });
-    const off = window.api.dba.onProgress((p) => {
-      if (!p) return;
-      const text = p.total
-        ? t('{phase} {done}/{total}', { phase: p.phase || '备份', done: p.done, total: p.total })
-        : (p.phase || t('备份中…'));
-      status.textContent = text;
-      task.progress(text, p.total ? (p.done / p.total) * 100 : undefined);
+    const off = window.api.dba.onProgress((payload) => {
+      const percent = showProgress(payload);
+      if (payload) task.progress(progressText.textContent, percent === null ? undefined : percent);
     });
+    showProgress({ phase: t('准备中') });
     try {
       const result = await window.api.backup.create(target.connId, {
         connName: connLabel(target.connId),
@@ -124,7 +154,7 @@ export async function openBackupDialog(target) {
       toast.error(t('备份失败：') + message, 12000);
     } finally {
       off();
-      busy = false;
+      setRunning(false);
     }
   }
 
@@ -197,21 +227,24 @@ export async function openBackupDialog(target) {
     }
   }
 
+  runBtn.addEventListener('click', doBackup);
+
+  // 这一节不用「标签列 + 内容列」的网格：内容第一行是纯文本、第二行是控件，
+  // 两种基线无论怎么调都会显得错位。分组标题已经说明了这是什么，
+  // 目标直接作为内容第一行，反而更清楚。
   const body = el('div', { class: 'settings-body' },
     el('div', { class: 'settings-group' },
       el('div', { class: 'settings-group-title' }, t('立即备份')),
-      el('div', { class: 'settings-row' },
-        el('label', { class: 'settings-label' }, t('目标')),
-        el('div', { class: 'settings-control' },
-          el('div', { class: 'backup-target' },
-            `${connLabel(target.connId)} / ${target.db}${target.schema ? ` / ${target.schema}` : ''}`),
-          // 按钮推到行尾并用普通样式：主色实心会和底部的「关闭」抢视觉重心，
-          // 让整个对话框最扎眼的东西变成一个次级操作。
-          el('div', { class: 'backup-run-row' },
-            nameInput,
-            el('label', { class: 'backup-include' }, includeData, el('span', {}, t('包含数据'))),
-            el('button', { class: 'btn backup-run', onClick: doBackup }, t('立即备份'))),
-          status))),
+      el('div', { class: 'backup-panel' },
+        el('div', { class: 'backup-target' },
+          iconEl('database'),
+          el('span', {}, `${connLabel(target.connId)} / ${target.db}${target.schema ? ` / ${target.schema}` : ''}`)),
+        el('div', { class: 'backup-run-row' },
+          nameInput,
+          el('label', { class: 'backup-include' }, includeData, el('span', {}, t('包含数据'))),
+          runBtn),
+        progressBox,
+        status)),
     el('div', { class: 'settings-group' },
       el('div', { class: 'settings-group-title' }, t('备份历史')),
       listEl,

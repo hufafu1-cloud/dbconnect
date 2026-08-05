@@ -1021,11 +1021,35 @@ function renderOnboarding() {
       el('b', {}, 'Ctrl+Q'), ' 新建查询'));
 }
 
+/**
+ * 滚轮滚动时抑制行的 hover 底色。
+ *
+ * 滚轮滚动的特点是「鼠标不动、内容在动」：每滚一格光标下面就换一行，
+ * Chromium 每帧都要重算 :hover 并重绘刚离开的那一行，偶尔会漏掉一条 1px
+ * 的失效区，在树上留下一道横线。拖动滚动条时光标在滚动条上、不经过任何行，
+ * 所以不会出现——这正好说明触发条件是滚动中的 hover 重算。
+ *
+ * 这里只在滚动期间去掉 hover 的**底色**，不动 pointer-events：
+ * 命中测试照常进行，滚动一停底色立刻回来，不需要用户再晃一下鼠标。
+ */
+function setupScrollHoverGuard(root) {
+  let timer = null;
+  root.addEventListener('scroll', () => {
+    root.classList.add('scrolling');
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      root.classList.remove('scrolling');
+      timer = null;
+    }, 120);
+  }, { passive: true });
+}
+
 export function renderTree() {
   treeRoot = $('#tree');
   if (!treeRoot.hasAttribute('tabindex')) {
     treeRoot.setAttribute('tabindex', '0');
     treeRoot.addEventListener('keydown', treeKeyDown);
+    setupScrollHoverGuard(treeRoot);
   }
   treeRoot.innerHTML = '';
   connNodes.clear();

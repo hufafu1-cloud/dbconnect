@@ -460,8 +460,23 @@ async function runDemo(createWindow) {
   // 备份 / 还原
   await ej(`(async () => { await (await import('./js/backupDialog.js')).openBackupDialog({ connId: ${id}, db: 'main', schema: null }); return true; })()`);
   await wait(600);
-  // 真的点一次「立即备份」，确认它出现在备份历史里——不能只截个空列表就当作能用
-  await ej(`(() => { document.querySelector('.backup-run').click(); return true; })()`);
+  // 真的点一次「立即备份」，确认它出现在备份历史里——不能只截个空列表就当作能用。
+  // 点击后立刻取一次状态：进度条要显示、按钮要禁用（点击处理到第一个 await 前是同步的）
+  const backupRunning = await ej(`(() => {
+    const btn = document.querySelector('.backup-run');
+    const idleHidden = document.querySelector('.backup-progress').hidden;
+    btn.click();
+    return {
+      idleHidden,
+      progressShown: !document.querySelector('.backup-progress').hidden,
+      buttonDisabled: btn.disabled,
+      inputDisabled: document.querySelector('.backup-name').disabled,
+    };
+  })()`);
+  console.log('[DEMO] 备份进度反馈:', JSON.stringify(backupRunning));
+  console.log('[DEMO] 备份进度反馈:',
+    backupRunning.idleHidden && backupRunning.progressShown
+      && backupRunning.buttonDisabled && backupRunning.inputDisabled ? 'PASS' : 'FAIL');
   await wait(4000);
   const backupClick = await ej(`(() => ({
     items: document.querySelectorAll('.backup-item').length,
