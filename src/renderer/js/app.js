@@ -23,6 +23,7 @@ import {
 import { KEYMAPS, DEFAULT_KEYMAP } from './keymaps.js';
 import { buildMenuBar } from './menubar.js';
 import { loadSettings, getSetting, updateSettings, onSettingsChange } from './settings.js';
+import { initRecentStore, snapshotRecentStore, dropConnection } from './recentStore.js';
 
 // ---------------- 工具栏（Navicat 风格大图标） ----------------
 function newQueryFromToolbar() {
@@ -915,7 +916,10 @@ async function boot() {
     ? [...new Set(savedWorkspace.context.openConnectionIds.filter((id) => typeof id === 'string' && knownIds.has(id)))]
     : [];
   for (const id of restoreIds) pendingRestoreConnectionIds.add(id);
+  // 收藏 / 最近跟着工作区一起存：它们是会增长的条目列表，不适合放白名单式的设置中心
+  initRecentStore(savedWorkspace.context && savedWorkspace.context.shortcuts, touchWorkspacePersistence);
   setWorkspaceContextProvider(() => ({
+    shortcuts: snapshotRecentStore(),
     openConnectionIds: [...new Set([
       ...state.open.keys(),
       ...[...pendingRestoreConnectionIds].filter((id) => state.connections.some((c) => c.id === id)),
@@ -987,6 +991,8 @@ on('conn-opened', async ({ connId } = {}) => {
 });
 on('conn-closed', (detail) => { updateToolbarContext(); touchWorkspacePersistence(detail); });
 on('connections-changed', () => updateToolbarContext());
+// 连接删掉后，它名下的收藏/最近一并清掉，免得点了打不开
+on('conn-removed', (detail) => { if (detail && detail.connId) dropConnection(detail.connId); });
 on('target-selected', (detail) => { updateToolbarContext(detail); touchWorkspacePersistence(detail); });
 boot().catch((e) => {
   $('#app').classList.remove('workspace-loading');

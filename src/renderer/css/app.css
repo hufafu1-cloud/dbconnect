@@ -243,8 +243,14 @@ body {
   font-size: 12px; outline: none; background: var(--panel-2); color: var(--text);
 }
 #sidebar-head input:focus { border-color: var(--accent); background: var(--panel); }
-#tree { flex: 1; overflow: auto; padding: 4px 0; }
+/* 滚轮滚动时鼠标不动而行在动，Chromium 每帧重算 :hover 并重绘刚离开的那一行，
+   偶尔会漏掉失效区，在树上留下一条 1px 横线残影（拖滚动条不经过任何行，就没有）。
+   把滚动容器提升为独立合成层，滚动与 hover 重绘都发生在这一层内部，
+   不再出现漏刷。比"滚动期间不画 hover 底色"好：那样高亮会先消失再跳回来。 */
+#tree { flex: 1; overflow: auto; padding: 4px 0; will-change: transform; }
 #tree:focus { outline: none; }
+/* 行的重绘限制在自己的盒子里，避免相邻行边界互相污染 */
+.tree-row { contain: paint; }
 #splitter-v { width: 4px; cursor: col-resize; background: transparent; flex: 0 0 auto; }
 #splitter-v:hover { background: var(--accent-light); }
 #content {
@@ -261,10 +267,6 @@ body {
   cursor: default; white-space: nowrap; overflow: hidden;
 }
 .tree-row:hover { background: var(--hover); }
-/* 滚轮滚动期间不画 hover 底色：光标不动而行在动，每帧重算 :hover 会让
-   Chromium 偶尔漏掉旧行的失效区，在树上留下一道 1px 横线残影。
-   选中行的底色保留，滚动停止 120ms 后 hover 底色自动恢复。见 tree.js 的说明。 */
-#tree.scrolling .tree-row:hover:not(.selected) { background: transparent; }
 .tree-row.selected { background: var(--selected); }
 .tree-row.conn-colored { box-shadow: inset 3px 0 0 var(--conn-color); }
 .tree-twisty {
@@ -416,6 +418,15 @@ body {
 .grid-wrap { flex: 1; min-height: 0; overflow: auto; position: relative; background: var(--panel); }
 .grid-wrap:focus { outline: none; }
 .grid td.cell-focus { box-shadow: inset 0 0 0 2px var(--accent); }
+/* 单元格区域选择（Shift+单击 / Shift+方向键） */
+.grid td.cell-range { background: var(--selected); }
+.grid tbody tr:hover td.cell-range { background: var(--selected-strong); }
+.grid-stats {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 0 8px; font-size: 11.5px; color: var(--accent-dark);
+  font-family: var(--mono); white-space: nowrap;
+}
+.grid-stats b { font-weight: 600; color: var(--text); }
 .grid { border-collapse: separate; border-spacing: 0; font-size: 12.5px; table-layout: fixed; }
 .grid th, .grid td {
   border-right: 1px solid var(--border-light);
@@ -432,6 +443,37 @@ body {
 }
 .grid thead th .th-inner { display: flex; align-items: center; gap: 4px; }
 .grid thead th .sort-mark { color: var(--accent); font-size: 10px; }
+/* 多列排序时标出优先级，否则看不出先按哪一列排 */
+.grid thead th .sort-order {
+  margin-left: 1px; padding: 0 3px; border-radius: 6px;
+  background: var(--accent); color: #fff; font-size: 9px; font-weight: 700;
+}
+/* 列头内联筛选行：放在 thead 里，跟着粘性表头一起固定 */
+.grid thead tr.grid-filter-row th {
+  top: 26px; z-index: 3; padding: 2px 3px; background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.grid thead tr.grid-filter-row th.rownum { z-index: 5; }
+.grid thead tr.grid-filter-row th.col-frozen { z-index: 5; }
+.grid-filter-input {
+  width: 100%; box-sizing: border-box; height: 20px;
+  padding: 0 5px; border: 1px solid var(--border); border-radius: 3px;
+  font-size: 11.5px; outline: none; background: var(--panel); color: var(--text);
+}
+.grid-filter-input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-light); }
+
+/* 冻结列：沿用行号列的 sticky 方案，left 由 JS 按累计列宽算出 */
+.grid th.col-frozen, .grid td.col-frozen {
+  position: sticky; z-index: 2; background: var(--panel);
+}
+.grid thead th.col-frozen { z-index: 4; background: var(--th-bg); }
+.grid tbody tr:hover td.col-frozen { background: var(--hover-row); }
+.grid tbody tr.selected td.col-frozen { background: var(--selected); }
+.grid th.col-frozen-last, .grid td.col-frozen-last { border-right: 1px solid var(--border); }
+/* 列拖拽调序的插入位置提示 */
+.grid thead th.col-dragging { opacity: 0.5; }
+.grid thead th.col-drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+.grid thead th.col-drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 .grid thead th .col-type { color: var(--text-muted); font-weight: 400; font-size: 11px; }
 .grid th.rownum, .grid td.rownum {
   position: sticky; left: 0; z-index: 2;
@@ -1034,6 +1076,19 @@ li.CodeMirror-hint-active { background: var(--accent); color: #fff; }
   margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-light);
   font-size: 12px; color: var(--text-muted); line-height: 1.7;
 }
+
+/* 结果集图表（手写 SVG，不引图表库） */
+.chart-body { display: flex; flex-direction: column; gap: 10px; }
+.chart-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chart-controls label { font-size: 12.5px; color: var(--text-muted); }
+.chart-controls .settings-select { max-width: 160px; }
+.chart-controls .spring { flex: 1; }
+.chart-canvas {
+  border: 1px solid var(--border-light); border-radius: 6px;
+  background: var(--panel); padding: 6px; min-height: 320px;
+}
+.chart-svg { display: block; }
+.chart-svg text { font-family: inherit; }
 
 /* 命令面板（Ctrl+P 跳表 / Ctrl+Shift+P 跑命令） */
 .palette-overlay {

@@ -1,12 +1,15 @@
 // 左侧连接树
 import { $, el, iconEl } from './util.js';
-import { state, emit, on, objectsCacheKey, setActiveTarget } from './state.js';
+import { state, emit, on, objectsCacheKey, setActiveTarget, connLabel } from './state.js';
 import { toast, promptDialog, confirmDialog, passwordDialog } from './toast.js';
 import { showMenu } from './contextmenu.js';
 import * as actions from './actions.js';
 import { openConnDialog } from './connDialog.js';
 import { statusbar } from './statusbar.js';
 import { authorizeOperation } from './danger.js';
+import {
+  favoriteItems, recentItems, isFavorite, toggleFavorite, clearRecent, onRecentChange,
+} from './recentStore.js';
 
 let treeRoot = null;
 const connNodes = new Map(); // connId -> node element记录
@@ -923,6 +926,11 @@ function leafMenu(e, target, isView) {
   showMenu(x, y, [
     { label: isView ? '打开视图' : '打开表', icon: 'table', onClick: () => actions.openTable(target) },
     { label: isView ? '查看定义' : '设计表', icon: 'struct', onClick: () => actions.designTable(target, isView) },
+    {
+      label: isFavorite({ ...target, kind: isView ? 'view' : 'table' }) ? '取消收藏' : '收藏',
+      icon: 'check',
+      onClick: () => toggleFavorite({ ...target, kind: isView ? 'view' : 'table' }),
+    },
     { label: '新建查询', icon: 'query', onClick: () => actions.newQuery(target, `SELECT * FROM ${target.table};`) },
     { label: '生成 SQL', icon: 'query', submenu: actions.generatedSqlSubmenu(target, isView) },
     { sep: true },
@@ -941,6 +949,47 @@ function leafMenu(e, target, isView) {
     !isView && { label: '清空表', icon: 'cross', danger: true, onClick: () => actions.truncateTable(target) },
     { label: isView ? '删除视图' : '删除表', icon: 'trash', danger: true, onClick: () => actions.dropTable(target, isView) },
   ].filter(Boolean));
+}
+
+/**
+ * 「收藏」「最近打开」虚拟节点。
+ *
+ * 条目指向的连接可能已经被删掉，这里按当前连接列表过滤——
+ * 点开一个打不开的表比没有这个入口更糟。列表为空就整个不显示，不占地方。
+ */
+function renderShortcutNode(title, icon, items, kind) {
+  const known = new Set(state.connections.map((c) => c.id));
+  const usable = items.filter((item) => known.has(item.connId));
+  if (!usable.length) return null;
+  const container = el('div', { class: 'tree-node' });
+  const children = makeBranch();
+  const { row, tw } = nodeRow({
+    depth: 0,
+    icon,
+    label: title,
+    meta: String(usable.length),
+    twisty: true,
+    onToggle: () => setOpen(tw, children, !children.classList.contains('open')),
+    onDblClick: () => setOpen(tw, children, !children.classList.contains('open')),
+    onMenu: (e) => showMenu(e.clientX, e.clientY, kind === 'recent'
+      ? [{ label: '清空最近打开', icon: 'trash', onClick: () => clearRecent() }]
+      : [{ label: `共 ${usable.length} 项`, disabled: true }]),
+  });
+  for (const item of usable) {
+    const target = { connId: item.connId, db: item.db, schema: item.schema, table: item.table };
+    const leaf = nodeRow({
+      depth: 1,
+      icon: item.kind === 'view' ? 'view' : 'table',
+      label: item.table,
+      meta: `${connLabel(item.connId)}${item.db ? ` / ${item.db}` : ''}`,
+      onSelect: () => setActiveTarget(target, 'tree-shortcut'),
+      onDblClick: () => actions.openTable(target),
+      onMenu: (e) => leafMenu(e, target, item.kind === 'view'),
+    });
+    children.append(leaf.row);
+  }
+  container.append(row, children);
+  return container;
 }
 
 // ---------------- 分组节点 ----------------
@@ -1021,35 +1070,13 @@ function renderOnboarding() {
       el('b', {}, 'Ctrl+Q'), ' 新建查询'));
 }
 
-/**
- * 滚轮滚动时抑制行的 hover 底色。
- *
- * 滚轮滚动的特点是「鼠标不动、内容在动」：每滚一格光标下面就换一行，
- * Chromium 每帧都要重算 :hover 并重绘刚离开的那一行，偶尔会漏掉一条 1px
- * 的失效区，在树上留下一道横线。拖动滚动条时光标在滚动条上、不经过任何行，
- * 所以不会出现——这正好说明触发条件是滚动中的 hover 重算。
- *
- * 这里只在滚动期间去掉 hover 的**底色**，不动 pointer-events：
- * 命中测试照常进行，滚动一停底色立刻回来，不需要用户再晃一下鼠标。
- */
-function setupScrollHoverGuard(root) {
-  let timer = null;
-  root.addEventListener('scroll', () => {
-    root.classList.add('scrolling');
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      root.classList.remove('scrolling');
-      timer = null;
-    }, 120);
-  }, { passive: true });
-}
-
 export function renderTree() {
   treeRoot = $('#tree');
   if (!treeRoot.hasAttribute('tabindex')) {
     treeRoot.setAttribute('tabindex', '0');
     treeRoot.addEventListener('keydown', treeKeyDown);
-    setupScrollHoverGuard(treeRoot);
+    // 收藏/最近变动后重绘树，虚拟节点才会跟着更新
+    onRecentChange(() => renderTree());
   }
   treeRoot.innerHTML = '';
   connNodes.clear();
@@ -1069,6 +1096,11 @@ export function renderTree() {
       ungrouped.push(conn);
     }
   }
+  // 收藏 / 最近放在最上面：连接一多，每次展开找表很费事
+  const favoritesNode = renderShortcutNode('收藏', 'check', favoriteItems(), 'favorites');
+  if (favoritesNode) treeRoot.append(favoritesNode);
+  const recentNode = renderShortcutNode('最近打开', 'history', recentItems(), 'recent');
+  if (recentNode) treeRoot.append(recentNode);
   for (const [gname, conns] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     treeRoot.append(renderGroupNode(gname, conns));
   }

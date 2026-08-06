@@ -309,6 +309,30 @@ function createPanel() {
   }
 
   // ---- 快捷动作 ----
+  /**
+   * 用执行计划让 AI 给索引建议。
+   *
+   * 和普通的「优化 SQL」不同：这里带上真实的执行计划，AI 才能看出瓶颈在哪，
+   * 而不是凭 SQL 文本猜。明确要求输出可直接执行的 CREATE INDEX，
+   * 并要求它说明代价——加索引不是免费的。
+   */
+  function askIndexAdvice({ sql, plan }) {
+    const planText = typeof plan === 'string' ? plan : JSON.stringify(plan, null, 2);
+    const content = [
+      `下面是一条 ${dialect()} SQL 及其真实执行计划。请结合当前数据库的表结构与索引情况分析：`,
+      '',
+      '1. 这条语句的性能瓶颈在哪一步（引用执行计划里的具体节点）；',
+      '2. 建议新增哪些索引，给出可直接执行的 CREATE INDEX 语句；',
+      '3. 每条建议索引的代价（写入放大、占用空间）与适用前提；',
+      '4. 如果现有索引已经够用，或问题不在索引上，请直接说明，不要硬凑建议。',
+      '',
+      '```sql', sql, '```',
+      '',
+      '执行计划：', '```', planText.slice(0, 6000), '```',
+    ].join('\n');
+    send(content, `🚀 索引建议：\n\`\`\`sql\n${sql}\n\`\`\``);
+  }
+
   async function runAction(action) {
     const text = input.value.trim();
     if (action === 'generate') {
@@ -363,6 +387,7 @@ function createPanel() {
     setInsertTarget(fn) { insertTarget = fn; },
     setInput(t) { input.value = t; },
     runAction,
+    askIndexAdvice,
     focusInput: () => input.focus(),
     _send: send,
   };

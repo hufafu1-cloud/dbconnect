@@ -7,6 +7,7 @@ import { toast, confirmDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { authorizeOperation } from './danger.js';
 import { getSetting, updateSettings } from './settings.js';
+import { noteOpened } from './recentStore.js';
 
 const PAGE_SIZES = [100, 500, 1000];
 
@@ -18,6 +19,7 @@ function defaultPageSize() {
 
 export function openTableTab(target, openOpts) {
   setActiveTarget(target, 'table-tab');
+  noteOpened({ ...target, kind: 'table' });
   const restored = openOpts && openOpts.restoreState;
   const tabId = (openOpts && openOpts.restoreId) || `table:${target.connId}|${target.db}|${target.schema || ''}|${target.table}`;
   const tab = addTab({ id: tabId, title: target.table, icon: 'table', color: connColor(target.connId), target: { ...target }, tooltip: `${connLabel(target.connId)} / ${target.db || ''} / ${target.table}` });
@@ -31,8 +33,17 @@ export function openTableTab(target, openOpts) {
   let pageSize = restored && PAGE_SIZES.includes(Number(restored.pageSize)) ? Number(restored.pageSize) : defaultPageSize();
   let total = null;
   let where = (openOpts && openOpts.initialWhere) || (restored && typeof restored.where === 'string' ? restored.where : '');
-  let orderBy = restored && typeof restored.orderBy === 'string' ? restored.orderBy : null;
-  let orderDir = restored && ['asc', 'desc'].includes(restored.orderDir) ? restored.orderDir : null;
+  // 多列排序：[{col, dir}]，按优先级排列。旧草稿里是单列的 orderBy/orderDir，兼容读入。
+  let sortList = Array.isArray(restored && restored.sortList)
+    ? restored.sortList.filter((item) => item && typeof item.col === 'string')
+      .map((item) => ({ col: item.col, dir: item.dir === 'desc' ? 'desc' : 'asc' }))
+    : (restored && typeof restored.orderBy === 'string' && restored.orderBy
+      ? [{ col: restored.orderBy, dir: restored.orderDir === 'desc' ? 'desc' : 'asc' }]
+      : []);
+  let colLayout = (restored && restored.colLayout) || null;
+  // 列头筛选行的原文（列名 -> 用户输入），拼成 SQL 由下面的 filterWhere() 负责
+  let colFilters = (restored && restored.colFilters && typeof restored.colFilters === 'object')
+    ? { ...restored.colFilters } : {};
   let readonly = true;
   let loading = false;
   let viewMode = restored && restored.viewMode === 'form' ? 'form' : 'grid'; // grid | form
@@ -42,6 +53,26 @@ export function openTableTab(target, openOpts) {
   const whereInput = el('input', { type: 'text', value: where, placeholder: 'WHERE 条件，如: id > 100 AND name LIKE \'%张%\'', style: { width: '300px', fontFamily: 'var(--mono)' } });
   const roBadge = el('span', { class: 'readonly-badge', style: { display: 'none' } }, '只读（无主键）');
   const infoEl = el('span', {}, '');
+  const statsEl = el('span', { class: 'grid-stats' });
+
+  /**
+   * 选区统计。数值列才给求和/平均/最值——把文本当 0 参与求和是错的，
+   * 所以选区里没有数值时只显示单元格数，不显示一个误导性的 0。
+   */
+  function renderStats(host, stats) {
+    host.replaceChildren();
+    if (!stats || stats.cells <= 1) return;
+    const num = (v) => (Number.isInteger(v) ? String(v) : Number(v).toFixed(2));
+    const item = (label, value) => el('span', {}, `${label} `, el('b', {}, value));
+    host.append(item('计数', String(stats.cells)));
+    if (stats.nonNull !== stats.cells) host.append(item('非空', String(stats.nonNull)));
+    if (stats.numeric) {
+      host.append(item('求和', num(stats.sum)));
+      host.append(item('平均', num(stats.avg)));
+      host.append(item('最小', num(stats.min)));
+      host.append(item('最大', num(stats.max)));
+    }
+  }
 
   const blobCtxFor = (rowIdx, colName) => {
     const pk = grid._pkOf(rowIdx, false);
@@ -51,7 +82,10 @@ export function openTableTab(target, openOpts) {
 
   const grid = new DataGrid(el('div'), {
     editable: true,
-    onSort: (col, dir) => { orderBy = col; orderDir = dir; load(); },
+    onSort: (list) => { sortList = list; page = 1; load(); },
+    onLayoutChange: (layout) => { colLayout = layout; tab.touchRecovery(); },
+    onFilter: (filters) => { colFilters = filters; page = 1; load(); },
+    onSelectionStats: (stats) => renderStats(statsEl, stats),
     onChange: () => { updateDirty(); if (viewMode === 'form') { /* 网格已更新模型，表单下次渲染读取最新值 */ } },
     copyContext: {
       table: target.table,
@@ -74,6 +108,12 @@ export function openTableTab(target, openOpts) {
   const btnAdd = mkBtn('plus', '添加行', () => { if (canEdit()) grid.addNewRow(); });
   const btnDel = mkBtn('minus', '删除行', () => { if (canEdit()) { grid.deleteSelected(); updateDirty(); } });
   const btnView = mkBtn('objects', '表单视图', () => toggleView());
+  // 列头筛选行：条件会下推成 SQL WHERE，不是只过滤当前页
+  const btnFilterRow = mkBtn('filter', '筛选行', () => {
+    const on = grid.toggleFilterRow();
+    btnFilterRow.classList.toggle('active', on);
+  });
+  btnFilterRow.title = '在列头下方显示筛选框，条件会下推到 SQL（不只过滤当前页）';
 
   function canEdit() {
     if (readonly) { toast.info(roBadge.textContent || '该表没有主键，数据为只读'); return false; }
@@ -82,6 +122,7 @@ export function openTableTab(target, openOpts) {
 
   const toolbar = el('div', { class: 'pane-toolbar' },
     mkBtn('filter', '条件', () => toggleBuilder()),
+    btnFilterRow,
     whereInput,
     mkBtn('run', '应用筛选', () => { where = whereInput.value.trim(); page = 1; load(); }),
     el('span', { class: 'sep' }),
@@ -94,7 +135,8 @@ export function openTableTab(target, openOpts) {
     }),
     mkBtn('exportIcon', '导出', async (e) => {
       const { showTableExportMenu } = await import('./exportMenu.js');
-      showTableExportMenu(e.clientX, e.clientY, target, where);
+      // 导出要带上列头筛选，否则导出的内容和屏幕上看到的不一致
+      showTableExportMenu(e.clientX, e.clientY, target, effectiveWhere());
     }),
     el('span', { class: 'spring' }),
     roBadge,
@@ -112,6 +154,44 @@ export function openTableTab(target, openOpts) {
     return "'" + s + "'";
   };
   const numOrLit = (v) => (/^-?\d+(\.\d+)?$/.test(String(v).trim()) ? String(v).trim() : lit(v));
+
+  /**
+   * 把列头筛选行的原文拼成 WHERE 片段。
+   *
+   * 条件是**下推到 SQL** 的，不是只过滤当前页——表是分页的，
+   * 只筛当前页会让用户以为「北京只有这几条」，那是错的。
+   *
+   * 输入语法（对着输入框的 title 提示）：
+   *   abc      → LIKE '%abc%'
+   *   >100     → > 100      （>= <= <> != > < = 都支持）
+   *   null     → IS NULL
+   *   !null    → IS NOT NULL
+   * 值一律走 lit()/numOrLit() 转义，不直接拼用户原文。
+   */
+  function filterWhere() {
+    const parts = [];
+    for (const [col, raw] of Object.entries(colFilters || {})) {
+      const text = String(raw == null ? '' : raw).trim();
+      if (!text) continue;
+      if (/^null$/i.test(text)) { parts.push(`${qi(col)} IS NULL`); continue; }
+      if (/^!\s*null$/i.test(text)) { parts.push(`${qi(col)} IS NOT NULL`); continue; }
+      const m = /^(>=|<=|<>|!=|>|<|=)\s*(.+)$/.exec(text);
+      if (m) {
+        parts.push(`${qi(col)} ${m[1] === '!=' ? '<>' : m[1]} ${numOrLit(m[2])}`);
+        continue;
+      }
+      parts.push(`${qi(col)} LIKE ${lit(`%${text}%`)}`);
+    }
+    return parts.join(' AND ');
+  }
+
+  /** 手写 WHERE 与列头筛选的合集；两边都有时各自加括号再 AND */
+  function effectiveWhere() {
+    const manual = (where || '').trim();
+    const filtered = filterWhere();
+    if (manual && filtered) return `(${manual}) AND (${filtered})`;
+    return manual || filtered;
+  }
   const OPS = [
     ['=', '='], ['<>', '<>'], ['>', '>'], ['>=', '>='], ['<', '<'], ['<=', '<='],
     ['contains', '包含'], ['starts', '开头是'], ['in', 'IN 列表'], ['null', '为空'], ['notnull', '不为空'],
@@ -285,6 +365,7 @@ export function openTableTab(target, openOpts) {
         return sel;
       })(), '行'),
     recEl,
+    statsEl,
     infoEl,
   );
 
@@ -302,8 +383,9 @@ export function openTableTab(target, openOpts) {
   tab.setRecovery('table', () => (grid.isDirty() ? null : {
     target: { ...target },
     where,
-    orderBy,
-    orderDir,
+    sortList,
+    colLayout,
+    colFilters,
     page,
     pageSize,
     viewMode,
@@ -335,7 +417,7 @@ export function openTableTab(target, openOpts) {
     try {
       const r = await window.api.db.tableData(target.connId, {
         db: target.db, schema: target.schema, table: target.table,
-        page, pageSize, where, orderBy: orderBy || '', orderDir: orderDir || 'asc',
+        page, pageSize, where: effectiveWhere(), orderBy: sortList,
       });
       total = r.total;
       readonly = !r.pk || !r.pk.length;
@@ -343,8 +425,16 @@ export function openTableTab(target, openOpts) {
       roBadge.title = roBadge.textContent;
       roBadge.style.display = readonly ? '' : 'none';
       grid.opts.editable = !readonly;
-      grid.setSort(orderBy, orderDir);
+      grid.setSortList(sortList);
       grid.setData({ columns: r.columns, rows: r.rows, pk: r.pk, rowIds: r.rowIds, rowIdColumn: r.rowIdColumn });
+      // 列布局与筛选行要在 setData 之后恢复：setData 检测到列集合变化会先清掉它们
+      const hasFilters = Object.keys(colFilters).length > 0;
+      if (colLayout || hasFilters) {
+        if (colLayout) grid.setLayout(colLayout);
+        if (hasFilters) { grid.filters = { ...colFilters }; grid.showFilterRow = true; }
+        grid.render();
+      }
+      btnFilterRow.classList.toggle('active', grid.showFilterRow);
       pageInput.value = String(page);
       pageLabel.textContent = `/ ${pageCount()} 页`;
       infoEl.textContent = `共 ${fmtCount(total)} 行 · 本页 ${r.rows.length} 行 · 查询耗时 ${r.ms} ms`;

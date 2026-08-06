@@ -73,9 +73,22 @@ export function openExplainTab(target, sql) {
 
   const sqlBox = el('div', { class: 'ddl-box', style: { margin: '8px 10px', maxHeight: '90px', overflow: 'auto', flex: '0 0 auto' } }, sql);
   const body = el('div', { class: 'plan-body', style: { flex: '1', minHeight: '0', overflow: 'auto' } }, '解析中…');
+  let lastPlan = null;
+  const btnAdvice = el('button', {
+    class: 'pbtn',
+    title: '把执行计划连同表结构交给 AI，给出瓶颈分析和具体的 CREATE INDEX 建议',
+    onClick: async () => {
+      if (!lastPlan) { toast.info('请先等执行计划加载完成'); return; }
+      const { openAiPanel } = await import('./aiPanel.js');
+      // 带上库上下文，AI 才能看到真实的表结构与现有索引
+      const panel = openAiPanel({ connId: target.connId, db: target.db, schema: target.schema });
+      panel.askIndexAdvice({ sql, plan: lastPlan });
+    },
+  }, iconEl('ai'), '索引建议');
   pane.append(
     el('div', { class: 'pane-toolbar' },
       el('button', { class: 'pbtn', onClick: load }, iconEl('refresh'), '重新解释'),
+      btnAdvice,
       el('span', { class: 'spring' }),
       el('span', { class: 'obj-path' }, `${connLabel(target.connId)} › ${target.db || ''}`)),
     sqlBox, body);
@@ -85,11 +98,17 @@ export function openExplainTab(target, sql) {
     body.append(el('div', { style: { padding: '12px', color: 'var(--text-muted)' } }, '解析中…'));
     try {
       const plan = await window.api.db.explain(target.connId, target.db, sql, target.schema);
+      // 原始计划留一份给「索引建议」——AI 要看真实执行计划，不能只凭 SQL 文本猜
+      lastPlan = plan.format === 'tree' ? plan.root
+        : (plan.format === 'table' ? { columns: plan.columns, rows: plan.rows } : (plan.text || ''));
+      btnAdvice.disabled = false;
       body.innerHTML = '';
       if (plan.format === 'tree') body.append(renderTree(plan.root));
       else if (plan.format === 'table') body.append(renderTable(plan));
       else body.append(el('pre', { class: 'plan-text' }, plan.text || '(空)'));
     } catch (e) {
+      lastPlan = null;
+      btnAdvice.disabled = true;
       body.innerHTML = '';
       body.append(el('div', { style: { padding: '14px', color: 'var(--danger)', whiteSpace: 'pre-wrap' } }, '无法获取执行计划:\n' + e.message));
     }

@@ -171,6 +171,41 @@ async function runDemo(createWindow) {
       && pageSizePersist.restored === 500 ? 'PASS' : 'FAIL');
   await wait(500);
 
+  // 列头筛选行：条件必须真的下推到 SQL，而不是只过滤当前页
+  const filterPush = await ej(`(async () => {
+    const pane = document.querySelector('.tabpane.active');
+    const btn = [...pane.querySelectorAll('.pbtn')].find((b) => b.textContent.includes('筛选行'));
+    if (!btn) return { found: false };
+    const before = pane.querySelector('.pane-toolbar ~ * , .tabpane.active').textContent;
+    const totalBefore = /共 (\\d+) 条记录/.exec(pane.textContent);
+    btn.click();
+    await new Promise((r) => setTimeout(r, 200));
+    const inputs = [...pane.querySelectorAll('.grid-filter-input')];
+    const statusInput = inputs.find((i) => {
+      const th = pane.querySelectorAll('thead tr:first-child th[data-c]')[inputs.indexOf(i)];
+      return th && th.textContent.includes('status');
+    }) || inputs[3];
+    statusInput.value = '已完成';
+    statusInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 1200));
+    const totalAfter = /共 (\\d+) 条记录/.exec(pane.textContent);
+    const out = {
+      found: true,
+      totalBefore: totalBefore ? Number(totalBefore[1]) : null,
+      totalAfter: totalAfter ? Number(totalAfter[1]) : null,
+    };
+    statusInput.value = '';
+    statusInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 800));
+    btn.click();
+    return out;
+  })()`);
+  console.log('[DEMO] 筛选行下推 SQL:', JSON.stringify(filterPush));
+  console.log('[DEMO] 筛选行下推 SQL:',
+    filterPush.found && filterPush.totalBefore === 120
+      && filterPush.totalAfter > 0 && filterPush.totalAfter < 120 ? 'PASS' : 'FAIL');
+  await wait(500);
+
   // 表单视图：点击表单视图按钮
   await ej(`(() => {
     const b = [...document.querySelectorAll('.tabpane.active .pbtn')].find((x) => x.textContent.includes('表单视图'));

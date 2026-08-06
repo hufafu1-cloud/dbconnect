@@ -333,6 +333,135 @@ app.whenReady().then(async () => {
             g._editor.ta.value = '滚走后提交';
             g._removeEditor(true);
             out.editAfterScroll = g._currentVal(editDr, 1, false);
+            // ---- 列操作：冻结 / 隐藏 / 调序 / 多列排序 ----
+            // 关键约束：隐藏或调序后，按列取单元格必须仍然按模型下标 data-c 定位
+            const colHost = mkHost();
+            const sorted = [];
+            const g2 = new DataGrid(colHost, { onSort: (list) => sorted.push(list) });
+            g2.setData({
+              columns: [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'd' }],
+              rows: Array.from({ length: 300 }, (_, i) => [i, 'b' + i, 'c' + i, 'd' + i]),
+              pk: [],
+            });
+            const headers = () => [...colHost.querySelectorAll('thead th[data-c]')]
+              .map((th) => th.querySelector('.th-inner span').textContent);
+            out.colsInitial = headers().join('');
+
+            g2.setColumnHidden(1, true);
+            out.colsAfterHide = headers().join('');
+            // 隐藏第 2 列后，第 3 列(c)的单元格仍要能按模型下标取到
+            out.hiddenCellGone = g2._tdAt(0, 1) === null;
+            out.laterCellStillFound = !!g2._tdAt(0, 2);
+            out.cellValueByModelIndex = g2._tdAt(0, 2).textContent;
+
+            g2.moveColumn(3, 0);   // 把 d 移到最前
+            out.colsAfterMove = headers().join('');
+            out.movedCellFound = !!g2._tdAt(0, 3);
+
+            g2.freezeUpTo(0);      // 冻结第一列（此时是 d）
+            const frozenTh = colHost.querySelector('thead th.col-frozen');
+            const frozenTd = colHost.querySelector('tbody td.col-frozen');
+            out.frozenHeader = frozenTh ? frozenTh.getAttribute('data-c') : null;
+            out.frozenLeft = frozenTd ? frozenTd.style.left : null;
+
+            g2.showAllColumns();
+            out.colsAfterShowAll = headers().join('');
+
+            // 隐藏列必须被键盘导航跳过
+            g2.setColumnHidden(1, true);
+            out.skipHidden = g2._colByOffset(0, 1);
+            g2.showAllColumns();
+
+            // 多列排序：Shift 追加，序号标出优先级
+            g2._toggleSort('a', false);
+            g2._toggleSort('b', true);
+            out.sortList = g2.sortList.map((s) => s.col + ':' + s.dir).join(',');
+            out.sortEmitted = sorted.length;
+            // 真实流程里 onSort 会触发重新查询再渲染；这里手动渲染一次再看标记
+            g2.render();
+            out.sortBadges = colHost.querySelectorAll('thead .sort-order').length;
+            g2._toggleSort('a', true);   // asc -> desc
+            g2._toggleSort('a', true);   // desc -> 移除
+            out.sortAfterCycle = g2.sortList.map((s) => s.col).join(',');
+            // 右键菜单里的显式入口：多列排序不能只有 Shift+单击这一个没有提示的手势
+            g2._appendSort('c', 'desc');
+            out.afterAppend = g2.sortList.map((s) => s.col + ':' + s.dir).join(',');
+            g2._removeSort('b');
+            out.afterRemove = g2.sortList.map((s) => s.col).join(',');
+            g2.render();
+            out.sortTitle = colHost.querySelector('thead .sort-mark').title;
+
+            // 布局往返：导出再导入必须一致
+            g2.setColumnHidden(2, true);
+            g2.freezeUpTo(0);
+            const layout = g2.getLayout();
+            const g3 = new DataGrid(mkHost(), {});
+            g3.setData({ columns: g2.columns, rows: [[1, 2, 3, 4]], pk: [] });
+            g3.setLayout(layout);
+            out.layoutRoundTrip = JSON.stringify(g3.getLayout()) === JSON.stringify(layout);
+            // 列数对不上的布局要被整体忽略，不能套到别的表上
+            const g4 = new DataGrid(mkHost(), {});
+            g4.setData({ columns: [{ name: 'x' }, { name: 'y' }], rows: [[1, 2]], pk: [] });
+            g4.setLayout({ order: [3, 2, 1, 0], hidden: [0, 1], frozen: 3 });
+            out.mismatchIgnored = g4.colOrder === null && g4._visibleCols().length === 2;
+
+            // ---- 列头筛选行 ----
+            const filterHost = mkHost();
+            const emitted = [];
+            const g5 = new DataGrid(filterHost, { onFilter: (f) => emitted.push(f) });
+            g5.setData({
+              columns: [{ name: 'a' }, { name: 'b' }, { name: 'c' }],
+              rows: [[1, 2, 3]], pk: [],
+            });
+            out.filterRowHiddenByDefault = filterHost.querySelectorAll('.grid-filter-input').length === 0;
+            g5.toggleFilterRow(true);
+            out.filterInputs = filterHost.querySelectorAll('.grid-filter-input').length;
+            // 隐藏的列不应该还有筛选框
+            g5.setColumnHidden(1, true);
+            out.filterInputsAfterHide = filterHost.querySelectorAll('.grid-filter-input').length;
+            g5.showAllColumns();
+            // 输入并回车：应当把原文交给标签页（网格自己不拼 SQL）
+            const firstInput = filterHost.querySelector('.grid-filter-input');
+            firstInput.value = '北京';
+            firstInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            out.filterEmitted = JSON.stringify(emitted[emitted.length - 1] || {});
+            // 关掉筛选行必须连带清空条件，否则数据被筛着但界面看不出为什么
+            g5.toggleFilterRow(false);
+            out.filterClearedOnHide = JSON.stringify(emitted[emitted.length - 1] || {}) === '{}'
+              && Object.keys(g5.filters).length === 0;
+
+            // ---- 单元格区域选择 + 选区统计 ----
+            // 关键：选区可以跨越大量未渲染的行，统计必须基于模型而不是屏幕上的 DOM
+            const statsSeen = [];
+            const rangeHost = mkHost();
+            const g6 = new DataGrid(rangeHost, { onSelectionStats: (s) => statsSeen.push(s) });
+            g6.setData({
+              columns: [{ name: 'n' }, { name: 'txt' }],
+              rows: Array.from({ length: 2000 }, (_, i) => [i + 1, 't' + i]),
+              pk: [],
+            });
+            // 选中第 1..1000 行的数值列——远超渲染窗口
+            g6._setRange({ dr: 0, vi: 0 }, { dr: 999, vi: 0 });
+            const st = g6.getSelectionStats();
+            out.rangeCells = st.cells;
+            out.rangeSum = st.sum;          // 1..1000 求和 = 500500
+            out.rangeAvg = st.avg;
+            out.rangeMin = st.min;
+            out.rangeMax = st.max;
+            out.rangeRenderedRows = g6.tbody.querySelectorAll('tr[data-dr]').length;
+            out.statsEmitted = statsSeen.length;
+            // 文本列不能被当成 0 参与求和
+            g6._setRange({ dr: 0, vi: 1 }, { dr: 9, vi: 1 });
+            const textStats = g6.getSelectionStats();
+            out.textNumeric = textStats.numeric;
+            out.textCells = textStats.cells;
+            // 选区内容用于复制：按显示顺序取列
+            g6._setRange({ dr: 0, vi: 0 }, { dr: 1, vi: 1 });
+            const rangeRows = g6._rangeRows();
+            out.rangeCopy = JSON.stringify(rangeRows.names) + JSON.stringify(rangeRows.rows);
+            g6.clearRange();
+            out.rangeCleared = g6.getSelectionStats() === null;
+
             // 小表保持整表渲染，行为与改造前完全一致
             const small = new DataGrid(smallHost, {});
             small.setData({ columns, rows: rows.slice(0, 100), pk: ['id'] });
@@ -353,6 +482,27 @@ app.whenReady().then(async () => {
           && grid.offscreenEdit && grid.pendingOps === 1
           && grid.editorOpened && grid.inlineEditValue === '改过了' && grid.inlineEditMarked
           && grid.editorReanchored && grid.editAfterScroll === '滚走后提交'
+          && grid.colsInitial === 'abcd' && grid.colsAfterHide === 'acd'
+          && grid.hiddenCellGone && grid.laterCellStillFound && grid.cellValueByModelIndex === 'c0'
+          && grid.colsAfterMove === 'dac' && grid.movedCellFound
+          && grid.frozenHeader === '3' && grid.frozenLeft === '46px'
+          && grid.colsAfterShowAll === 'dabc'
+          && grid.skipHidden === 2
+          && grid.sortList === 'a:asc,b:asc' && grid.sortEmitted === 2 && grid.sortBadges === 2
+          && grid.sortAfterCycle === 'b'
+          && grid.afterAppend === 'b:asc,c:desc' && grid.afterRemove === 'c'
+          && /右键列头/.test(grid.sortTitle)
+          && grid.layoutRoundTrip && grid.mismatchIgnored
+          && grid.filterRowHiddenByDefault && grid.filterInputs === 3
+          && grid.filterInputsAfterHide === 2
+          && grid.filterEmitted === '{"a":"北京"}' && grid.filterClearedOnHide
+          && grid.rangeCells === 1000 && grid.rangeSum === 500500 && grid.rangeAvg === 500.5
+          && grid.rangeMin === 1 && grid.rangeMax === 1000
+          && grid.rangeRenderedRows < 120        // 统计覆盖 1000 行，但只渲染了几十行
+          && grid.statsEmitted === 1
+          && grid.textNumeric === 0 && grid.textCells === 10
+          && grid.rangeCopy === '["n","txt"][[1,"t0"],[2,"t1"]]'
+          && grid.rangeCleared
           && grid.renderedSmall === 100;
         console.log('[SMOKE][grid]', JSON.stringify(grid));
 
@@ -437,11 +587,31 @@ app.whenReady().then(async () => {
             g.render();
             const comfortable = g._rowHeight;
             root.removeAttribute('data-density');
+            // 树行加了 contain: paint（配合滚动容器提层修重绘残影），
+            // 必须确认行内的绝对定位标记没有被裁掉：生产库红条、连接状态灯
+            // 冒烟用的连接里没有生产库，临时给一行打上标记，直接验 CSS 规则本身
+            const anyRow = document.querySelector('.tree-node > .tree-row');
+            if (anyRow) anyRow.parentElement.classList.add('env-prod');
+            // getComputedStyle 返回的是实时对象，必须在标记还在时就取成字符串
+            const prodBar = anyRow ? getComputedStyle(anyRow, '::before') : null;
+            const prodBarWidth = prodBar ? prodBar.width : null;
+            const prodBarBg = prodBar ? prodBar.backgroundColor : '';
+            if (anyRow) anyRow.parentElement.classList.remove('env-prod');
+            const connIcon = document.querySelector('.tree-node[data-conn] > .tree-row .tree-icon');
+            const connDot = connIcon ? getComputedStyle(connIcon, '::after') : null;
+            const treeMarks = {
+              prodBarWidth,
+              prodBarVisible: prodBarBg !== '' && prodBarBg !== 'rgba(0, 0, 0, 0)',
+              dotWidth: connDot ? connDot.width : null,
+              dotVisible: !!connDot && connDot.content !== 'none',
+              treeComposited: getComputedStyle(document.querySelector('#tree')).willChange,
+            };
+
             state.connections = [];
             renderTree();
             const card = document.querySelector('.tree-onboarding');
             return {
-              standard, compact, comfortable,
+              standard, compact, comfortable, ...treeMarks,
               onboarding: !!card,
               onboardingActions: card ? card.querySelectorAll('.tree-onboarding-actions .btn').length : 0,
               importFirst: card
@@ -457,6 +627,9 @@ app.whenReady().then(async () => {
         })()`);
         const appearanceOk = appearance.compact < appearance.standard
           && appearance.comfortable > appearance.standard
+          && appearance.prodBarWidth === '3px' && appearance.prodBarVisible
+          && appearance.dotWidth === '6px' && appearance.dotVisible
+          && appearance.treeComposited === 'transform'
           && appearance.onboarding && appearance.onboardingActions === 2 && appearance.importFirst;
         // 操作审计：第一步埋的日志现在应当能读出来并渲染
         const audit = await win.webContents.executeJavaScript(`(async () => {
@@ -579,6 +752,50 @@ app.whenReady().then(async () => {
           && tabsProbe.splitClass && tabsProbe.activePane && tabsProbe.secondaryPane
           && tabsProbe.secondaryId === 'probe-b'
           && tabsProbe.clearedOnActivate && tabsProbe.clearedOnClose;
+        // 最近 / 收藏 + 图表：都是新增的独立模块，这里验核心不变量
+        const extras = await win.webContents.executeJavaScript(`(async () => {
+          const store = await import('./js/recentStore.js');
+          const { openChartDialog } = await import('./js/chartDialog.js');
+          const out = {};
+          let persisted = 0;
+          store.initRecentStore({}, () => { persisted++; });
+          const a = { connId: 'c1', db: 'd', schema: null, table: 't1', kind: 'table' };
+          store.noteOpened(a);
+          store.noteOpened({ connId: 'c1', db: 'd', schema: null, table: 't2', kind: 'table' });
+          store.noteOpened(a);   // 重复打开只应挪到最前，不堆重复项
+          out.recent = store.recentItems().map((x) => x.table).join(',');
+          out.persisted = persisted > 0;
+          out.favBefore = store.isFavorite(a);
+          store.toggleFavorite(a);
+          out.favAfter = store.isFavorite(a);
+          store.toggleFavorite(a);
+          out.favToggledOff = store.isFavorite(a);
+          store.toggleFavorite(a);
+          // 连接被删掉后，它名下的条目要一起清掉，免得点了打不开
+          store.dropConnection('c1');
+          out.afterDrop = store.recentItems().length + store.favoriteItems().length;
+          // 快照往返
+          store.initRecentStore({ recent: [a], favorites: [a] }, () => {});
+          out.snapshotRoundTrip = store.snapshotRecentStore().recent[0].table === 't1';
+
+          // 图表：数值列识别 + 无数值时不画
+          const m = openChartDialog({
+            columns: [{ name: 'city' }, { name: 'amount' }],
+            rows: [['北京', 120], ['上海', 80], ['广州', '45']],
+          });
+          out.chartOpened = !!document.querySelector('.chart-svg');
+          out.chartBars = document.querySelectorAll('.chart-svg rect').length;
+          if (m) m.close();
+          const none = openChartDialog({ columns: [{ name: 'a' }], rows: [['x'], ['y']] });
+          out.chartRejectsNonNumeric = none === null;
+          return out;
+        })()`);
+        const extrasOk = extras.recent === 't1,t2' && extras.persisted
+          && !extras.favBefore && extras.favAfter && !extras.favToggledOff
+          && extras.afterDrop === 0 && extras.snapshotRoundTrip
+          && extras.chartOpened && extras.chartBars === 3
+          && extras.chartRejectsNonNumeric;
+        console.log('[SMOKE][extras]', JSON.stringify(extras));
         console.log('[SMOKE][tabs]', JSON.stringify(tabsProbe));
         console.log('[SMOKE][tasks]', JSON.stringify(taskCenter));
         console.log('[SMOKE][security]', JSON.stringify(security));
@@ -603,7 +820,7 @@ app.whenReady().then(async () => {
         const failedSessionRetryPrompt = await win.webContents.executeJavaScript(
           `!!document.querySelector('.password-prompt') && document.querySelector('.modal-head').textContent.includes('Smoke failed session password')`);
         await win.webContents.executeJavaScript('window.__test.closeMenus()');
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} passwordOption=${menuLayout.passwordOptionOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} passwordOption=${menuLayout.passwordOptionOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk

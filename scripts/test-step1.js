@@ -500,9 +500,45 @@ async function testAuditLog(userDataDir) {
   });
 }
 
+/**
+ * 源码里不允许出现裸控制字符。
+ *
+ * 起因：正则的字符类里把 \x00-\x1f 写成了真正的控制字节，功能等价但源码里
+ * 完全看不见，而且 grep / ripgrep 会把整个文件当二进制跳过——查代码时直接
+ * 一无所获。转义写法（ ）效果一样且可读可搜。
+ */
+function testNoControlChars() {
+  console.log('\n[源码卫生]');
+  const root = path.join(__dirname, '..', 'src');
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(js|css|html)$/.test(entry.name)) files.push(full);
+    }
+  };
+  walk(root);
+  const offenders = [];
+  for (const file of files) {
+    const data = fs.readFileSync(file);
+    // 允许 \t(9) \n(10) \r(13)，其余 C0 控制字符都不该出现在源码里
+    for (const byte of new Set(data)) {
+      if (byte < 9 || byte === 11 || byte === 12 || (byte >= 14 && byte < 32)) {
+        offenders.push(`${path.relative(root, file)} 含字节 ${byte}`);
+        break;
+      }
+    }
+  }
+  check(`源码不含裸控制字符（扫描 ${files.length} 个文件）`, () => {
+    assert.deepStrictEqual(offenders, [], `请改用转义写法：${offenders.join('；')}`);
+  });
+}
+
 async function main() {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbpanda-step1-'));
   try {
+    testNoControlChars();
     await testCommands();
     await testKeymapSchemes();
     await testMainSettings(userDataDir);

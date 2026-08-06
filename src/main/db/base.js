@@ -1041,6 +1041,32 @@ class BaseAdapter {
     return m;
   }
 
+  /**
+   * 构造 ORDER BY 子句。
+   *
+   * orderBy 支持两种形式：
+   *   'name' + orderDir      单列（旧调用方式）
+   *   [{col, dir}, …]        多列排序，按数组顺序决定优先级
+   *
+   * 列名必须出现在表的真实列里才会被采用——quoteIdent 已经能防注入，
+   * 这里再加一层白名单，顺带避免按不存在的列排序直接抛 SQL 错误。
+   */
+  orderClause(orderBy, orderDir, info) {
+    const known = new Set((info && info.columns || []).map((column) => column.name));
+    const list = Array.isArray(orderBy)
+      ? orderBy
+      : (orderBy ? [{ col: orderBy, dir: orderDir }] : []);
+    const parts = [];
+    const used = new Set();
+    for (const item of list.slice(0, 8)) {
+      const col = item && item.col;
+      if (!col || used.has(col) || !known.has(col)) continue;
+      used.add(col);
+      parts.push(`${this.quoteIdent(col)} ${item.dir === 'desc' ? 'DESC' : 'ASC'}`);
+    }
+    return parts.length ? ` ORDER BY ${parts.join(', ')}` : '';
+  }
+
   /** 分页读取表数据 */
   async tableData(db, args) {
     const { schema, table, page = 1, pageSize = 500, where = '', orderBy = '', orderDir = 'asc', skipCount = false } = args;
@@ -1055,9 +1081,7 @@ class BaseAdapter {
     const info = await this.tableInfo(db, schema, table);
     const qtable = this.qualify(db, schema, table);
     const whereClause = where && where.trim() ? ' WHERE ' + where.trim() : '';
-    const orderClause = orderBy
-      ? ` ORDER BY ${this.quoteIdent(orderBy)} ${orderDir === 'desc' ? 'DESC' : 'ASC'}`
-      : '';
+    const orderClause = this.orderClause(orderBy, orderDir, info);
     // 无主键时尝试用系统行标识列（PG ctid 等）定位行，使网格仍可编辑
     let pk = info.pk || [];
     let rowIdColumn = null;

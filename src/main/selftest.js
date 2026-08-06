@@ -2657,6 +2657,22 @@ async function runSelfTest() {
   try { lit([Buffer.from([1])], 'bytea[]'); } catch (e) { byteaArrayStillThrows = /无法可靠生成/.test(e.message); }
   check('pg 二进制数组不猜表示，仍然报错', byteaArrayStillThrows);
 
+  // ---- 多列排序的 ORDER BY 构建（所有适配器共用 base.js 的这一处） ----
+  const ordInfo = { columns: [{ name: 'id' }, { name: 'name' }, { name: 'city' }] };
+  const ord = (orderBy, dir) => pgLit.orderClause(orderBy, dir, ordInfo).trim();
+  check('orderClause 单列（旧调用方式）', ord('name', 'desc') === 'ORDER BY "name" DESC');
+  check('orderClause 无排序返回空', ord('', 'asc') === '' && ord(null) === '' && ord([]) === '');
+  check('orderClause 多列按数组顺序决定优先级',
+    ord([{ col: 'city', dir: 'asc' }, { col: 'name', dir: 'desc' }])
+    === 'ORDER BY "city" ASC, "name" DESC', ord([{ col: 'city', dir: 'asc' }, { col: 'name', dir: 'desc' }]));
+  check('orderClause 丢弃不存在的列', ord([{ col: 'nope' }, { col: 'id' }]) === 'ORDER BY "id" ASC');
+  check('orderClause 拒绝注入式列名',
+    ord([{ col: 'id; DROP TABLE t' }]) === '', ord([{ col: 'id; DROP TABLE t' }]));
+  check('orderClause 同列只取一次', ord([{ col: 'id' }, { col: 'id', dir: 'desc' }]) === 'ORDER BY "id" ASC');
+  check('orderClause 非法方向按升序处理', ord([{ col: 'id', dir: 'sideways' }]) === 'ORDER BY "id" ASC');
+  check('orderClause 排序列数有上限',
+    (pgLit.orderClause(Array.from({ length: 20 }, () => ({ col: 'id' })), 'asc', ordInfo).match(/"id"/g) || []).length === 1);
+
   // 端到端复现：PostgreSQL 的驱动结果集不带类型名（type 恒为空串），
   // 只有 tableInfo 的 format_type 有类型。转储必须回落到表元数据，
   // 否则含 json/数组列的 PG 库整个备份不了。
