@@ -216,10 +216,17 @@ app.whenReady().then(async () => {
       if (level === 3 || level === 'error') errors.push(message || '');
     });
     win.webContents.once('did-finish-load', async () => {
+      // CI 的 Windows Runner 初始化设置/工作区可能比本机慢，固定等待会在
+      // 页面已经可交互但 __APP_READY 尚未置位时误报 smoke 失败。
       await new Promise((r) => setTimeout(r, 1500));
       try {
-        const domOk = await win.webContents.executeJavaScript(
-          'window.__APP_READY === true && !!document.getElementById("tree") && !!document.getElementById("tabbar")');
+        let domOk = false;
+        for (let attempt = 0; attempt < 26; attempt++) {
+          domOk = await win.webContents.executeJavaScript(
+            'window.__APP_READY === true && !!document.getElementById("tree") && !!document.getElementById("tabbar")');
+          if (domOk) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
         const cmOk = await win.webContents.executeJavaScript('typeof CodeMirror === "function"');
         const titleOk = win.getTitle() === WINDOW_TITLE;
         const menuLayout = await win.webContents.executeJavaScript(`(() => {
