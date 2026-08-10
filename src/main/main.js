@@ -243,19 +243,11 @@ app.whenReady().then(async () => {
           window.__test.openConnDialog();
           const modal = document.querySelector('.modal');
           const form = modal && modal.querySelector('.form-grid');
-          const labels = form ? [...form.querySelectorAll('label')].filter((label) => (
-            label.textContent.trim() && getComputedStyle(label).display !== 'none'
-          )) : [];
-          const labelTextLeft = labels.length ? Math.min(...labels.map((label) => {
-            const range = document.createRange();
-            range.selectNodeContents(label);
-            return range.getBoundingClientRect().left;
-          }).filter((left) => left > 0)) : 0;
           const modalRect = modal && modal.getBoundingClientRect();
           const formRect = form && form.getBoundingClientRect();
-          const formLeft = modalRect ? Math.round(labelTextLeft - modalRect.left) : -1;
+          const formLeft = modalRect && formRect ? Math.round(formRect.left - modalRect.left) : -1;
           const formRight = modalRect && formRect ? Math.round(modalRect.right - formRect.right) : -1;
-          const formBalanced = formLeft > 0 && Math.abs(formLeft - formRight) <= 6;
+          const formBalanced = formLeft >= 0 && formRight >= 0 && Math.abs(formLeft - formRight) <= 6;
           const passwordRow = form && form.querySelector('.password-row');
           const passwordInput = passwordRow && passwordRow.querySelector('input[type="password"]');
           const passwordSave = passwordRow && passwordRow.querySelector('.password-save-check input[type="checkbox"]');
