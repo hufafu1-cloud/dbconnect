@@ -4,6 +4,8 @@ const {
   transactionControlKind, unsafeSessionMutationKind, simpleEditableSelect,
 } = require('./sqlutil');
 
+const SINGLE_SESSION_DIALECTS = new Set(['mysql', 'postgres', 'oracle']);
+
 class BaseAdapter {
   constructor(cfg) {
     this.cfg = cfg;
@@ -863,6 +865,45 @@ class BaseAdapter {
   }
 
   /**
+   * Keep a standalone query-page script on one physical session when it has
+   * transaction boundaries. Session settings such as PostgreSQL's
+   * `SET search_path`, MySQL's `USE`/`SET`, and Oracle's `ALTER SESSION`
+   * survive COMMIT, but do not survive returning a pooled connection.
+   * Splitting `SET ...; COMMIT; CREATE ...` into separate runScript calls
+   * changes the meaning of the user's SQL.
+   */
+  async _runQuerySessionOnSingleSession(db, stmts, actions, opts = {}) {
+    this._assertTransactionSql(stmts);
+    const maxRows = this._scriptMaxRows(opts);
+    const requestId = this._beginRequest(opts);
+    try {
+      return await this.withSession(db, async (run) => {
+        const out = [];
+        for (let i = 0; i < stmts.length; i++) {
+          const stmt = stmts[i];
+          const action = actions[i];
+          try {
+            if (action === 'unsupported') {
+              throw new Error('PREPARE TRANSACTION is not supported in a query-page session');
+            }
+            const results = await this._runScriptStatements(
+              run, [stmt], maxRows, requestId, { db, schema: opts.schema },
+            );
+            out.push(...results);
+            if (results.some((item) => item.error)) break;
+          } catch (error) {
+            out.push({ sql: excerpt(stmt), sqlText: stmt, ms: 0, error: this._errMsg(error) });
+            break;
+          }
+        }
+        return out;
+      }, { requestId, schema: opts.schema });
+    } finally {
+      this._endRequest(requestId);
+    }
+  }
+
+  /**
    * 查询标签统一入口。无事务时普通 SQL 仍自动提交；遇到 BEGIN 后固定
    * 当前物理会话，直到 COMMIT/ROLLBACK。按钮与手写边界共用 transactionId。
    */
@@ -885,6 +926,15 @@ class BaseAdapter {
     const support = this.transactionSupport || { supported: false };
     if (!support.supported) {
       throw new Error(support.warning || '当前数据库不支持显式事务');
+    }
+
+    // Keep connection-backed session settings alive across a standalone
+    // COMMIT. Explicit BEGIN still uses the existing app-managed transaction
+    // path below.
+    if (SINGLE_SESSION_DIALECTS.has(this.dialect)
+        && !this._transactions.has(id)
+        && !actions.includes('begin')) {
+      return this._runQuerySessionOnSingleSession(db, stmts, actions, opts);
     }
 
     const out = [];

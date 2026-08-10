@@ -75,10 +75,11 @@ class ClickHouseAdapter extends BaseAdapter {
     // HTTP 接口无会话状态，直接执行
     const requestId = this._requestId(opts);
     this._assertRequestActive(requestId);
+    const sessionId = `dbpanda-session:${crypto.randomUUID()}`;
     return fn((sql, runOpts) => {
       const effectiveOpts = requestId && !this._requestId(runOpts)
-        ? { ...(runOpts || {}), requestId }
-        : runOpts;
+        ? { ...(runOpts || {}), requestId, sessionId }
+        : { ...(runOpts || {}), sessionId };
       return this._run(db, sql, effectiveOpts);
     });
   }
@@ -94,6 +95,9 @@ class ClickHouseAdapter extends BaseAdapter {
     const client = this._getClient(db);
     const ac = new AbortController();
     const queryId = `dbpanda:${requestId || 'internal'}:${crypto.randomUUID()}`;
+    const sessionOptions = opts && opts.sessionId
+      ? { session_id: opts.sessionId, session_timeout: 60 }
+      : {};
     const handle = { controller: ac, client, queryId };
     this._trackRequestHandle(handle, requestId);
     try {
@@ -102,6 +106,7 @@ class ClickHouseAdapter extends BaseAdapter {
         const rs = await client.query({
           query: limited.sql,
           query_id: queryId,
+          ...sessionOptions,
           format: 'JSONCompact',
           abort_signal: ac.signal,
           clickhouse_settings: {
@@ -128,6 +133,7 @@ class ClickHouseAdapter extends BaseAdapter {
       await client.command({
         query: limited.sql,
         query_id: queryId,
+        ...sessionOptions,
         abort_signal: ac.signal,
       });
       return { affected: 0, message: '执行成功（ClickHouse 不返回影响行数）' };

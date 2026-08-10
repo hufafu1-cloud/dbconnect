@@ -1,3 +1,13 @@
+## v2.6.1 更新日志
+
+修复
+
+- 修复 PostgreSQL 执行 `SET search_path` 后，后续 `COMMIT` 与建表语句切换连接导致对象错误创建到 `public` 模式的问题。
+- 修复 MySQL / MariaDB / OceanBase MySQL 执行 `USE`、`SET` 等会话语句后，后续 SQL 无法继承会话上下文的问题。
+- 修复 Oracle / OceanBase Oracle 执行 `ALTER SESSION` 后，后续 SQL 无法保持目标模式的问题。
+- 修复 ClickHouse 脚本中的会话级 `SET` 设置无法传递到后续语句的问题。
+- 增加跨数据库会话状态回归测试。
+
 ## v2.6.0 更新日志
 
 新增

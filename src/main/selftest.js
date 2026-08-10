@@ -8,6 +8,7 @@ const {
 } = require('./db/sqlutil');
 const { SQLiteAdapter } = require('./db/sqlite');
 const { MySQLAdapter } = require('./db/mysql');
+const { OBOracleAdapter } = require('./db/oboracle');
 const { ClickHouseAdapter } = require('./db/clickhouse');
 const { parseNcx, parseNcxBuffer } = require('./navicatNcx');
 const { decryptNavicatSecret } = require('./navicatCrypto');
@@ -276,6 +277,24 @@ async function runSelfTest() {
   check('sqlite 识别外部文件 SQL', hasSQLiteExternalFileClause("ATTACH DATABASE 'other.db' AS other")
     && hasSQLiteExternalFileClause("VACUUM main INTO 'copy.db'")
     && !hasSQLiteExternalFileClause("SELECT 'ATTACH DATABASE x'"));
+  const clickhouseSessionAdapter = new ClickHouseAdapter({});
+  const clickhouseSessionIds = [];
+  clickhouseSessionAdapter._getClient = () => ({
+    command: async (options) => { clickhouseSessionIds.push(options.session_id); },
+    query: async (options) => {
+      clickhouseSessionIds.push(options.session_id);
+      return { json: async () => ({ meta: [], data: [] }) };
+    },
+  });
+  const clickhouseSessionResult = await clickhouseSessionAdapter.runScript(
+    'db', 'SET max_threads = 1; CREATE TABLE t_session (id UInt8) ENGINE = Memory;',
+  );
+  check('ClickHouse 脚本内 SET 使用同一 HTTP session',
+    clickhouseSessionIds.length === 2
+      && clickhouseSessionIds[0]
+      && clickhouseSessionIds[0] === clickhouseSessionIds[1]
+      && !clickhouseSessionResult.some((item) => item.error),
+  { clickhouseSessionIds, clickhouseSessionResult });
   const wasmMemory = new SQLiteAdapter({ file: ':memory:' });
   let wasmMemoryExported = false;
   wasmMemory.file = ':memory:';
@@ -618,6 +637,105 @@ async function runSelfTest() {
     pgSchemaQueries.some((item) => item.text === 'SET search_path TO "tenant ""one"')
     && pgSchemaQueries.some((item) => item.text.includes('FROM pg_namespace')
       && item.params && item.params[0] === 'tenant "one'), pgSchemaQueries);
+  const pgSearchPathAdapter = new PostgresAdapter({});
+  const pgSearchPathClients = [];
+  pgSearchPathAdapter._getPool = () => ({
+    connect: async () => {
+      const client = new EventEmitter();
+      client.searchPath = 'initial';
+      client.createdSchema = null;
+      client.query = async (sql) => {
+        const text = typeof sql === 'string' ? sql : sql.text;
+        const upper = text.trim().toUpperCase();
+        if (upper.startsWith('SELECT 1 FROM PG_NAMESPACE')) return { rows: [{ ok: 1 }] };
+        const setPath = /^SET\s+SEARCH_PATH\s+TO\s+"?([^";]+)"?/i.exec(text);
+        if (setPath) {
+          client.searchPath = setPath[1].replace(/""/g, '"');
+          return { rows: [], rowCount: 0, command: 'SET' };
+        }
+        if (upper.startsWith('CREATE TABLE')) {
+          client.createdSchema = client.searchPath;
+          return { rows: [], rowCount: 0, command: 'CREATE' };
+        }
+        return { rows: [], rowCount: 0, command: upper.split(/\s+/)[0] || 'OK' };
+      };
+      client.release = () => {};
+      pgSearchPathClients.push(client);
+      return client;
+    },
+  });
+  const pgSearchPathResult = await pgSearchPathAdapter.runQuerySessionScript(
+    'pg-search-path', 'db1',
+    'SET search_path TO znxxthgl; COMMIT; CREATE TABLE t_court (id int);',
+    { schema: 'public' },
+  );
+  check('PG SET search_path 经 COMMIT 后建表仍使用同一会话模式',
+    pgSearchPathClients.length === 1
+      && pgSearchPathClients[0].createdSchema === 'znxxthgl'
+      && !pgSearchPathResult.some((item) => item.error),
+  { pgSearchPathClients: pgSearchPathClients.length, pgSearchPathResult });
+  const mysqlSessionAdapter = new MySQLAdapter({});
+  const mysqlSessionConnections = [];
+  mysqlSessionAdapter.pool = {
+    getConnection: async () => {
+      const conn = {
+        database: 'initial',
+        createdDatabase: null,
+        query: async (sql) => {
+          const text = typeof sql === 'string' ? sql : sql.sql;
+          const upper = text.trim().toUpperCase();
+          const use = /^USE\s+`?([^`;]+)`?/i.exec(text);
+          if (use) conn.database = use[1].trim();
+          if (upper.startsWith('CREATE TABLE')) conn.createdDatabase = conn.database;
+          return [{ affectedRows: 0, info: '' }, undefined];
+        },
+        release: () => {},
+        destroy: () => {},
+      };
+      mysqlSessionConnections.push(conn);
+      return conn;
+    },
+  };
+  const mysqlSessionResult = await mysqlSessionAdapter.runQuerySessionScript(
+    'mysql-session', 'default_db',
+    'USE tenant_db; COMMIT; CREATE TABLE t_court (id INT);',
+  );
+  check('MySQL USE 经 COMMIT 后建表仍使用同一会话数据库',
+    mysqlSessionConnections.length === 1
+      && mysqlSessionConnections[0].createdDatabase === 'tenant_db'
+      && !mysqlSessionResult.some((item) => item.error),
+  { mysqlSessionConnections: mysqlSessionConnections.length, mysqlSessionResult });
+  const oracleSessionAdapter = new OBOracleAdapter({});
+  const oracleSessionConnections = [];
+  oracleSessionAdapter.pool = {
+    getConnection: async () => {
+      const conn = {
+        schema: 'INITIAL_SCHEMA',
+        createdSchema: null,
+        query: async (sql) => {
+          const text = typeof sql === 'string' ? sql : sql.sql;
+          const upper = text.trim().toUpperCase();
+          const setSchema = /ALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\s*=\s*"?([^";]+)"?/i.exec(text);
+          if (setSchema) conn.schema = setSchema[1].trim();
+          if (upper.startsWith('CREATE TABLE')) conn.createdSchema = conn.schema;
+          return [{ affectedRows: 0, info: '' }, undefined];
+        },
+        release: () => {},
+        destroy: () => {},
+      };
+      oracleSessionConnections.push(conn);
+      return conn;
+    },
+  };
+  const oracleSessionResult = await oracleSessionAdapter.runQuerySessionScript(
+    'oracle-session', 'INITIAL_SCHEMA',
+    'ALTER SESSION SET CURRENT_SCHEMA = "TENANT_SCHEMA"; COMMIT; CREATE TABLE t_court (id INT);',
+  );
+  check('Oracle ALTER SESSION 经 COMMIT 后建表仍使用同一会话模式',
+    oracleSessionConnections.length === 1
+      && oracleSessionConnections[0].createdSchema === 'TENANT_SCHEMA'
+      && !oracleSessionResult.some((item) => item.error),
+  { oracleSessionConnections: oracleSessionConnections.length, oracleSessionResult });
   const pgExplainAdapter = new PostgresAdapter({});
   const pgExplainClient = new EventEmitter();
   const pgExplainQueries = [];
