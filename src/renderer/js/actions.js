@@ -7,6 +7,7 @@ import { openQueryTab } from './queryTab.js';
 import { openDesignTab } from './designTab.js';
 import { openImportWizard } from './importWizard.js';
 import { authorizeOperation } from './danger.js';
+import { hasCap } from './dbTypes.js';
 
 export function openTable(target) { openTableTab(target); }
 /** 表 → 可编辑设计器；视图 → 只读定义查看 */
@@ -61,8 +62,7 @@ export async function openGeneratedSql(target, kind, isView = false) {
 
 export function generatedSqlSubmenu(target, isView = false) {
   const conn = state.connections.find((item) => item.id === target.connId);
-  const dialect = conn && conn.type === 'oboracle' ? 'oracle' : (conn && conn.type);
-  const mergeSupported = ['mssql', 'postgres', 'oracle'].includes(dialect);
+  const mergeSupported = !!conn && hasCap(conn.type, 'merge');
   const item = (kind, extra = {}) => ({
     label: kind.toUpperCase(),
     onClick: () => openGeneratedSql(target, kind, isView),

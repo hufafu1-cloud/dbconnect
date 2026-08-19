@@ -2,6 +2,7 @@
 import { el, iconEl } from './util.js';
 import { openModal, toast } from './toast.js';
 import { state, connLabel } from './state.js';
+import { quoteIdentOf, quoteLiteralOf } from './dbTypes.js';
 
 function connTypeOf(connId) {
   const c = state.connections.find((x) => x.id === connId);
@@ -9,18 +10,14 @@ function connTypeOf(connId) {
 }
 
 function makeQi(connType) {
-  return (n) => connType === 'mssql' ? '[' + String(n).replace(/]/g, ']]') + ']'
-    : ['mysql', 'oceanbase', 'clickhouse'].includes(connType) ? '`' + String(n).replace(/`/g, '``') + '`'
-    : '"' + String(n).replace(/"/g, '""') + '"';
+  return quoteIdentOf(connType);
 }
 function makeLit(connType) {
-  const bs = ['mysql', 'oceanbase', 'clickhouse'].includes(connType);
+  const quoteText = quoteLiteralOf(connType);
   return (v) => {
     if (v === null || v === undefined) return 'NULL';
     if (typeof v === 'number') return String(v);
-    let s = String(v).replace(/'/g, "''");
-    if (bs) s = s.replace(/\\/g, '\\\\');
-    return "'" + s + "'";
+    return quoteText(v);
   };
 }
 
@@ -47,7 +44,7 @@ export async function openSearchDialog(preset) {
     await fillSchema();
   }
   async function fillSchema() {
-    const isPg = connTypeOf(connSel.value) === 'postgres';
+    const isPg = hasCap(connTypeOf(connSel.value), 'schemas');
     schemaSel.style.display = isPg ? '' : 'none';
     schemaSel.innerHTML = '';
     if (isPg && dbSel.value) {

@@ -1,6 +1,5 @@
-// 新建对象的 SQL 模板（按方言）
-// dialectOf: 连接类型 → 模板方言
-const DIALECT = { mysql: 'mysql', oceanbase: 'mysql', postgres: 'postgres', mssql: 'mssql', sqlite: 'sqlite', clickhouse: 'clickhouse', oboracle: 'oracle' };
+// 新建对象的 SQL 模板（按方言）；连接类型 → 模板方言的映射见 dbTypes.js
+import { dialectOf } from './dbTypes.js';
 
 const T = {
   mysql: {
@@ -82,6 +81,6 @@ END;`,
 };
 
 export function objTemplate(connType, kind) {
-  const d = T[DIALECT[connType] || 'mysql'] || {};
+  const d = T[dialectOf(connType)] || {};
   return d[kind] || null;
 }

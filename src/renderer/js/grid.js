@@ -2,6 +2,7 @@
 import { el, renderCellValue, cellText } from './util.js';
 import { showMenu } from './contextmenu.js';
 import { cellViewer, toast } from './toast.js';
+import { quoteIdentOf, quoteLiteralOf } from './dbTypes.js';
 
 const NUM_RE = /int|decimal|numeric|float|double|real|money|number/i;
 
@@ -53,18 +54,14 @@ function buildCopyText(format, names, rows, ctx) {
     ].join('\r\n');
   }
   // insert
-  const mysqlFamily = ['mysql', 'oceanbase', 'clickhouse'].includes(ctx.connType);
-  const qi = (n) => ctx.connType === 'mssql' ? '[' + String(n).replace(/]/g, ']]') + ']'
-    : mysqlFamily ? '`' + String(n).replace(/`/g, '``') + '`'
-      : '"' + String(n).replace(/"/g, '""') + '"';
+  const qi = quoteIdentOf(ctx.connType);
+  const quoteText = quoteLiteralOf(ctx.connType);
   const lit = (v) => {
     if (v === null || v === undefined) return 'NULL';
     if (typeof v === 'object' && v.__blob) return 'NULL /* BLOB 预览不完整，未复制 */';
     if (typeof v === 'number') return String(v);
     if (typeof v === 'boolean') return v ? '1' : '0';
-    let s = String(v);
-    if (mysqlFamily) s = s.replace(/\\/g, '\\\\');
-    return "'" + s.replace(/'/g, "''") + "'";
+    return quoteText(v);
   };
   const T = qi(ctx.table || 'table_name');
   return rows.map((r) =>

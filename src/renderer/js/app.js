@@ -12,6 +12,7 @@ import {
   setSecondaryTab, getSecondaryTabId,
 } from './tabs.js';
 import { openConnDialog } from './connDialog.js';
+import { TYPE_ORDER, typeLabel, typeIcon, hasCap } from './dbTypes.js';
 import * as actions from './actions.js';
 import { openQueryTab } from './queryTab.js';
 import { openTableTab } from './tableTab.js';
@@ -50,15 +51,11 @@ async function openAiPanelFromToolbar() {
 
 function showConnMenu(anchor) {
   const r = anchor.getBoundingClientRect();
-  showMenu(r.left, r.bottom + 4, [
-    { label: 'MySQL / MariaDB', icon: 'mysql', onClick: () => openConnDialog(null, 'mysql') },
-    { label: 'PostgreSQL', icon: 'postgres', onClick: () => openConnDialog(null, 'postgres') },
-    { label: 'SQLite', icon: 'sqlite', onClick: () => openConnDialog(null, 'sqlite') },
-    { label: 'SQL Server', icon: 'mssql', onClick: () => openConnDialog(null, 'mssql') },
-    { label: 'ClickHouse', icon: 'clickhouse', onClick: () => openConnDialog(null, 'clickhouse') },
-    { label: 'OceanBase (MySQL 模式)', icon: 'oceanbase', onClick: () => openConnDialog(null, 'oceanbase') },
-    { label: 'OceanBase (Oracle 模式)', icon: 'oboracle', onClick: () => openConnDialog(null, 'oboracle') },
-  ]);
+  showMenu(r.left, r.bottom + 4, TYPE_ORDER.map((type) => ({
+    label: typeLabel(type),
+    icon: typeIcon(type),
+    onClick: () => openConnDialog(null, type),
+  })));
 }
 
 let toolbarContextButton = null;
@@ -667,7 +664,7 @@ function registerAppCommands() {
       run: async ({ target, needConn }) => {
         if (!needConn()) return;
         const conn = state.connections.find((c) => c.id === target.connId);
-        if (conn && ['mysql', 'oceanbase', 'postgres', 'mssql', 'clickhouse'].includes(conn.type)) {
+        if (conn && hasCap(conn.type, 'processes')) {
           (await import('./procTab.js')).openProcTab(target.connId);
         } else {
           toast.info('当前连接类型不支持进程列表');

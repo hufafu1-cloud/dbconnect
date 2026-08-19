@@ -9,8 +9,9 @@ import { showMenu } from './contextmenu.js';
 import { openEditorSearch, closeEditorSearch, editorSearchNext } from './editorSearch.js';
 import { getSetting, updateSettings } from './settings.js';
 import { editorRunsOnF5 } from './keymaps.js';
+import { cmModeOf, formatLangOf, dialectOf, hasCap } from './dbTypes.js';
 
-const CM_MODES = { mysql: 'text/x-mysql', postgres: 'text/x-pgsql', mssql: 'text/x-mssql', sqlite: 'text/x-sqlite', clickhouse: 'text/x-mysql', oceanbase: 'text/x-mysql', oboracle: 'text/x-plsql' };
+
 let queryNo = 0;
 
 function formatQueryRowCount(result) {
@@ -159,7 +160,7 @@ export function openQueryTab(target, initialSql, opts) {
     if (connId) setActiveTarget({ connId, db, schema }, 'query-tab');
   }
   function updateSchemaBadge() {
-    const switchable = connTypeOf(connId) === 'postgres';
+    const switchable = hasCap(connTypeOf(connId), 'schemas');
     schemaLabel.style.display = switchable ? '' : 'none';
     schemaSel.style.display = switchable ? '' : 'none';
     schemaBadge.style.display = !switchable && schema ? '' : 'none';
@@ -174,7 +175,7 @@ export function openQueryTab(target, initialSql, opts) {
     const expectedDb = db;
     schemaSel.innerHTML = '';
     updateSchemaBadge();
-    if (connTypeOf(connId) !== 'postgres' || !connId || !db || !state.open.has(connId)) {
+    if (!hasCap(connTypeOf(connId), 'schemas') || !connId || !db || !state.open.has(connId)) {
       schemaSel.dataset.loading = 'false';
       return;
     }
@@ -288,7 +289,7 @@ export function openQueryTab(target, initialSql, opts) {
     await fillSchemaSel();
     loadHintColumns();
     updateEnvBadge();
-    if (cm) cm.setOption('mode', CM_MODES[connTypeOf(connId)] || 'text/x-sql');
+    if (cm) cm.setOption('mode', connTypeOf(connId) ? cmModeOf(connTypeOf(connId)) : 'text/x-sql');
     syncActiveContext();
     refreshTransactionSupport();
     syncTransactionUi();
@@ -463,7 +464,7 @@ export function openQueryTab(target, initialSql, opts) {
     openExplainTab({ connId, db, schema }, sql);
   }
 
-  const FORMAT_LANGS = { mysql: 'mysql', oceanbase: 'mysql', clickhouse: 'mysql', postgres: 'postgresql', mssql: 'transactsql', sqlite: 'sqlite', oboracle: 'plsql' };
+
   async function formatSql() {
     const sel = cm.getSelection();
     const src = sel || cm.getValue();
@@ -471,7 +472,7 @@ export function openQueryTab(target, initialSql, opts) {
     try {
       const out = await window.api.sql.format({
         sql: src,
-        language: FORMAT_LANGS[connTypeOf(connId)] || 'sql',
+        language: connTypeOf(connId) ? formatLangOf(connTypeOf(connId)) : 'sql',
       });
       if (sel) cm.replaceSelection(out);
       else cm.setValue(out);
@@ -500,7 +501,7 @@ export function openQueryTab(target, initialSql, opts) {
 
   let cm = CodeMirror(editorHost, {
     value: initialText,
-    mode: CM_MODES[connId && connTypeOf(connId)] || 'text/x-sql',
+    mode: connId && connTypeOf(connId) ? cmModeOf(connTypeOf(connId)) : 'text/x-sql',
     lineNumbers: true,
     indentWithTabs: false,
     indentUnit: 2,
@@ -903,7 +904,7 @@ export function openQueryTab(target, initialSql, opts) {
     connSel.disabled = running || stateChanging;
     dbSel.disabled = running || stateChanging;
     schemaSel.disabled = running || stateChanging || schemaSel.dataset.loading === 'true'
-      || connTypeOf(connId) !== 'postgres' || !schema || !schemaSel.options.length;
+      || !hasCap(connTypeOf(connId), 'schemas') || !schema || !schemaSel.options.length;
     btnRun.disabled = running || dbUnavailable;
     btnRunSel.disabled = running || dbUnavailable;
     btnRunAll.disabled = running || dbUnavailable;
@@ -1034,10 +1035,8 @@ export function openQueryTab(target, initialSql, opts) {
     }
     // F5 / Ctrl+Enter：有选区优先执行选区，否则只执行光标所在语句。
     if (selection.trim()) return selection;
-    const dialects = { oceanbase: 'mysql', oboracle: 'oracle' };
-    const type = connTypeOf(connId) || 'sql';
     const found = await window.api.sql.statementAt(
-      cm.getValue(), dialects[type] || type, cm.indexFromPos(cm.getCursor()),
+      cm.getValue(), connTypeOf(connId) ? dialectOf(connTypeOf(connId)) : 'sql', cm.indexFromPos(cm.getCursor()),
     );
     return found && found.sql || '';
   }

@@ -54,7 +54,7 @@ export async function openSyncDialog(preset) {
     await fillSchemaSel(connSel, dbSel, schemaSel);
   }
   async function fillSchemaSel(connSel, dbSel, schemaSel) {
-    const isPg = connTypeOf(connSel.value) === 'postgres';
+    const isPg = hasCap(connTypeOf(connSel.value), 'schemas');
     schemaSel.style.display = isPg ? '' : 'none';
     schemaSel.innerHTML = '';
     if (isPg && dbSel.value) {

@@ -7,6 +7,7 @@ import * as actions from './actions.js';
 import { openConnDialog } from './connDialog.js';
 import { statusbar } from './statusbar.js';
 import { authorizeOperation } from './danger.js';
+import { typeIcon, typeShortLabel, hasCap, fixedDatabaseOf } from './dbTypes.js';
 import {
   favoriteItems, recentItems, isFavorite, toggleFavorite, clearRecent, onRecentChange,
 } from './recentStore.js';
@@ -158,13 +159,11 @@ function renderConnNode(conn) {
   const children = makeBranch();
   let loaded = false;
 
-  const typeIcons = { mysql: 'mysql', postgres: 'postgres', sqlite: 'sqlite', mssql: 'mssql', clickhouse: 'clickhouse', oceanbase: 'oceanbase', oboracle: 'oboracle' };
-  const typeLabels = { mysql: 'MySQL', postgres: 'PostgreSQL', sqlite: 'SQLite', mssql: 'SQL Server', clickhouse: 'ClickHouse', oceanbase: 'OceanBase', oboracle: 'OB·Oracle' };
   const { row, tw } = nodeRow({
     depth: 0,
-    icon: typeIcons[conn.type] || 'connection',
+    icon: typeIcon(conn.type),
     label: conn.name,
-    meta: typeLabels[conn.type] || conn.type,
+    meta: typeShortLabel(conn.type) || conn.type,
     cls: conn.color ? 'conn-colored' : '',
     twisty: true,
     onToggle: () => toggle(),
@@ -173,7 +172,7 @@ function renderConnNode(conn) {
     onMenu: (e) => connMenu(e, conn, isOpenNow(), toggle),
     onSqlFileDrop: (file) => runDroppedSqlFile({
       connId: conn.id,
-      db: conn.type === 'sqlite' ? 'main' : (conn.database || null),
+      db: fixedDatabaseOf(conn.type) || conn.database || null,
     }, file),
   });
 
@@ -283,8 +282,8 @@ function renderConnNode(conn) {
         ? { label: '关闭连接', icon: 'unlink', onClick: closeConnection }
         : { label: '打开连接', icon: 'link', onClick: () => openConnection(c) },
       { sep: true },
-      { label: '新建查询', icon: 'query', disabled: !opened, onClick: () => actions.newQuery({ connId: c.id, db: c.type === 'sqlite' ? 'main' : (c.database || null) }) },
-      (c.type !== 'sqlite' && c.type !== 'oboracle') && { label: '新建数据库…', icon: 'database', disabled: !opened, onClick: () => actions.createDatabase(c.id) },
+      { label: '新建查询', icon: 'query', disabled: !opened, onClick: () => actions.newQuery({ connId: c.id, db: fixedDatabaseOf(c.type) || c.database || null }) },
+      hasCap(c.type, 'manageDatabase') && { label: '新建数据库…', icon: 'database', disabled: !opened, onClick: () => actions.createDatabase(c.id) },
       { sep: true },
       { label: '数据传输…', icon: 'transfer', disabled: !opened, onClick: async () => {
         const { openTransferDialog } = await import('./dbaTools.js');
@@ -296,9 +295,9 @@ function renderConnNode(conn) {
       } },
       { label: '运行 SQL 文件…', icon: 'openFile', disabled: !opened, onClick: async () => {
         const { openRunSqlFileDialog } = await import('./dbaTools.js');
-        openRunSqlFileDialog({ connId: c.id, db: c.type === 'sqlite' ? 'main' : (c.database || null) });
+        openRunSqlFileDialog({ connId: c.id, db: fixedDatabaseOf(c.type) || c.database || null });
       } },
-      ['mysql', 'oceanbase', 'postgres', 'mssql', 'clickhouse'].includes(c.type) &&
+      hasCap(c.type, 'processes') &&
         { label: '进程列表', icon: 'monitor', disabled: !opened, onClick: async () => {
           const { openProcTab } = await import('./procTab.js');
           openProcTab(c.id);
@@ -374,7 +373,7 @@ function renderDbNode(conn, db) {
           openRunSqlFileDialog({ connId: conn.id, db });
         } },
         { sep: true },
-        (conn.type !== 'sqlite' && conn.type !== 'oboracle') &&
+        hasCap(conn.type, 'manageDatabase') &&
           { label: '删除数据库', icon: 'trash', danger: true, onClick: () => actions.dropDatabase({ connId: conn.id, db }) },
       ].filter(Boolean));
     },
@@ -391,7 +390,7 @@ function renderDbNode(conn, db) {
     const loading = el('div', { class: 'tree-loading', style: { paddingLeft: '54px' } }, '加载中…');
     children.append(loading);
     try {
-      if (conn.type === 'postgres') {
+      if (hasCap(conn.type, 'schemas')) {
         const schemas = await window.api.db.schemas(conn.id, db);
         loading.remove();
         for (const sch of schemas) children.append(renderSchemaNode(conn, db, sch));

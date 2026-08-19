@@ -4,6 +4,7 @@ import { openModal, toast, confirmDialog } from './toast.js';
 import { state, emit, connLabel, objectsCacheKey } from './state.js';
 import { authorizeOperation } from './danger.js';
 import { startTask } from './taskCenter.js';
+import { hasCap } from './dbTypes.js';
 
 function openConnsOptions(selected) {
   return [...state.open.keys()].map((id) =>
@@ -93,7 +94,7 @@ export async function openTransferDialog(preset) {
     await fillSchemaSel(connSel, dbSel, schemaSel);
   }
   async function fillSchemaSel(connSel, dbSel, schemaSel) {
-    const isPg = connTypeOf(connSel.value) === 'postgres';
+    const isPg = hasCap(connTypeOf(connSel.value), 'schemas');
     schemaSel.style.display = isPg ? '' : 'none';
     schemaSel.innerHTML = '';
     if (isPg && dbSel.value) {
@@ -378,7 +379,7 @@ export async function openRunSqlFileDialog(target, options = {}) {
   const txSingle = el('input', { type: 'radio', name: transactionName, value: 'single' });
   txAuto.checked = true;
   const conn = state.connections.find((item) => item.id === target.connId);
-  const transactionSupported = !conn || conn.type !== 'clickhouse';
+  const transactionSupported = !conn || hasCap(conn.type, 'transactions');
   txSingle.disabled = !transactionSupported;
   const transactionNote = el('div', {
     style: { color: 'var(--text-muted)', fontSize: '12px' },

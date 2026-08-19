@@ -3,29 +3,14 @@ import { el } from './util.js';
 import { openModal, toast } from './toast.js';
 import { state, emit, reloadConnections } from './state.js';
 import { authorizeOperation } from './danger.js';
+import { TYPE_ORDER, typeLabel, defaultsOf, isFileBased } from './dbTypes.js';
 
-const TYPE_DEFAULTS = {
-  mysql: { port: 3306, user: 'root', database: '' },
-  postgres: { port: 5432, user: 'postgres', database: 'postgres' },
-  mssql: { port: 1433, user: 'sa', database: 'master' },
-  clickhouse: { port: 8123, user: 'default', database: 'default' },
-  oceanbase: { port: 2881, user: 'root@sys', database: '' },
-  oboracle: { port: 2881, user: 'SYS@', database: '' },
-  sqlite: {},
-};
-const TYPE_NAMES = [
-  ['mysql', 'MySQL / MariaDB'],
-  ['postgres', 'PostgreSQL'],
-  ['sqlite', 'SQLite'],
-  ['mssql', 'SQL Server'],
-  ['clickhouse', 'ClickHouse'],
-  ['oceanbase', 'OceanBase (MySQL 模式)'],
-  ['oboracle', 'OceanBase (Oracle 模式)'],
-];
+// 类型清单与默认值统一来自 dbTypes.js 注册表，新增类型不改本文件
+const TYPE_NAMES = TYPE_ORDER.map((type) => [type, typeLabel(type)]);
 
 export function openConnDialog(existing, presetType, presetGroup) {
   const isEdit = !!existing;
-  // 新建连接时 port/user/database 留空，由各类型的 TYPE_DEFAULTS 填充（切换类型时跟随变化）
+  // 新建连接时 port/user/database 留空，由 dbTypes.js 各类型的 defaults 填充（切换类型时跟随变化）
   const cfg = existing ? { ...existing, options: { ...(existing.options || {}) } }
     : { type: presetType || 'mysql', name: '', host: 'localhost', port: undefined, user: undefined, password: '', database: undefined, file: '', options: {}, group: presetGroup || '' };
 
@@ -111,7 +96,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
     const add = (label, node) => {
       fieldsBox.append(el('label', {}, label), node);
     };
-    if (t === 'sqlite') {
+    if (isFileBased(t)) {
       f.file = field('text', cfg.file, '数据库文件路径（不存在则自动创建）');
       const browse = el('button', { class: 'btn', onClick: async () => {
         const p = await window.api.dlg.openSQLiteFile();
@@ -123,7 +108,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       } }, '新建…');
       add('数据库文件', el('div', { class: 'row-flex' }, f.file, browse, newBtn));
     } else {
-      const d = TYPE_DEFAULTS[t];
+      const d = defaultsOf(t);
       f.host = field('text', cfg.host || 'localhost');
       f.port = field('number', cfg.port || d.port);
       f.user = field('text', cfg.user !== undefined && cfg.user !== '' ? cfg.user : d.user);
@@ -253,11 +238,11 @@ export function openConnDialog(existing, presetType, presetGroup) {
       env: envSel.value,
       readOnly: readOnlyCheck.checked,
     };
-    if (t === 'sqlite') {
+    if (isFileBased(t)) {
       out.file = f.file.value.trim();
     } else {
       out.host = f.host.value.trim() || 'localhost';
-      out.port = Number(f.port.value) || TYPE_DEFAULTS[t].port;
+      out.port = Number(f.port.value) || defaultsOf(t).port;
       out.user = f.user.value.trim();
       out.savePassword = f.savePassword.checked;
       if (!isEdit || f.passwordDirty || (!cfg.hasPassword && cfg.savePassword !== false)) out.password = f.password.value;
@@ -284,8 +269,8 @@ export function openConnDialog(existing, presetType, presetGroup) {
 
   function validate(c) {
     if (!c.name) { toast.error('请填写连接名'); return false; }
-    if (c.type === 'sqlite' && !c.file) { toast.error('请选择数据库文件'); return false; }
-    if (c.type !== 'sqlite' && !c.host) { toast.error('请填写主机'); return false; }
+    if (isFileBased(c.type) && !c.file) { toast.error('请选择数据库文件'); return false; }
+    if (!isFileBased(c.type) && !c.host) { toast.error('请填写主机'); return false; }
     if (c.ssh && c.ssh.enabled) {
       if (!c.ssh.host) { toast.error('请填写 SSH 主机'); return false; }
       if (!c.ssh.user) { toast.error('请填写 SSH 用户名'); return false; }

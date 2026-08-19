@@ -3,6 +3,7 @@ import { el, iconEl, fmtCount } from './util.js';
 import { connLabel, connColor, state, setActiveTarget } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
+import { quoteIdentOf, quoteLiteralOf } from './dbTypes.js';
 import { toast, confirmDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { authorizeOperation } from './danger.js';
@@ -144,15 +145,8 @@ export function openTableTab(target, openOpts) {
 
   // ---------- 筛选构建器 ----------
   const connType = (state.connections.find((c) => c.id === target.connId) || {}).type || 'mysql';
-  const BACKSLASH_ESC = ['mysql', 'oceanbase', 'clickhouse'].includes(connType);
-  const qi = (n) => connType === 'mssql' ? '[' + String(n).replace(/]/g, ']]') + ']'
-    : ['mysql', 'oceanbase', 'clickhouse'].includes(connType) ? '`' + String(n).replace(/`/g, '``') + '`'
-    : '"' + String(n).replace(/"/g, '""') + '"';
-  const lit = (v) => {
-    let s = String(v).replace(/'/g, "''");
-    if (BACKSLASH_ESC) s = s.replace(/\\/g, '\\\\');
-    return "'" + s + "'";
-  };
+  const qi = quoteIdentOf(connType);
+  const lit = quoteLiteralOf(connType);
   const numOrLit = (v) => (/^-?\d+(\.\d+)?$/.test(String(v).trim()) ? String(v).trim() : lit(v));
 
   /**
