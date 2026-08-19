@@ -4,10 +4,15 @@
 
 一款可在 Windows 上安装运行的桌面数据库连接管理工具，界面与操作参考 Navicat 设计。
 基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、
-TiDB、PolarDB for MySQL、StarRocks、Apache Doris、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等 11 种数据库。
+TiDB、PolarDB for MySQL、StarRocks、Apache Doris、人大金仓 KingbaseES、openGauss / GaussDB、
+Greenplum、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等 14 种数据库。
 
-> StarRocks / Apache Doris 是 OLAP 引擎：支持浏览、查询与导出，网格只读、不提供可视化表设计器
-> （建表需声明分桶与表属性），改数据请直接写 SQL。
+> - StarRocks / Apache Doris 是 OLAP 引擎：支持浏览、查询与导出，网格只读、不提供可视化表设计器
+>   （建表需声明分桶与表属性），改数据请直接写 SQL。
+> - 瀚高 / Vastbase / IvorySQL 等其它 PostgreSQL 兼容分支，直接用 **PostgreSQL** 类型连接即可。
+> - **openGauss / GaussDB 需要服务端配合**：其默认的自研 SHA256 认证标准驱动无法握手，
+>   需将 `password_encryption_type` 改为 1、`pg_hba.conf` 改用 md5 并重设一次密码。
+>   连接失败时应用会直接给出这段指引，不会只丢一句看不懂的驱动报错。
 
 ![表数据浏览与编辑](docs/screenshot-table.png)
 

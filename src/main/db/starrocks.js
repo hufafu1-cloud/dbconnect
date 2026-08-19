@@ -59,6 +59,43 @@ class StarRocksAdapter extends MySQLAdapter {
     return `${this.productName}（MySQL 兼容 ${String(this.serverVersion || '').replace(/^MySQL\s*/, '')}）`;
   }
 
+  /**
+   * 表清单：StarRocks 支持 SHOW FULL TABLES，但不同版本对 FULL 的支持不一致。
+   * 父类直接用 SHOW FULL TABLES，一旦不认就会让整个库展不开，这里退回 SHOW TABLES
+   * （拿不到 Table_type，全部按表处理——视图会混进表里，但至少库能打开）。
+   */
+  async listObjects(db) {
+    try {
+      return await super.listObjects(db);
+    } catch (err) {
+      const rows = await this._q(`SHOW TABLES FROM ${this.quoteIdent(db)}`);
+      const tables = rows
+        .map((r) => Object.values(r)[0])
+        .filter(Boolean)
+        .map((name) => ({ name, rows: null, comment: '', engine: '' }));
+      tables.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      return { tables, views: [] };
+    }
+  }
+
+  /**
+   * 会话列表：部分版本不认 SHOW FULL PROCESSLIST，退回 SHOW PROCESSLIST。
+   * 列名与父类一致，直接复用父类的映射逻辑。
+   */
+  async listProcesses() {
+    try {
+      return await super.listProcesses();
+    } catch (err) {
+      const rows = await this._q('SHOW PROCESSLIST');
+      return rows.map((r) => ({
+        id: String(r.Id), user: r.User || '', db: r.db || '',
+        state: [r.Command, r.State].filter(Boolean).join(' · '),
+        timeSec: Number(r.Time) || 0,
+        info: r.Info || '',
+      }));
+    }
+  }
+
   /** EXPLAIN 返回单列文本计划 */
   async explainPlan(db, sql) {
     const r = await this.exec(db, 'EXPLAIN ' + sql);

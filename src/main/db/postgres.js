@@ -27,8 +27,11 @@ class PostgresAdapter extends BaseAdapter {
     this.defaultDb = this.cfg.database || 'postgres';
     const pool = this._getPool(this.defaultDb);
     const r = await pool.query('SELECT version()');
-    const m = /^PostgreSQL\s+\S+/.exec(r.rows[0].version);
-    this.serverVersion = m ? m[0] : r.rows[0].version.slice(0, 40);
+    // 原始串留给派生适配器识别产品：KingBase / openGauss / Greenplum 的标识都在这里面，
+    // 而下面为了界面显示会把它截断成 "PostgreSQL x.y"，截断后就认不出来了。
+    this.serverVersionRaw = String(r.rows[0].version || '');
+    const m = /^PostgreSQL\s+\S+/.exec(this.serverVersionRaw);
+    this.serverVersion = m ? m[0] : this.serverVersionRaw.slice(0, 40);
     // 数值版本号（如 10.23 → 100023）供目录查询按版本选择写法；
     // server_version_num 自 8.2 就有，取不到时按 0 处理，交由各查询自己降级。
     this.serverVersionNum = 0;

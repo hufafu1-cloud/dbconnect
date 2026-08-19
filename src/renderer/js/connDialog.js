@@ -3,10 +3,11 @@ import { el } from './util.js';
 import { openModal, toast } from './toast.js';
 import { state, emit, reloadConnections } from './state.js';
 import { authorizeOperation } from './danger.js';
-import { TYPE_ORDER, typeLabel, defaultsOf, isFileBased } from './dbTypes.js';
+import { TYPE_ORDER, typeLabel, defaultsOf, isFileBased, isExperimental, typeNote } from './dbTypes.js';
 
 // 类型清单与默认值统一来自 dbTypes.js 注册表，新增类型不改本文件
-const TYPE_NAMES = TYPE_ORDER.map((type) => [type, typeLabel(type)]);
+const TYPE_NAMES = TYPE_ORDER.map((type) =>
+  [type, typeLabel(type) + (isExperimental(type) ? '（实验性）' : '')]);
 
 export function openConnDialog(existing, presetType, presetGroup) {
   const isEdit = !!existing;
@@ -155,7 +156,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       if (t === 'oboracle') {
         addAdvanced('', el('div', { style: { fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6' } },
           '用户名格式：用户@Oracle租户（如 SYS@oracle_t），经 OBProxy 加 #集群名；', el('br'),
-          '初始数据库留空即可（按 Schema 浏览）。Oracle 模式为实验性支持。'));
+          '初始数据库留空即可（按 Schema 浏览）。'));
       }
       if (t === 'clickhouse') {
         f.https = el('input', { type: 'checkbox' });
@@ -166,6 +167,25 @@ export function openConnDialog(existing, presetType, presetGroup) {
           else if (!f.https.checked && f.port.value === '8443') f.port.value = '8123';
         });
         addAdvanced('', el('div', { class: 'form-check' }, f.https, '使用 HTTPS（云服务通常为 8443 端口）'));
+      }
+
+      // ---- 实验性标注与类型提示（表驱动，见 dbTypes.js）----
+      // 未在真实实例上端到端验证过的类型必须让用户提前知道，
+      // 否则连不上时用户会以为是自己配错了。
+      const note = typeNote(t);
+      if (isExperimental(t) || note) {
+        const lines = [];
+        if (isExperimental(t)) {
+          lines.push(el('div', { style: { color: 'var(--orange)', fontWeight: '600' } },
+            '实验性支持：尚未在真实实例上完整验证，遇到问题请反馈。'));
+        }
+        if (note) lines.push(el('div', {}, note));
+        addAdvanced('', el('div', {
+          style: {
+            fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.6',
+            borderTop: '1px solid var(--border-light)', paddingTop: '8px', marginTop: '2px',
+          },
+        }, ...lines));
       }
 
       // ---- SSH 隧道（所有网络型数据库通用） ----

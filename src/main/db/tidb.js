@@ -26,9 +26,18 @@ class TiDBAdapter extends MySQLAdapter {
   /**
    * TiDB 是分布式的：一个连接只落在某个 TiDB 节点上，普通 KILL 只能杀本节点的连接。
    * KILL TIDB 会按全局 connection id 路由到正确的节点。
+   *
+   * 早期版本或某些兼容模式下 KILL TIDB 可能不被识别，此时退回普通 KILL——
+   * 杀不到跨节点的会话，总好过整个"结束会话"按钮直接报错。
    */
   async killProcess(id) {
-    await this.pool.query('KILL TIDB ' + Number(id));
+    const pid = Number(id);
+    try {
+      await this.pool.query('KILL TIDB ' + pid);
+    } catch (err) {
+      if (!/syntax|parse|unknown|unsupported/i.test((err && err.message) || '')) throw err;
+      await this.pool.query('KILL ' + pid);
+    }
   }
 
   async listSequences(db) {

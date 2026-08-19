@@ -27,6 +27,12 @@ const QUOTE = {
  *   schemas        界面按模式（schema）层级组织：树上多一层，查询标签与各对话框提供模式选择
  *   merge          支持生成 MERGE 语句
  *   designer       支持可视化表设计器（建表语法与通用 SQL 差异过大的方言关掉）
+ *
+ * 另有两个可选字段：
+ *   experimental   true 表示尚未在真实实例上端到端验证（或官方不承诺兼容），
+ *                  连接对话框会明确标注，避免用户把未验证当成已验证
+ *   note           该类型的连接提示，显示在对话框里；写"用户需要提前知道的事"，
+ *                  例如 openGauss 必须先改服务端认证参数才能连
  */
 export const DB_TYPES = {
   mysql: {
@@ -111,6 +117,7 @@ export const DB_TYPES = {
     quote: 'double',
     backslashEscape: false,
     // 「数据库」层级实为 Oracle 的 Schema（用户），建删走 CREATE/DROP USER，不提供菜单
+    experimental: true,
     caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, designer: true, merge: true },
   },
   tidb: {
@@ -123,6 +130,8 @@ export const DB_TYPES = {
     quote: 'backtick',
     backslashEscape: true,
     // TiDB 没有存储过程 / 触发器 / 事件，但有序列；这些是运行时能力，由 objectCaps 下发
+    experimental: true,
+    note: 'TiDB 不支持存储过程、触发器与事件调度器；序列为 TiDB 扩展，会单列在「序列」节点下。',
     caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, designer: true, merge: false },
   },
   polardb: {
@@ -135,6 +144,8 @@ export const DB_TYPES = {
     defaults: { port: 3306, user: 'root', database: '' },
     quote: 'backtick',
     backslashEscape: true,
+    experimental: true,
+    note: 'PolarDB 的 MySQL 版对客户端与原生 MySQL 一致；若连接的其实是原生 MySQL，版本处会如实标注。',
     caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, designer: true, merge: false },
   },
   starrocks: {
@@ -147,6 +158,9 @@ export const DB_TYPES = {
     quote: 'backtick',
     backslashEscape: true,
     // OLAP：网格只读、无显式事务、建表需分桶与表属性，故关掉设计器
+    experimental: true,
+    note: 'OLAP 引擎：表数据网格为只读，且不提供可视化表设计器（建表需声明分桶与表属性）。'
+      + '改数据与建表请在查询编辑器中直接写 SQL。',
     caps: { processes: true, manageDatabase: true, transactions: false, schemas: false, designer: false, merge: false },
   },
   doris: {
@@ -159,7 +173,56 @@ export const DB_TYPES = {
     defaults: { port: 9030, user: 'root', database: '' },
     quote: 'backtick',
     backslashEscape: true,
+    experimental: true,
+    note: 'OLAP 引擎：表数据网格为只读，且不提供可视化表设计器（建表需声明分桶与表属性）。'
+      + '改数据与建表请在查询编辑器中直接写 SQL。',
     caps: { processes: true, manageDatabase: true, transactions: false, schemas: false, designer: false, merge: false },
+  },
+  kingbase: {
+    label: '人大金仓 KingbaseES',
+    shortLabel: 'KingbaseES',
+    icon: 'kingbase',
+    dialect: 'postgres',
+    cmMode: 'text/x-pgsql',
+    formatLang: 'postgresql',
+    // KingbaseES 默认端口 54321、超级用户 system、默认库 test，与原生 PostgreSQL 不同
+    defaults: { port: 54321, user: 'system', database: 'test' },
+    quote: 'double',
+    backslashEscape: false,
+    experimental: true,
+    note: '默认端口 54321、超级用户 system、默认库 test，与原生 PostgreSQL 不同。'
+      + '若实例配置为国密 sm3 认证，标准驱动无法握手，需在服务端改用 md5 或 scram-sha-256。',
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: true, designer: true, merge: true },
+  },
+  opengauss: {
+    label: 'openGauss / GaussDB',
+    shortLabel: 'openGauss',
+    icon: 'opengauss',
+    dialect: 'postgres',
+    cmMode: 'text/x-pgsql',
+    formatLang: 'postgresql',
+    defaults: { port: 5432, user: 'gaussdb', database: 'postgres' },
+    quote: 'double',
+    backslashEscape: false,
+    experimental: true,
+    note: '⚠ openGauss 默认的自研 SHA256 认证，标准 PostgreSQL 驱动无法握手。'
+      + '需先在服务端把 password_encryption_type 改为 1、pg_hba.conf 改用 md5，'
+      + '并重设一次用户密码（只改参数不会重算已有口令）。',
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: true, designer: true, merge: true },
+  },
+  greenplum: {
+    label: 'Greenplum',
+    icon: 'greenplum',
+    dialect: 'postgres',
+    cmMode: 'text/x-pgsql',
+    formatLang: 'postgresql',
+    defaults: { port: 5432, user: 'gpadmin', database: 'postgres' },
+    quote: 'double',
+    backslashEscape: false,
+    experimental: true,
+    note: '建表可以不写 DISTRIBUTED BY，Greenplum 会自行选择分布键；'
+      + '对性能敏感的表建议在查询编辑器中显式指定。',
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: true, designer: true, merge: true },
   },
 };
 
@@ -167,6 +230,7 @@ export const DB_TYPES = {
 export const TYPE_ORDER = [
   'mysql', 'postgres', 'sqlite', 'mssql', 'clickhouse',
   'tidb', 'polardb', 'starrocks', 'doris',
+  'kingbase', 'opengauss', 'greenplum',
   'oceanbase', 'oboracle',
 ];
 
@@ -208,6 +272,16 @@ export function formatLangOf(type) {
 
 export function defaultsOf(type) {
   return typeInfo(type).defaults || {};
+}
+
+/** 该类型是否为实验性（未经真机端到端验证，或官方不承诺兼容） */
+export function isExperimental(type) {
+  return !!typeInfo(type).experimental;
+}
+
+/** 该类型的连接提示，没有则返回空串 */
+export function typeNote(type) {
+  return typeInfo(type).note || '';
 }
 
 /** 静态能力位，未知能力名一律按不支持处理 */

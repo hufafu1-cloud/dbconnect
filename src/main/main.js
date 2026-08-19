@@ -270,9 +270,33 @@ app.whenReady().then(async () => {
           const passwordOptionOk = !!(passwordSave && !passwordSave.checked && passwordInput
             && passwordInput.getBoundingClientRect().width >= 180 && passwordOptionFits);
           window.__test.closeMenus();
-          return { textOnly, textInset, iconColumns, databaseIconsOk, formBalanced, formLeft, formRight, passwordOptionOk };
+          // 实验性类型必须在连接对话框里明说未经完整验证：下拉带「（实验性）」后缀，
+          // 且正文出现醒目提醒。未验证的类型如果看起来和已验证的一样，用户连不上时
+          // 会以为是自己配错了。
+          window.__test.openConnDialog('opengauss');
+          const expModal = document.querySelector('.modal');
+          const expSelect = expModal && expModal.querySelector('select');
+          const expSelected = expSelect && expSelect.options[expSelect.selectedIndex];
+          const expText = expModal ? expModal.textContent : '';
+          const experimentalNoticeOk = !!(expSelected && /（实验性）/.test(expSelected.textContent)
+            && /实验性支持：尚未在真实实例上完整验证/.test(expText)
+            && /password_encryption_type/.test(expText));
+          window.__test.closeMenus();
+          // 已验证的类型不应出现这些字样，否则等于所有类型都在喊狼来了
+          window.__test.openConnDialog('mysql');
+          const plainModal = document.querySelector('.modal');
+          const plainText = plainModal ? plainModal.textContent : '';
+          // 注意：不能用裸词「实验性」判断——类型下拉里所有 option 的文本都算进
+          // modal.textContent，其中就包含别的实验性类型。只匹配提醒正文。
+          const plainTypeOk = !/实验性支持：尚未在真实实例上完整验证/.test(plainText);
+          window.__test.closeMenus();
+          return {
+            textOnly, textInset, iconColumns, databaseIconsOk, formBalanced, formLeft, formRight,
+            passwordOptionOk, experimentalNoticeOk, plainTypeOk,
+          };
         })()`);
         const menuOk = menuLayout.textOnly && menuLayout.textInset === 12 && menuLayout.iconColumns;
+        const experimentalOk = menuLayout.experimentalNoticeOk && menuLayout.plainTypeOk;
         const workspaceOk = await win.webContents.executeJavaScript(`(async () => {
           const sql = 'x'.repeat(1200 * 1024);
           const snapshot = { version: 1, savedAt: Date.now(), activeId: 'query-large', context: {}, tabs: [
@@ -825,10 +849,10 @@ app.whenReady().then(async () => {
         const failedSessionRetryPrompt = await win.webContents.executeJavaScript(
           `!!document.querySelector('.password-prompt') && document.querySelector('.modal-head').textContent.includes('Smoke failed session password')`);
         await win.webContents.executeJavaScript('window.__test.closeMenus()');
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
-          && menuLayout.formBalanced && menuLayout.passwordOptionOk
+          && menuLayout.formBalanced && menuLayout.passwordOptionOk && experimentalOk
           && workspaceOk && passwordPromptOk && failedSessionRetryPrompt && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);

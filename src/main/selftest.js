@@ -2748,6 +2748,152 @@ async function runSelfTest() {
     && transfer.valueLiteral(ch, { key: 'value' }, 'Map(String, String)') === "map('key', 'value')"
     && transfer.valueLiteral(ch, { key: 1 }, 'JSON') === "'{\"key\":1}'");
 
+  // ---- MySQL 协议族新类型（TiDB / StarRocks / Doris）的降级路径 ----
+  //
+  // 这些类型没有测试环境，无法连真实实例。但"我对服务端的假设万一错了"这件事本身可以验：
+  // 用假的 _q / pool 模拟服务端拒绝某条 SHOW 或 KILL，断言功能降级而不是整块失效。
+  // 这是没有环境时唯一有意义的验证——保证猜错的代价是"少点信息"而不是"打不开库"。
+  {
+    const { TiDBAdapter } = require('./db/tidb');
+    const { StarRocksAdapter } = require('./db/starrocks');
+    const { DorisAdapter } = require('./db/doris');
+
+    // TiDB：KILL TIDB 不被识别时退回普通 KILL
+    {
+      const ad = new TiDBAdapter({});
+      const issued = [];
+      ad.pool = { query: async (sql) => {
+        issued.push(sql);
+        if (/^KILL TIDB/.test(sql)) throw new Error("You have an error in your SQL syntax near 'TIDB'");
+        return [[], []];
+      } };
+      await ad.killProcess(42);
+      check('TiDB KILL TIDB 不支持时退回普通 KILL',
+        issued.length === 2 && issued[0] === 'KILL TIDB 42' && issued[1] === 'KILL 42', issued.join(' | '));
+
+      // 非语法类错误必须原样抛出，不能悄悄改用普通 KILL 掩盖权限问题
+      const ad2 = new TiDBAdapter({});
+      ad2.pool = { query: async () => { throw new Error('Access denied for user'); } };
+      let denied = false;
+      try { await ad2.killProcess(1); } catch (e) { denied = /Access denied/.test(e.message); }
+      check('TiDB 权限类错误不被降级掩盖', denied);
+    }
+
+    // StarRocks：SHOW FULL TABLES 不被识别时退回 SHOW TABLES
+    {
+      const ad = new StarRocksAdapter({});
+      const asked = [];
+      ad._q = async (sql) => {
+        asked.push(sql);
+        if (/SHOW FULL TABLES/.test(sql)) throw new Error("Unexpected input 'FULL'");
+        if (/^SHOW TABLES/.test(sql)) return [{ Tables_in_db: 'orders' }, { Tables_in_db: 'items' }];
+        throw new Error('unexpected: ' + sql);
+      };
+      const objs = await ad.listObjects('db');
+      check('StarRocks SHOW FULL TABLES 失败时退回 SHOW TABLES',
+        objs.tables.length === 2 && objs.tables[0].name === 'items' && objs.tables[1].name === 'orders',
+        JSON.stringify(objs.tables));
+    }
+
+    // StarRocks：SHOW FULL PROCESSLIST 不被识别时退回 SHOW PROCESSLIST
+    {
+      const ad = new StarRocksAdapter({});
+      ad._q = async (sql) => {
+        if (/FULL PROCESSLIST/.test(sql)) throw new Error("Unexpected input 'FULL'");
+        return [{ Id: 7, User: 'root', db: 'demo', Command: 'Query', Time: 3, Info: 'SELECT 1' }];
+      };
+      const procs = await ad.listProcesses();
+      check('StarRocks 会话列表在 FULL 不支持时仍可用',
+        procs.length === 1 && procs[0].id === '7' && procs[0].timeSec === 3, JSON.stringify(procs));
+    }
+
+    // 版本识别：取不到 current_version() 时不报错，如实标注为兼容版本
+    {
+      const ad = new StarRocksAdapter({});
+      ad.serverVersion = 'MySQL 5.1.0';
+      ad._q = async () => { throw new Error('no such function'); };
+      const v = await ad._detectVersion();
+      check('StarRocks 取不到 current_version 时如实降级', /StarRocks（MySQL 兼容 5\.1\.0）/.test(v), v);
+
+      const dor = new DorisAdapter({});
+      dor._q = async () => [{ Value: 'Doris version doris-2.1.0' }];
+      const dv = await dor._detectVersion();
+      check('Doris 从 version_comment 取版本', dv === 'Doris version doris-2.1.0', dv);
+    }
+
+    // Doris 继承 StarRocks 的 OLAP 约束，不能因为继承链而丢掉
+    {
+      const dor = new DorisAdapter({});
+      check('Doris 网格只读', !!dor.readonlyReason);
+      check('Doris 禁用表设计器', !!dor.designerReason);
+      check('Doris 不支持显式事务', dor.transactionSupport.supported === false);
+      check('Doris 无存储过程/触发器/序列/用户节点',
+        dor.objectCaps.routines === false && dor.objectCaps.triggers === false
+        && dor.objectCaps.sequences === false && dor.objectCaps.users === false);
+      const sr = new StarRocksAdapter({});
+      check('StarRocks 与 Doris 的只读原因各自点名产品',
+        /StarRocks/.test(sr.readonlyReason) && /Doris/.test(dor.readonlyReason));
+    }
+
+    // TiDB 的能力裁剪
+    {
+      const ad = new TiDBAdapter({});
+      check('TiDB 无存储过程/触发器/事件但有序列',
+        ad.objectCaps.routines === false && ad.objectCaps.triggers === false
+        && ad.objectCaps.events === false && ad.objectCaps.sequences === true);
+      check('TiDB 网格可编辑（不是只读 OLAP）', !ad.readonlyReason);
+      check('TiDB 支持表设计器', !ad.designerReason);
+    }
+  }
+
+  // ---- PostgreSQL 协议族（KingbaseES / openGauss / Greenplum）----
+  //
+  // 这三种类型没法在自检里连真实实例，但两件不依赖连接的事必须保证正确：
+  //   1. 版本串识别：产品标识藏在 version() 原串里，父类为了显示会截断，识别不能受影响
+  //   2. 认证失败翻译：openGauss / KingbaseES 用非标准认证时，pg 驱动抛出的原始报错
+  //      用户完全看不懂，必须换成写明改哪个参数的指引；而其它错误绝不能被吞掉
+  {
+    const { OpenGaussAdapter } = require('./db/opengauss');
+    const { KingbaseAdapter } = require('./db/kingbase');
+    const { GreenplumAdapter } = require('./db/greenplum');
+    const og = new OpenGaussAdapter({});
+    const kb = new KingbaseAdapter({});
+    const gp = new GreenplumAdapter({});
+
+    check('openGauss 版本识别',
+      og._formatVersion('(openGauss 5.0.0 build 12345) compiled at 2024') === 'openGauss 5.0.0',
+      og._formatVersion('(openGauss 5.0.0 build 12345) compiled at 2024'));
+    check('GaussDB 版本识别',
+      og._formatVersion('GaussDB Kernel 505.1.0 build abc') === 'GaussDB 505.1.0',
+      og._formatVersion('GaussDB Kernel 505.1.0 build abc'));
+    check('openGauss 连到非 openGauss 时如实标注',
+      /未检出 openGauss 标识/.test(og._formatVersion('PostgreSQL 16.2 on x86_64')));
+    check('KingbaseES 版本识别',
+      kb._formatVersion('KingbaseES V008R006C005B0023 on x86_64') === 'KingbaseES V008R006C005B0023',
+      kb._formatVersion('KingbaseES V008R006C005B0023 on x86_64'));
+    check('Greenplum 版本识别带出内核版本',
+      gp._formatVersion('PostgreSQL 9.4.24 (Greenplum Database 6.25.3 build commit:abc) on x86_64')
+        === 'Greenplum 6.25.3（PostgreSQL 9.4.24 内核）',
+      gp._formatVersion('PostgreSQL 9.4.24 (Greenplum Database 6.25.3 build commit:abc) on x86_64'));
+
+    // 认证失败翻译：pg 驱动实际会抛出的三种签名
+    const authErrors = [
+      'Unknown authenticationOk message type 10',
+      'SASL: Only mechanism(s) SCRAM-SHA-256 are supported',
+      'SASL: SCRAM-SERVER-FIRST-MESSAGE: server nonce is too short',
+    ];
+    let allTranslated = true;
+    for (const message of authErrors) {
+      const out = og._translateAuthError(new Error(message));
+      if (!/password_encryption_type/.test(out.message) || !out.message.includes(message)) allTranslated = false;
+    }
+    check('openGauss 认证失败翻译成可操作指引，且保留原始报错', allTranslated);
+
+    const other = new Error('connect ECONNREFUSED 10.0.0.1:5432');
+    check('openGauss 非认证错误原样抛出，不被吞掉',
+      og._translateAuthError(other) === other);
+  }
+
   // ---- PG 数组 / JSON、MySQL JSON：驱动会把它们解析成 JS 数组或对象。
   //      之前一律报错，导致 PostgreSQL 只要有这类列就无法转储和备份。 ----
   const pgLit = new (require('./db/postgres').PostgresAdapter)({});

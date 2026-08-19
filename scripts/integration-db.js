@@ -38,6 +38,9 @@ const TARGETS = {
   polardb: { prefix: 'POLARDB', port: 3306, user: 'root' },
   starrocks: { prefix: 'STARROCKS', port: 9030, user: 'root' },
   doris: { prefix: 'DORIS', port: 9030, user: 'root' },
+  kingbase: { prefix: 'KINGBASE', port: 54321, user: 'system', database: 'test' },
+  opengauss: { prefix: 'OPENGAUSS', port: 5432, user: 'gaussdb', database: 'postgres' },
+  greenplum: { prefix: 'GREENPLUM', port: 5432, user: 'gpadmin', database: 'postgres' },
 };
 
 const ALIASES = {
@@ -51,6 +54,10 @@ const ALIASES = {
   'oceanbase-oracle': 'oboracle',
   'polardb-mysql': 'polardb',
   sr: 'starrocks',
+  kes: 'kingbase',
+  kingbasees: 'kingbase',
+  gaussdb: 'opengauss',
+  gp: 'greenplum',
 };
 
 function env(name, fallback) {
@@ -581,7 +588,8 @@ function printHelp() {
 
 Environment:
   DB_INTEGRATION_TARGETS  Comma-separated mysql,postgres,mssql,clickhouse,
-                          tidb,polardb,starrocks,doris,oceanbase,oboracle
+                          tidb,polardb,starrocks,doris,kingbase,opengauss,
+                          greenplum,oceanbase,oboracle
                           ("all" means the CI matrix targets)
   DB_INTEGRATION_CRUD     Enable disposable-table CRUD checks (default: 0)
   DB_INTEGRATION_CANCEL   Enable bounded request-scoped cancellation checks (default: 0)

@@ -10,6 +10,9 @@ const { TiDBAdapter } = require('./tidb');
 const { PolarDBAdapter } = require('./polardb');
 const { StarRocksAdapter } = require('./starrocks');
 const { DorisAdapter } = require('./doris');
+const { KingbaseAdapter } = require('./kingbase');
+const { OpenGaussAdapter } = require('./opengauss');
+const { GreenplumAdapter } = require('./greenplum');
 
 const ADAPTERS = {
   mysql: MySQLAdapter,
@@ -23,6 +26,9 @@ const ADAPTERS = {
   polardb: PolarDBAdapter,
   starrocks: StarRocksAdapter,
   doris: DorisAdapter,
+  kingbase: KingbaseAdapter,
+  opengauss: OpenGaussAdapter,
+  greenplum: GreenplumAdapter,
 };
 
 const openMap = new Map(); // connId -> adapter
@@ -69,6 +75,7 @@ async function shutdownAdapter(ad, timeouts = SHUTDOWN_TIMEOUTS) {
 const DEFAULT_PORTS = {
   mysql: 3306, postgres: 5432, mssql: 1433, clickhouse: 8123, oceanbase: 2881, oboracle: 2881,
   tidb: 4000, polardb: 3306, starrocks: 9030, doris: 9030,
+  kingbase: 54321, opengauss: 5432, greenplum: 5432,
 };
 
 function createAdapter(cfg) {
