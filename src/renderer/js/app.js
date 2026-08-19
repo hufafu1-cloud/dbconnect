@@ -832,6 +832,8 @@ function setupTestHooks() {
       if (b) b.click();
       return !!b;
     },
+    // 支持的数据库类型数量：冒烟测试据此断言新建连接菜单项数，不要在测试里写死数字
+    dbTypeCount: () => TYPE_ORDER.length,
     closeMenus: () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       return true;

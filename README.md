@@ -3,7 +3,11 @@
 > **DBPanda** · 以熊猫为主题的专业桌面数据库管理工具
 
 一款可在 Windows 上安装运行的桌面数据库连接管理工具，界面与操作参考 Navicat 设计。
-基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等数据库。
+基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、
+TiDB、PolarDB for MySQL、StarRocks、Apache Doris、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等 11 种数据库。
+
+> StarRocks / Apache Doris 是 OLAP 引擎：支持浏览、查询与导出，网格只读、不提供可视化表设计器
+> （建表需声明分桶与表属性），改数据请直接写 SQL。
 
 ![表数据浏览与编辑](docs/screenshot-table.png)
 

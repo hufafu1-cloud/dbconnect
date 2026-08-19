@@ -244,8 +244,12 @@ app.whenReady().then(async () => {
           const iconItems = [...document.querySelectorAll('.ctx-menu .ctx-item')];
           const iconColumns = iconItems.length > 0 && iconItems.every((item) => item.querySelector('.ctx-icon'));
           const databaseIconMarkup = iconItems.map((item) => item.querySelector('.ctx-icon svg')?.outerHTML || '');
-          const databaseIconsOk = databaseIconMarkup.length === 7
-            && databaseIconMarkup.every(Boolean) && new Set(databaseIconMarkup).size === 7;
+          // 期望项数来自渲染层的类型注册表（dbTypes.js），不写死数字；
+          // 同时要求每项都有图标且各不相同——新增类型忘了配图标会在这里暴露
+          const expectedTypes = window.__test.dbTypeCount();
+          const databaseIconsOk = databaseIconMarkup.length === expectedTypes
+            && databaseIconMarkup.every(Boolean)
+            && new Set(databaseIconMarkup).size === expectedTypes;
           window.__test.closeMenus();
           window.__test.openConnDialog();
           const modal = document.querySelector('.modal');

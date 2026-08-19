@@ -26,6 +26,7 @@ const QUOTE = {
  *   transactions   支持显式事务（关闭者只能自动提交）
  *   schemas        界面按模式（schema）层级组织：树上多一层，查询标签与各对话框提供模式选择
  *   merge          支持生成 MERGE 语句
+ *   designer       支持可视化表设计器（建表语法与通用 SQL 差异过大的方言关掉）
  */
 export const DB_TYPES = {
   mysql: {
@@ -38,7 +39,7 @@ export const DB_TYPES = {
     defaults: { port: 3306, user: 'root', database: '' },
     quote: 'backtick',
     backslashEscape: true,
-    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, merge: false },
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, designer: true, merge: false },
   },
   postgres: {
     label: 'PostgreSQL',
@@ -49,7 +50,7 @@ export const DB_TYPES = {
     defaults: { port: 5432, user: 'postgres', database: 'postgres' },
     quote: 'double',
     backslashEscape: false,
-    caps: { processes: true, manageDatabase: true, transactions: true, schemas: true, merge: true },
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: true, designer: true, merge: true },
   },
   sqlite: {
     label: 'SQLite',
@@ -63,7 +64,7 @@ export const DB_TYPES = {
     // 单文件数据库，没有「数据库」层级，固定用 main
     fixedDatabase: 'main',
     fileBased: true,
-    caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, merge: false },
+    caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, designer: true, merge: false },
   },
   mssql: {
     label: 'SQL Server',
@@ -74,7 +75,7 @@ export const DB_TYPES = {
     defaults: { port: 1433, user: 'sa', database: 'master' },
     quote: 'bracket',
     backslashEscape: false,
-    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, merge: true },
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, designer: true, merge: true },
   },
   clickhouse: {
     label: 'ClickHouse',
@@ -85,7 +86,7 @@ export const DB_TYPES = {
     defaults: { port: 8123, user: 'default', database: 'default' },
     quote: 'backtick',
     backslashEscape: true,
-    caps: { processes: true, manageDatabase: true, transactions: false, schemas: false, merge: false },
+    caps: { processes: true, manageDatabase: true, transactions: false, schemas: false, designer: true, merge: false },
   },
   oceanbase: {
     label: 'OceanBase (MySQL 模式)',
@@ -97,7 +98,7 @@ export const DB_TYPES = {
     defaults: { port: 2881, user: 'root@sys', database: '' },
     quote: 'backtick',
     backslashEscape: true,
-    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, merge: false },
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, designer: true, merge: false },
   },
   oboracle: {
     label: 'OceanBase (Oracle 模式)',
@@ -110,12 +111,64 @@ export const DB_TYPES = {
     quote: 'double',
     backslashEscape: false,
     // 「数据库」层级实为 Oracle 的 Schema（用户），建删走 CREATE/DROP USER，不提供菜单
-    caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, merge: true },
+    caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, designer: true, merge: true },
+  },
+  tidb: {
+    label: 'TiDB',
+    icon: 'tidb',
+    dialect: 'mysql',
+    cmMode: 'text/x-mysql',
+    formatLang: 'mysql',
+    defaults: { port: 4000, user: 'root', database: '' },
+    quote: 'backtick',
+    backslashEscape: true,
+    // TiDB 没有存储过程 / 触发器 / 事件，但有序列；这些是运行时能力，由 objectCaps 下发
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, designer: true, merge: false },
+  },
+  polardb: {
+    label: 'PolarDB for MySQL',
+    shortLabel: 'PolarDB',
+    icon: 'polardb',
+    dialect: 'mysql',
+    cmMode: 'text/x-mysql',
+    formatLang: 'mysql',
+    defaults: { port: 3306, user: 'root', database: '' },
+    quote: 'backtick',
+    backslashEscape: true,
+    caps: { processes: true, manageDatabase: true, transactions: true, schemas: false, designer: true, merge: false },
+  },
+  starrocks: {
+    label: 'StarRocks',
+    icon: 'starrocks',
+    dialect: 'mysql',
+    cmMode: 'text/x-mysql',
+    formatLang: 'mysql',
+    defaults: { port: 9030, user: 'root', database: '' },
+    quote: 'backtick',
+    backslashEscape: true,
+    // OLAP：网格只读、无显式事务、建表需分桶与表属性，故关掉设计器
+    caps: { processes: true, manageDatabase: true, transactions: false, schemas: false, designer: false, merge: false },
+  },
+  doris: {
+    label: 'Apache Doris',
+    shortLabel: 'Doris',
+    icon: 'doris',
+    dialect: 'mysql',
+    cmMode: 'text/x-mysql',
+    formatLang: 'mysql',
+    defaults: { port: 9030, user: 'root', database: '' },
+    quote: 'backtick',
+    backslashEscape: true,
+    caps: { processes: true, manageDatabase: true, transactions: false, schemas: false, designer: false, merge: false },
   },
 };
 
 /** 新建连接菜单与连接对话框的类型顺序 */
-export const TYPE_ORDER = ['mysql', 'postgres', 'sqlite', 'mssql', 'clickhouse', 'oceanbase', 'oboracle'];
+export const TYPE_ORDER = [
+  'mysql', 'postgres', 'sqlite', 'mssql', 'clickhouse',
+  'tidb', 'polardb', 'starrocks', 'doris',
+  'oceanbase', 'oboracle',
+];
 
 const FALLBACK = DB_TYPES.mysql;
 

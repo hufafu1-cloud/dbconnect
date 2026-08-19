@@ -74,6 +74,18 @@ export const icons = {
   oboracle: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#e9572b"/>
     <circle cx="5.1" cy="8" r="2.45" stroke="#fff" stroke-width="1.45"/>
     <path d="M9 5.5v5M9 5.5h1.6a1.35 1.35 0 0 1 0 2.7H9m0 0h1.9a1.4 1.4 0 0 1 0 2.8H9" stroke="#fff" stroke-width="1.25" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`),
+  tidb: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#0c4c8f"/>
+    <path d="M8 3.1 12.5 5.7v5.2L8 13.5 3.5 10.9V5.7z" stroke="#fff" stroke-width="1.15" fill="none" stroke-linejoin="round"/>
+    <path d="M8 3.1v10.4M3.5 5.7 8 8.3l4.5-2.6" stroke="#fff" stroke-width=".9" fill="none" stroke-linejoin="round"/>`),
+  polardb: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#ff6a00"/>
+    <ellipse cx="8" cy="4.6" rx="4.3" ry="1.8" fill="#fff"/>
+    <path d="M3.7 4.6v6.8c0 1 1.9 1.8 4.3 1.8s4.3-.8 4.3-1.8V4.6" stroke="#fff" stroke-width="1.3" fill="none"/>
+    <path d="M3.7 8c0 1 1.9 1.8 4.3 1.8s4.3-.8 4.3-1.8" stroke="#fff" stroke-width="1.05" fill="none"/>`),
+  starrocks: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#00b0ff"/>
+    <path d="m8 2.7 1.55 3.35L13 6.5l-2.6 2.35.72 3.5L8 10.55 4.88 12.35l.72-3.5L3 6.5l3.45-.45z" fill="#fff"/>`),
+  doris: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#1d63ed"/>
+    <path d="M4.1 11.6V4.4h3.1c2.3 0 3.8 1.4 3.8 3.6s-1.5 3.6-3.8 3.6z" fill="#fff"/>
+    <circle cx="7.1" cy="8" r="1.35" fill="#1d63ed"/>`),
   connection: cylinder('#5b6470'),
   database: svg(`<ellipse cx="8" cy="3.8" rx="5.4" ry="2.2" fill="#3fa34d"/>
     <path d="M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8" stroke="#3fa34d" stroke-width="1.6"/>

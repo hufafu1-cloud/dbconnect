@@ -53,7 +53,7 @@ check(diff(orderTypes.slice().sort(), rendererTypes).length === 0,
 
 // ---- 字段完整性 ----
 const REQUIRED = ['label', 'icon', 'dialect', 'cmMode', 'formatLang', 'defaults', 'quote', 'backslashEscape', 'caps'];
-const REQUIRED_CAPS = ['processes', 'manageDatabase', 'transactions', 'schemas', 'merge'];
+const REQUIRED_CAPS = ['processes', 'manageDatabase', 'transactions', 'schemas', 'designer', 'merge'];
 const VALID_QUOTES = ['backtick', 'bracket', 'double'];
 
 for (const type of rendererTypes) {
@@ -97,8 +97,10 @@ if (portsMatch) {
 }
 
 // ---- 反向守卫：能力已经收敛，就不该再出现散落的类型硬编码数组 ----
+// 类型名单从注册表自动派生，避免这条守卫自己变成又一处需要手工同步的硬编码。
 const RENDERER_DIR = path.join(ROOT, 'src/renderer/js');
-const BANNED = /\[\s*'(?:mysql|postgres|sqlite|mssql|clickhouse|oceanbase|oboracle)'\s*,\s*'(?:mysql|postgres|sqlite|mssql|clickhouse|oceanbase|oboracle)'/;
+const typeAlt = rendererTypes.join('|');
+const BANNED = new RegExp(`\\[\\s*'(?:${typeAlt})'\\s*,\\s*'(?:${typeAlt})'`);
 for (const file of fs.readdirSync(RENDERER_DIR).filter((f) => f.endsWith('.js') && f !== 'dbTypes.js')) {
   const text = fs.readFileSync(path.join(RENDERER_DIR, file), 'utf8');
   check(!BANNED.test(text),

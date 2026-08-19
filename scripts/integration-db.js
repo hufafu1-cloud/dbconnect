@@ -4,6 +4,14 @@
 //
 // Select targets explicitly:
 //   DB_INTEGRATION_TARGETS=mysql,postgres,mssql,clickhouse node scripts/integration-db.js
+//
+// TiDB / PolarDB / StarRocks / Doris 也已登记（TIDB_HOST / POLARDB_HOST / STARROCKS_HOST /
+// DORIS_HOST 等），但没有进 CI 矩阵：GitHub 的 service container 不能覆盖镜像启动命令，
+// 而这三者单机起来都需要改命令（TiDB 要 --store=unistore，StarRocks / Doris 的 all-in-one
+// 镜像要跑自带启动脚本并暴露多个端口）。请指向自己的实例手动验证，例如：
+//   DB_INTEGRATION_TARGETS=tidb TIDB_HOST=127.0.0.1 node scripts/integration-db.js
+// StarRocks / Doris 建议只跑元数据检查（不要设 DB_INTEGRATION_CRUD），
+// 它们的建表语法与通用 CRUD 用例不兼容。
 // Or enable/detect individual targets with MYSQL_ENABLED=1 / MYSQL_HOST=...
 // (the same convention applies to POSTGRES, MSSQL, CLICKHOUSE, OCEANBASE and OBORACLE).
 // Credentials are read only from <PREFIX>_{HOST,PORT,USER,PASSWORD,DATABASE}.
@@ -26,6 +34,10 @@ const TARGETS = {
   clickhouse: { prefix: 'CLICKHOUSE', port: 8123, user: 'default', database: 'default' },
   oceanbase: { prefix: 'OCEANBASE', port: 2881, user: 'root@sys' },
   oboracle: { prefix: 'OBORACLE', port: 2881, user: 'SYS' },
+  tidb: { prefix: 'TIDB', port: 4000, user: 'root' },
+  polardb: { prefix: 'POLARDB', port: 3306, user: 'root' },
+  starrocks: { prefix: 'STARROCKS', port: 9030, user: 'root' },
+  doris: { prefix: 'DORIS', port: 9030, user: 'root' },
 };
 
 const ALIASES = {
@@ -37,6 +49,8 @@ const ALIASES = {
   obmysql: 'oceanbase',
   'oceanbase-mysql': 'oceanbase',
   'oceanbase-oracle': 'oboracle',
+  'polardb-mysql': 'polardb',
+  sr: 'starrocks',
 };
 
 function env(name, fallback) {
@@ -567,7 +581,8 @@ function printHelp() {
 
 Environment:
   DB_INTEGRATION_TARGETS  Comma-separated mysql,postgres,mssql,clickhouse,
-                          oceanbase,oboracle ("all" means the first four)
+                          tidb,polardb,starrocks,doris,oceanbase,oboracle
+                          ("all" means the CI matrix targets)
   DB_INTEGRATION_CRUD     Enable disposable-table CRUD checks (default: 0)
   DB_INTEGRATION_CANCEL   Enable bounded request-scoped cancellation checks (default: 0)
   DB_INTEGRATION_RETRIES  Connection attempts (default: 15)

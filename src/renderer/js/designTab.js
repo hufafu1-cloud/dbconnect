@@ -744,6 +744,14 @@ export function openDesignTab(target, opts = {}) {
   tab.workspaceReady = (async () => {
     try {
       meta = await window.api.design.meta(target.connId);
+      // 兜底：工作区恢复等路径不经 actions 的入口检查，这里按主进程给的权威结论再挡一次
+      if (meta && meta.designerReason) {
+        tab.pane.innerHTML = '';
+        tab.pane.append(el('div', {
+          style: { padding: '24px', color: 'var(--text-muted)', whiteSpace: 'pre-wrap', lineHeight: '1.7' },
+        }, meta.designerReason));
+        return;
+      }
       const recoveredModel = restoreState && restoreState.model
         && Array.isArray(restoreState.model.columns) ? JSON.parse(JSON.stringify(restoreState.model)) : null;
       const restoreDirty = !!(restoreState && restoreState.dirty);

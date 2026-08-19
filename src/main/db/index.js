@@ -6,6 +6,10 @@ const { MSSQLAdapter } = require('./mssql');
 const { ClickHouseAdapter } = require('./clickhouse');
 const { OceanBaseAdapter } = require('./oceanbase');
 const { OBOracleAdapter } = require('./oboracle');
+const { TiDBAdapter } = require('./tidb');
+const { PolarDBAdapter } = require('./polardb');
+const { StarRocksAdapter } = require('./starrocks');
+const { DorisAdapter } = require('./doris');
 
 const ADAPTERS = {
   mysql: MySQLAdapter,
@@ -15,6 +19,10 @@ const ADAPTERS = {
   clickhouse: ClickHouseAdapter,
   oceanbase: OceanBaseAdapter,
   oboracle: OBOracleAdapter,
+  tidb: TiDBAdapter,
+  polardb: PolarDBAdapter,
+  starrocks: StarRocksAdapter,
+  doris: DorisAdapter,
 };
 
 const openMap = new Map(); // connId -> adapter
@@ -58,7 +66,10 @@ async function shutdownAdapter(ad, timeouts = SHUTDOWN_TIMEOUTS) {
   }
 }
 
-const DEFAULT_PORTS = { mysql: 3306, postgres: 5432, mssql: 1433, clickhouse: 8123, oceanbase: 2881, oboracle: 2881 };
+const DEFAULT_PORTS = {
+  mysql: 3306, postgres: 5432, mssql: 1433, clickhouse: 8123, oceanbase: 2881, oboracle: 2881,
+  tidb: 4000, polardb: 3306, starrocks: 9030, doris: 9030,
+};
 
 function createAdapter(cfg) {
   const Cls = ADAPTERS[cfg.type];

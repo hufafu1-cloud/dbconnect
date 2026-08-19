@@ -779,7 +779,12 @@ function register(getWin) {
   // ---- 表设计器 ----
   h('design:meta', (a) => {
     const ad = dbm.get(a.connId);
-    return { dialect: ad.dialect, types: ddl.typeOptions(ad.dialect), caps: ddl.caps(ad.dialect) };
+    return {
+      dialect: ad.dialect,
+      types: ddl.typeOptions(ad.dialect),
+      caps: ddl.caps(ad.dialect),
+      designerReason: ad.designerReason || null,
+    };
   });
   h('design:model', async (a) => {
     const ad = dbm.get(a.connId);

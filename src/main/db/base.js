@@ -24,6 +24,13 @@ class BaseAdapter {
   /** 非空时强制网格只读，并在界面显示该原因 */
   get readonlyReason() { return null; }
 
+  /**
+   * 非空时禁用可视化表设计器，并在界面显示该原因。
+   * 用于建表语法与通用 SQL 差异过大、生成出来必然执行失败的方言（如 StarRocks / Doris
+   * 必须声明分桶与表属性）。宁可明确不支持，也不要生成一段跑不通的 DDL。
+   */
+  get designerReason() { return null; }
+
   /** 无主键表可用于唯一定位行的系统列名（如 PostgreSQL 的 ctid）；null 表示不支持 */
   async rowIdFor(_db, _schema, _table) { return null; }
 

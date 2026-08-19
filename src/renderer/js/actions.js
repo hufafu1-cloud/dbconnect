@@ -7,16 +7,32 @@ import { openQueryTab } from './queryTab.js';
 import { openDesignTab } from './designTab.js';
 import { openImportWizard } from './importWizard.js';
 import { authorizeOperation } from './danger.js';
-import { hasCap } from './dbTypes.js';
+import { hasCap, typeLabel } from './dbTypes.js';
 
 export function openTable(target) { openTableTab(target); }
+/**
+ * 该连接类型是否支持可视化表设计器。不支持时给出明确提示而不是打开一个空标签页——
+ * 权威判断在主进程适配器的 designerReason（designTab 会再挡一次），
+ * 这里只是让用户少一次无效点击。
+ */
+function designerBlocked(connId) {
+  const conn = state.connections.find((item) => item.id === connId);
+  if (conn && !hasCap(conn.type, 'designer')) {
+    toast.info(`${typeLabel(conn.type)} 的建表语法与通用 SQL 差异过大，不提供可视化表设计器。\n请在查询编辑器中直接编写 DDL。`);
+    return true;
+  }
+  return false;
+}
+
 /** 表 → 可编辑设计器；视图 → 只读定义查看 */
 export function designTable(target, isView) {
-  if (isView) openStructTab(target);
-  else openDesignTab(target);
+  if (isView) { openStructTab(target); return; }   // 查看定义是只读的，各类型都支持
+  if (designerBlocked(target && target.connId)) return;
+  openDesignTab(target);
 }
 export function newTable(target) {
   if (!target || !state.open.has(target.connId)) { toast.info('请先打开一个连接'); return; }
+  if (designerBlocked(target.connId)) return;
   openDesignTab({ connId: target.connId, db: target.db, schema: target.schema });
 }
 export function importTable(target) { openImportWizard(target); }
