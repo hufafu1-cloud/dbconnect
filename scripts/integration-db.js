@@ -41,6 +41,7 @@ const TARGETS = {
   kingbase: { prefix: 'KINGBASE', port: 54321, user: 'system', database: 'test' },
   opengauss: { prefix: 'OPENGAUSS', port: 5432, user: 'gaussdb', database: 'postgres' },
   greenplum: { prefix: 'GREENPLUM', port: 5432, user: 'gpadmin', database: 'postgres' },
+  oracle: { prefix: 'ORACLE', port: 1521, user: 'system', database: 'FREEPDB1' },
 };
 
 const ALIASES = {
@@ -58,6 +59,7 @@ const ALIASES = {
   kingbasees: 'kingbase',
   gaussdb: 'opengauss',
   gp: 'greenplum',
+  ora: 'oracle',
 };
 
 function env(name, fallback) {
@@ -141,6 +143,11 @@ function buildConfig(type) {
   return config;
 }
 
+/** 原生 Oracle 与 OceanBase Oracle 模式共用 Oracle 方言，特例判断必须覆盖两者 */
+function isOracleDialect(type) {
+  return type === 'oboracle' || type === 'oracle';
+}
+
 function safeError(error, password) {
   let message = error && error.message ? error.message : String(error);
   if (password) message = message.split(password).join('[redacted]');
@@ -196,14 +203,18 @@ function findField(row, name) {
 }
 
 function probeDatabase(type, config, databases) {
-  if (config.database) {
-    return databases.find((name) => String(name).toLowerCase() === String(config.database).toLowerCase())
-      || config.database;
-  }
-  if (type === 'oboracle') {
+  // Oracle 方言必须先判：原生 Oracle 的 config.database 是**连接串里的服务名/SID**，
+  // 不是可浏览的 Schema。若按下面的通用分支把它当库名，
+  // ALTER SESSION SET CURRENT_SCHEMA = "FREEPDB1" 会直接 ORA-01435。
+  // Oracle 的"库"层级等于 Schema（用户），因此优先用登录用户自己的 Schema。
+  if (isOracleDialect(type)) {
     const user = String(config.user || '').split('@')[0];
     const ownSchema = databases.find((name) => String(name).toLowerCase() === user.toLowerCase());
     if (ownSchema) return ownSchema;
+  }
+  if (config.database) {
+    return databases.find((name) => String(name).toLowerCase() === String(config.database).toLowerCase())
+      || config.database;
   }
   const nonSystem = databases.find((name) => ![
     'information_schema', 'mysql', 'performance_schema', 'sys', 'system',
@@ -244,6 +255,7 @@ function rowLimitSql(type) {
     case 'clickhouse':
       return 'SELECT number + 1 AS dbpanda_probe FROM numbers(5) ORDER BY dbpanda_probe';
     case 'oboracle':
+    case 'oracle':
       return 'SELECT LEVEL AS "dbpanda_probe" FROM dual CONNECT BY LEVEL <= 5 ORDER BY LEVEL';
     default:
       return 'SELECT dbpanda_probe FROM (SELECT 1 AS dbpanda_probe UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5) AS dbpanda_rows ORDER BY dbpanda_probe';
@@ -289,6 +301,11 @@ function cancellationSql(type) {
     case 'postgres': return 'SELECT pg_sleep(5) AS dbpanda_cancel_probe';
     case 'mssql': return "WAITFOR DELAY '00:00:05'; SELECT 1 AS dbpanda_cancel_probe";
     case 'clickhouse': return 'SELECT sleep(3) AS dbpanda_cancel_probe';
+    // Oracle 没有免权限的 SLEEP（DBMS_LOCK/DBMS_SESSION 都要额外授权），
+    // 用一个 CPU 密集的笛卡尔积代替；不用 CONNECT BY 是因为大计数会 ORA-30009。
+    case 'oracle':
+      return 'SELECT COUNT(*) AS "dbpanda_cancel_probe" FROM all_objects a, all_objects b, all_objects c'
+        + ' WHERE ROWNUM <= 200000000';
     default: return null;
   }
 }
@@ -346,7 +363,7 @@ async function cancellationCheck(adapter, type, database) {
 }
 
 async function baselineSelect(adapter, type, database) {
-  const sql = type === 'oboracle'
+  const sql = isOracleDialect(type)
     ? 'SELECT 1 AS "dbpanda_probe" FROM dual'
     : 'SELECT 1 AS dbpanda_probe';
   const rows = resultRows(await adapter.exec(database, sql), 'baseline SELECT');
@@ -406,6 +423,9 @@ async function exportCheck(adapter, type, database, tableName) {
       const offsetAt = String(findField(first, 'offset_at'));
       assert(offsetAt.includes('1234567'), 'SQL Server DATETIMEOFFSET export lost precision');
       assert(offsetAt.includes('+08:00'), 'SQL Server DATETIMEOFFSET export lost its source offset');
+    } else if (type === 'oracle') {
+      assert(String(findField(first, 'exact_num')) === '12345678901234567890.123456789012345678', 'Oracle NUMBER export lost precision');
+      assert(String(findField(first, 'exact_time')).includes('123456'), 'Oracle TIMESTAMP export lost sub-millisecond precision');
     } else if (type === 'clickhouse') {
       assert(String(findField(first, 'exact_num')) === '12345678901234567890.123456789012345678', 'ClickHouse Decimal export lost precision');
       assert(String(findField(first, 'wide_id')) === '9007199254740993', 'ClickHouse UInt64 export lost precision');
@@ -434,6 +454,11 @@ function crudPlan(type, adapter, database, name) {
   } else if (type === 'oboracle') {
     create = `CREATE TABLE ${table} (${id} NUMBER(10) NOT NULL PRIMARY KEY, ${note} VARCHAR2(100) NOT NULL)`;
     drop = `DROP TABLE ${table}`;
+  } else if (type === 'oracle') {
+    // NUMBER(38,18) 与 TIMESTAMP(6)：验证驱动层没有把精度提前丢掉
+    create = `CREATE TABLE ${table} (${id} NUMBER(10) NOT NULL PRIMARY KEY, ${note} VARCHAR2(100) NOT NULL, `
+      + 'exact_num NUMBER(38,18), exact_time TIMESTAMP(6))';
+    drop = `DROP TABLE ${table}`;
   } else if (type === 'postgres') {
     create = `CREATE TABLE ${table} (${id} INT NOT NULL PRIMARY KEY, ${note} VARCHAR(100) NOT NULL, payload JSONB, exact_num NUMERIC(38,18), exact_nums NUMERIC[], exact_times TIMESTAMP(6)[])`;
   } else if (type === 'mysql' || type === 'oceanbase') {
@@ -443,7 +468,13 @@ function crudPlan(type, adapter, database, name) {
   }
 
   let insert;
-  if (type === 'oboracle') {
+  if (type === 'oracle') {
+    insert = `INSERT INTO ${table} (${id}, ${note}, exact_num, exact_time) `
+      + "SELECT 1, 'alpha', 12345678901234567890.123456789012345678, "
+      + "TO_TIMESTAMP('2024-01-02 03:04:05.123456', 'YYYY-MM-DD HH24:MI:SS.FF6') FROM dual "
+      + "UNION ALL SELECT 2, 'beta', -0.000000000000000001, "
+      + "TO_TIMESTAMP('2024-01-02 03:04:05.000000', 'YYYY-MM-DD HH24:MI:SS.FF6') FROM dual";
+  } else if (type === 'oboracle') {
     insert = `INSERT INTO ${table} (${id}, ${note}) SELECT 1, 'alpha' FROM dual UNION ALL SELECT 2, 'beta' FROM dual`;
   } else if (type === 'mysql' || type === 'oceanbase') {
     insert = `INSERT INTO ${table} (${id}, ${note}, payload, exact_num) VALUES `
@@ -555,7 +586,10 @@ async function runTarget(type, globalCrud, globalCancel, attempts, retryMs) {
   try {
     adapter = await connectWithRetry(type, config, attempts, retryMs);
     console.log(`[${type}] connected: ${adapter.serverVersion || 'version unavailable'}`);
-    await baselineSelect(adapter, type, config.database);
+    // Oracle 的 config.database 是连接串里的服务名/SID，不是可切换的 Schema，
+    // 传给按库执行的接口会变成 ALTER SESSION SET CURRENT_SCHEMA = "服务名" 而 ORA-01435。
+    // 首次探针不指定库，让驱动用登录用户自己的默认 Schema。
+    await baselineSelect(adapter, type, isOracleDialect(type) ? null : config.database);
     console.log(`[${type}] baseline SELECT passed`);
     const metadata = await metadataCheck(adapter, type, config);
     console.log(`[${type}] metadata passed (${metadata.databases} databases, ${metadata.schemas} schemas, ${metadata.objects.tables.length} tables)`);
@@ -589,7 +623,7 @@ function printHelp() {
 Environment:
   DB_INTEGRATION_TARGETS  Comma-separated mysql,postgres,mssql,clickhouse,
                           tidb,polardb,starrocks,doris,kingbase,opengauss,
-                          greenplum,oceanbase,oboracle
+                          greenplum,oracle,oceanbase,oboracle
                           ("all" means the CI matrix targets)
   DB_INTEGRATION_CRUD     Enable disposable-table CRUD checks (default: 0)
   DB_INTEGRATION_CANCEL   Enable bounded request-scoped cancellation checks (default: 0)

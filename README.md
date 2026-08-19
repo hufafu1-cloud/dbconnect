@@ -5,7 +5,7 @@
 一款可在 Windows 上安装运行的桌面数据库连接管理工具，界面与操作参考 Navicat 设计。
 基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、
 TiDB、PolarDB for MySQL、StarRocks、Apache Doris、人大金仓 KingbaseES、openGauss / GaussDB、
-Greenplum、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等 14 种数据库。
+Greenplum、Oracle、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等 15 种数据库。
 
 > - StarRocks / Apache Doris 是 OLAP 引擎：支持浏览、查询与导出，网格只读、不提供可视化表设计器
 >   （建表需声明分桶与表属性），改数据请直接写 SQL。
@@ -13,6 +13,8 @@ Greenplum、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等 14 种�
 > - **openGauss / GaussDB 需要服务端配合**：其默认的自研 SHA256 认证标准驱动无法握手，
 >   需将 `password_encryption_type` 改为 1、`pg_hba.conf` 改用 md5 并重设一次密码。
 >   连接失败时应用会直接给出这段指引，不会只丢一句看不懂的驱动报错。
+> - **Oracle 无需安装 Instant Client**：使用 oracledb 的 Thin 模式（纯 JS 实现 Oracle 线协议）。
+>   连接时「数据库」处填服务名或 SID，两者连接串写法不同，可在对话框中切换。
 
 ![表数据浏览与编辑](docs/screenshot-table.png)
 

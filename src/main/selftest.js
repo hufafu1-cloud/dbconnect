@@ -2748,6 +2748,88 @@ async function runSelfTest() {
     && transfer.valueLiteral(ch, { key: 'value' }, 'Map(String, String)') === "map('key', 'value')"
     && transfer.valueLiteral(ch, { key: 1 }, 'JSON') === "'{\"key\":1}'");
 
+  // ---- 原生 Oracle（oracledb Thin 模式）----
+  //
+  // 方言层与 OceanBase Oracle 模式共用 oracleBase.js，已有 obo 的用例覆盖。
+  // 这里只验传输层里最容易出错、且不需要真实实例就能验的三件事：
+  //   1. Thin 模式不加载原生模块（否则 Electron 打包必炸）
+  //   2. 连接串：服务名与 SID 的写法完全不同，猜错直接 ORA-12514/12505
+  //   3. 事务哨兵：Oracle 没有 SET AUTOCOMMIT，事务靠驱动的 autoCommit 开关
+  {
+    const oracledb = require('oracledb');
+    const { OracleAdapter, TXN_BEGIN, TXN_END } = require('./db/oracle');
+
+    check('oracledb 处于 Thin 模式（不需要 Instant Client / 原生模块）', oracledb.thin === true);
+    check('oracle 注册', createAdapter({ type: 'oracle', host: 'x', database: 'ORCL' }) instanceof OracleAdapter);
+
+    // 连接串
+    const svc = new OracleAdapter({ host: 'db.example.com', port: 1521, database: 'ORCLPDB1' });
+    check('Oracle 服务名走 EZConnect', svc._connectString() === 'db.example.com:1521/ORCLPDB1',
+      svc._connectString());
+    const sid = new OracleAdapter({
+      host: 'db.example.com', port: 1521, database: 'ORCL', options: { connectType: 'sid' },
+    });
+    check('Oracle SID 展开成完整 DESCRIPTION',
+      sid._connectString() === '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))',
+      sid._connectString());
+    let missingName = false;
+    try { new OracleAdapter({ host: 'h' })._connectString(); } catch (e) { missingName = /服务名或 SID/.test(e.message); }
+    check('Oracle 未填服务名/SID 时明确报错', missingName);
+
+    // 方言：与 OB Oracle 模式一致
+    const ora = new OracleAdapter({});
+    check('Oracle 方言', ora.dialect === 'oracle');
+    check('Oracle quoteIdent', ora.quoteIdent('a"b') === '"a""b"');
+    check('Oracle 限定名', ora.qualify('SCOTT', null, 'EMP') === '"SCOTT"."EMP"');
+    check('Oracle 屏蔽建库（Schema 即用户）', await (async () => {
+      try { await ora.action(null, { action: 'createDatabase', newName: 'x' }); return false; }
+      catch (e) { return /CREATE USER/.test(e.message); }
+    })());
+
+    // 事务哨兵：不能把 SET AUTOCOMMIT 发给 Oracle（ORA-00900）
+    check('Oracle 事务开关不使用 SET AUTOCOMMIT',
+      !ora._transactionBeginSqls().some((x) => /AUTOCOMMIT/i.test(x))
+      && !ora._transactionCleanupSqls().some((x) => /AUTOCOMMIT/i.test(x)));
+    check('OB Oracle 仍使用 SET AUTOCOMMIT（MySQL 线协议可用）',
+      obo._transactionBeginSqls().join() === 'SET AUTOCOMMIT = 0');
+
+    // 哨兵只翻转标记、不发往服务端；事务期间 autoCommit 必须关闭
+    {
+      const executed = [];
+      const fakeConn = {
+        execute: async (sql, binds, opts) => {
+          executed.push({ sql, autoCommit: opts.autoCommit });
+          return { rowsAffected: 1 };
+        },
+      };
+      await ora._run(fakeConn, TXN_BEGIN);
+      await ora._run(fakeConn, 'UPDATE t SET a = 1');
+      await ora._run(fakeConn, 'COMMIT');
+      await ora._run(fakeConn, TXN_END);
+      await ora._run(fakeConn, 'UPDATE t SET a = 2');
+      check('Oracle 事务哨兵不发往服务端',
+        executed.length === 3 && !executed.some((x) => /dbpanda/.test(x.sql)), executed.map((x) => x.sql));
+      check('Oracle 事务期间关闭 autoCommit、结束后恢复',
+        executed[0].autoCommit === false && executed[1].autoCommit === false
+        && executed[2].autoCommit === true,
+        executed.map((x) => `${x.sql}:${x.autoCommit}`));
+    }
+
+    // 结果映射：有 metaData 视为结果集，无则视为 DML
+    {
+      const fakeConn = {
+        execute: async (sql) => (/^SELECT/i.test(sql)
+          ? { metaData: [{ name: 'ID' }, { name: 'NAME' }], rows: [[1, 'a']] }
+          : { rowsAffected: 7 }),
+      };
+      const q = await ora._run(fakeConn, 'SELECT 1 FROM dual');
+      check('Oracle 结果集映射列与行',
+        q.columns.map((c) => c.name).join() === 'ID,NAME' && q.rows[0][1] === 'a', JSON.stringify(q));
+      const d = await ora._run(fakeConn, 'DELETE FROM t');
+      check('Oracle DML 返回影响行数', d.affected === 7, JSON.stringify(d));
+    }
+  }
+
   // ---- MySQL 协议族新类型（TiDB / StarRocks / Doris）的降级路径 ----
   //
   // 这些类型没有测试环境，无法连真实实例。但"我对服务端的假设万一错了"这件事本身可以验：

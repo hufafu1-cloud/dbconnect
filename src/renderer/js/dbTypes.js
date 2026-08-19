@@ -224,6 +224,24 @@ export const DB_TYPES = {
       + '对性能敏感的表建议在查询编辑器中显式指定。',
     caps: { processes: true, manageDatabase: true, transactions: true, schemas: true, designer: true, merge: true },
   },
+  oracle: {
+    label: 'Oracle',
+    icon: 'oracle',
+    dialect: 'oracle',
+    cmMode: 'text/x-plsql',
+    formatLang: 'plsql',
+    // 「数据库」字段填的是服务名或 SID，由高级选项里的单选决定
+    defaults: { port: 1521, user: 'system', database: 'ORCL' },
+    quote: 'double',
+    backslashEscape: false,
+    // 已在 Oracle Free 23ai 上跑通完整集成测试（连接 / 元数据 / CRUD / 原始导出 / 取消），
+    // 是本轮生态扩展中唯一经过真机端到端验证的类型，因此不标实验性。
+    note: '「数据库」处填服务名（默认）或 SID，可在下方切换。'
+      + '使用 oracledb 的 Thin 模式，无需安装 Oracle Instant Client。'
+      + '注意：查询结果中的时间戳最高毫秒精度（驱动限制），整表导出为完整精度。',
+    // 「数据库」层级实为 Schema（用户），建删走 CREATE/DROP USER，不提供菜单
+    caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, designer: true, merge: true },
+  },
 };
 
 /** 新建连接菜单与连接对话框的类型顺序 */
@@ -231,7 +249,7 @@ export const TYPE_ORDER = [
   'mysql', 'postgres', 'sqlite', 'mssql', 'clickhouse',
   'tidb', 'polardb', 'starrocks', 'doris',
   'kingbase', 'opengauss', 'greenplum',
-  'oceanbase', 'oboracle',
+  'oracle', 'oceanbase', 'oboracle',
 ];
 
 const FALLBACK = DB_TYPES.mysql;

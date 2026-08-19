@@ -158,6 +158,15 @@ export function openConnDialog(existing, presetType, presetGroup) {
           '用户名格式：用户@Oracle租户（如 SYS@oracle_t），经 OBProxy 加 #集群名；', el('br'),
           '初始数据库留空即可（按 Schema 浏览）。'));
       }
+      if (t === 'oracle') {
+        // Oracle 的「数据库」既可能是服务名也可能是 SID，两者连接串写法不同，
+        // 猜错会直接连不上（ORA-12514 / ORA-12505），必须让用户明说。
+        const kind = (cfg.options && cfg.options.connectType) === 'sid' ? 'sid' : 'service';
+        f.connectType = el('select', { style: { width: '160px' } },
+          el('option', { value: 'service', selected: kind === 'service' ? 'selected' : null }, '服务名 (Service Name)'),
+          el('option', { value: 'sid', selected: kind === 'sid' ? 'selected' : null }, 'SID'));
+        addAdvanced('连接标识', f.connectType);
+      }
       if (t === 'clickhouse') {
         f.https = el('input', { type: 'checkbox' });
         f.https.checked = !!(cfg.options && cfg.options.https);
@@ -269,6 +278,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       out.database = f.database.value.trim();
       if (t === 'mssql') out.options = { encrypt: f.encrypt.checked, trustCert: f.trustCert.checked };
       if (t === 'clickhouse') out.options = { https: f.https.checked };
+      if (t === 'oracle') out.options = { connectType: f.connectType.value };
       out.ssh = {
         enabled: f.sshEnabled.checked,
         host: f.sshHost.value.trim(),

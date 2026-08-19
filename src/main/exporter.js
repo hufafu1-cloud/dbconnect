@@ -109,7 +109,9 @@ function keysetWhere(adapter, keyColumns, lastValues) {
  * them so whole-table exports retain the server's exact textual value.
  */
 function tableProjection(adapter, columns) {
-  if (adapter.dialect !== 'mssql' || !columns.length) return '*';
+  if (!columns.length) return '*';
+  if (adapter.dialect === 'oracle') return oracleProjection(adapter, columns);
+  if (adapter.dialect !== 'mssql') return '*';
   return columns.map((column) => {
     const ident = adapter.quoteIdent(column.name);
     // SQL Server alias types keep their display name in `type`; `baseType`
@@ -130,6 +132,33 @@ function tableProjection(adapter, columns) {
       expression = `CONVERT(varchar(50), ${ident}, 126)`;
     } else if (/^time\b/.test(type)) {
       expression = `CONVERT(varchar(30), ${ident})`;
+    }
+    return expression === ident ? ident : `${expression} AS ${ident}`;
+  }).join(', ');
+}
+
+/**
+ * Oracle：日期时间类必须由服务端转成文本才能保住亚毫秒精度。
+ *
+ * oracledb 的 Thin 模式把 DATE/TIMESTAMP 解码成 JS Date，而 JS Date 只到毫秒，
+ * TIMESTAMP(6) 的 .123456 会在驱动层就变成 .123——这是客户端挽回不了的丢失。
+ * 用 TO_CHAR 让数据库直接给文本即可绕开。格式串里的 FF 会按列自身的精度输出，
+ * 不补零也不截断（TIMESTAMP(6) 给 6 位，TIMESTAMP(3) 给 3 位）。
+ *
+ * NUMBER 不在此处理：驱动的 fetchAsString 已经能无损取回，
+ * 走 TO_CHAR 反而要操心 NLS 数字格式与科学计数法。
+ */
+function oracleProjection(adapter, columns) {
+  return columns.map((column) => {
+    const ident = adapter.quoteIdent(column.name);
+    const type = String(column.type || '').trim().toUpperCase();
+    let expression = ident;
+    if (/^TIMESTAMP.*WITH\s+(LOCAL\s+)?TIME\s+ZONE/.test(type)) {
+      expression = `TO_CHAR(${ident}, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')`;
+    } else if (/^TIMESTAMP/.test(type)) {
+      expression = `TO_CHAR(${ident}, 'YYYY-MM-DD HH24:MI:SS.FF')`;
+    } else if (/^DATE$/.test(type)) {
+      expression = `TO_CHAR(${ident}, 'YYYY-MM-DD HH24:MI:SS')`;
     }
     return expression === ident ? ident : `${expression} AS ${ident}`;
   }).join(', ');
