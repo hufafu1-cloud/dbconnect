@@ -29,6 +29,13 @@ class PostgresAdapter extends BaseAdapter {
     const r = await pool.query('SELECT version()');
     const m = /^PostgreSQL\s+\S+/.exec(r.rows[0].version);
     this.serverVersion = m ? m[0] : r.rows[0].version.slice(0, 40);
+    // 数值版本号（如 10.23 → 100023）供目录查询按版本选择写法；
+    // server_version_num 自 8.2 就有，取不到时按 0 处理，交由各查询自己降级。
+    this.serverVersionNum = 0;
+    try {
+      const v = await pool.query('SHOW server_version_num');
+      this.serverVersionNum = Number(v.rows[0].server_version_num) || 0;
+    } catch (e) { /* 分支版本可能没有该参数，走查询级降级 */ }
   }
 
   _getPool(db) {
@@ -164,16 +171,51 @@ class PostgresAdapter extends BaseAdapter {
     await this._getPool(null).query('SELECT pg_terminate_backend($1)', [Number(id)]);
   }
 
+  /**
+   * 函数 / 存储过程清单。
+   *
+   * pg_proc.prokind 是 PostgreSQL 11 才引入的列，10 及更早只有 proisagg / proiswindow
+   * 两个布尔列（且不存在「存储过程」这个对象，全部是函数）。直接查 prokind 会让整个
+   * 「函数」节点报 `column p.prokind does not exist` 而一个都列不出来。
+   *
+   * 这里按项目惯例做逐级降级：新列 → 旧列 → 仅名称。版本号只作为选择起点，
+   * 真正兜底的是 try/catch——连接可能经过 PgBouncer 之类的中间件，或对接
+   * Greenplum/openGauss 这类版本号不可信的分支，不能只靠版本判断。
+   */
   async listRoutines(db, schema) {
-    const rows = await this._q(db,
-      `SELECT p.proname AS name,
+    const sch = schema || 'public';
+    const modern = `SELECT p.proname AS name,
               CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS type,
               pg_get_function_identity_arguments(p.oid) AS args,
               obj_description(p.oid, 'pg_proc') AS comment
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
        WHERE n.nspname = $1 AND p.prokind IN ('f', 'p')
-       ORDER BY p.proname`, [schema || 'public']);
-    return rows.map((r) => ({ name: r.name, type: r.type, comment: r.comment || '', extra: r.args || '' }));
+       ORDER BY p.proname`;
+    // PG ≤ 10：没有存储过程，类型恒为 FUNCTION；聚合与窗口函数按新版口径一并排除
+    const legacy = `SELECT p.proname AS name, 'FUNCTION' AS type,
+              pg_get_function_identity_arguments(p.oid) AS args,
+              obj_description(p.oid, 'pg_proc') AS comment
+       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow
+       ORDER BY p.proname`;
+    // 最后兜底：任何目录列都不指望，只求能把名字列出来
+    const minimal = `SELECT p.proname AS name, 'FUNCTION' AS type, '' AS args, NULL AS comment
+       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = $1 ORDER BY p.proname`;
+
+    const candidates = this.serverVersionNum && this.serverVersionNum < 110000
+      ? [legacy, modern, minimal]
+      : [modern, legacy, minimal];
+    let lastError = null;
+    for (const sql of candidates) {
+      try {
+        const rows = await this._q(db, sql, [sch]);
+        return rows.map((r) => ({ name: r.name, type: r.type, comment: r.comment || '', extra: r.args || '' }));
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError;
   }
 
   async listTriggers(db, schema) {
@@ -223,10 +265,34 @@ class PostgresAdapter extends BaseAdapter {
       return rows.map((r) => r.def + ';').join('\n');
     }
     if (kind === 'SEQUENCE') {
-      const rows = await this._q(db,
-        `SELECT * FROM pg_sequences WHERE schemaname = $1 AND sequencename = $2`, [sch, name]);
-      if (!rows.length) throw new Error('序列不存在');
-      const s = rows[0];
+      // pg_sequences 视图是 PostgreSQL 10 才有的；9.x 上序列本身就是一张单行关系，
+      // 直接 SELECT 它即可拿到同样的参数（列名不同，见下方映射）。
+      let s = null;
+      try {
+        const rows = await this._q(db,
+          `SELECT * FROM pg_sequences WHERE schemaname = $1 AND sequencename = $2`, [sch, name]);
+        if (!rows.length) throw new Error('序列不存在');
+        s = rows[0];
+      } catch (err) {
+        if (/pg_sequences/i.test(err && err.message || '')) {
+          const rows = await this._q(db,
+            `SELECT * FROM ${this.quoteIdent(sch)}.${this.quoteIdent(name)}`);
+          if (!rows.length) throw new Error('序列不存在');
+          const old = rows[0];
+          s = {
+            increment_by: old.increment_by,
+            min_value: old.min_value,
+            max_value: old.max_value,
+            // 9.x 的序列关系没有 start_value 列，用 min_value 近似并在注释里说明
+            start_value: old.start_value === undefined ? old.min_value : old.start_value,
+            cache_size: old.cache_value,
+            cycle: old.is_cycled,
+            last_value: old.is_called ? old.last_value : null,
+          };
+        } else {
+          throw err;
+        }
+      }
       return `CREATE SEQUENCE ${this.quoteIdent(sch)}.${this.quoteIdent(name)}\n` +
         `  INCREMENT BY ${s.increment_by}\n  MINVALUE ${s.min_value}\n  MAXVALUE ${s.max_value}\n` +
         `  START WITH ${s.start_value}\n  CACHE ${s.cache_size}${s.cycle ? '\n  CYCLE' : ''};\n` +
