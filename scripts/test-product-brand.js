@@ -19,7 +19,27 @@ function testPackageIdentity() {
   assert.strictEqual(pkg.scripts['types:test'], 'node scripts/test-db-types.js');
   assert.strictEqual(pkg.scripts['workspace:test'], 'node scripts/test-workspace.js');
   assert.strictEqual(pkg.scripts['core:test'], 'node scripts/test-step1.js');
-  assert.strictEqual(pkg.scripts.verify, 'npm run brand:test && npm run ui:test && npm run types:test && npm run workspace:test && npm run core:test && npm run selftest && npm run smoke');
+  // verify 必须覆盖所有已注册的 *:test 脚本，外加 selftest 与 smoke。
+  //
+  // 这里刻意**不比对固定字符串**：原先写死整条 verify 链，导致每新增一个检查
+  // 都会让本测试失败（v2.6.3 加 workflow:test 时就炸过一次），
+  // 而失败原因与品牌校验毫无关系，很容易被误判成"改坏了"。
+  // 改成按集合校验后，新增检查只要接进 verify 就自动通过；忘了接才会失败——
+  // 那正是这条断言真正想守住的东西。
+  const verifySteps = String(pkg.scripts.verify || '')
+    .split('&&')
+    .map((part) => part.trim().replace(/^npm run /, ''))
+    .filter(Boolean);
+  const registeredChecks = Object.keys(pkg.scripts).filter((name) => name.endsWith(':test'));
+  for (const check of registeredChecks) {
+    assert.ok(
+      verifySteps.includes(check),
+      `verify 未包含已注册的检查 ${check}：新增检查后需要接进 npm run verify`,
+    );
+  }
+  for (const required of ['selftest', 'smoke']) {
+    assert.ok(verifySteps.includes(required), `verify 必须包含 ${required}`);
+  }
 }
 
 function testVisibleBrandCopy() {

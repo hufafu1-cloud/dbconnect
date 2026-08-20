@@ -183,7 +183,10 @@ jobs:
           - target: mongodb
             image: mongo:7
             run_args: -p 27017:27017
-            ready_cmd: docker exec db mongosh --quiet --eval db.runCommand({ping:1})
+            # 注意不能用 --eval db.runCommand({ping:1})：ready_cmd 是经 ${{ }} 展开的裸 shell
+            # 片段，圆括号会被 bash 当作子 shell 语法而报错。mongosh 直接连库即可探活。
+            ready_cmd: docker exec db mongosh --quiet --norc --eval quit
+
 
     steps:
       - name: Check out repository

@@ -16,7 +16,7 @@
     "types:test": "node scripts/test-db-types.js",
     "workspace:test": "node scripts/test-workspace.js",
     "core:test": "node scripts/test-step1.js",
-    "verify": "npm run brand:test && npm run ui:test && npm run types:test && npm run workspace:test && npm run core:test && npm run selftest && npm run smoke",
+    "verify": "npm run brand:test && npm run ui:test && npm run workflow:test && npm run types:test && npm run workspace:test && npm run core:test && npm run selftest && npm run smoke",
     "integration": "node scripts/integration-db.js",
     "demo": "electron . --demo",
     "icon": "node scripts/gen-icon.js",
@@ -24,7 +24,8 @@
     "predist": "npm run icon",
     "dist": "node scripts/build-release.js",
     "release:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1",
-    "postinstall": "node scripts/install-app-deps.js"
+    "postinstall": "node scripts/install-app-deps.js",
+    "workflow:test": "node scripts/test-workflow-cmds.js"
   },
   "devDependencies": {
     "electron": "^37.2.0",
