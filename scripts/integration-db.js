@@ -42,6 +42,7 @@ const TARGETS = {
   opengauss: { prefix: 'OPENGAUSS', port: 5432, user: 'gaussdb', database: 'postgres' },
   greenplum: { prefix: 'GREENPLUM', port: 5432, user: 'gpadmin', database: 'postgres' },
   oracle: { prefix: 'ORACLE', port: 1521, user: 'system', database: 'FREEPDB1' },
+  dm: { prefix: 'DM', port: 5236, user: 'SYSDBA' },
   // 非 SQL 数据源：不走 baselineSelect / CRUD / 取消 那套 SQL 形状的检查，
   // 改跑 nonSqlCheck（只读浏览 + 续传导出），见下方说明
   redis: { prefix: 'REDIS', port: 6379, user: '', nonSql: true },
@@ -65,6 +66,8 @@ const ALIASES = {
   gaussdb: 'opengauss',
   gp: 'greenplum',
   ora: 'oracle',
+  dameng: 'dm',
+  dm8: 'dm',
   es: 'elasticsearch',
   opensearch: 'elasticsearch',
   mongo: 'mongodb',
@@ -153,7 +156,7 @@ function buildConfig(type) {
 
 /** 原生 Oracle 与 OceanBase Oracle 模式共用 Oracle 方言，特例判断必须覆盖两者 */
 function isOracleDialect(type) {
-  return type === 'oboracle' || type === 'oracle';
+  return ['oboracle', 'oracle', 'dm'].includes(type);
 }
 
 function safeError(error, password) {
@@ -867,7 +870,7 @@ function printHelp() {
 Environment:
   DB_INTEGRATION_TARGETS  Comma-separated mysql,postgres,mssql,clickhouse,
                           tidb,polardb,starrocks,doris,kingbase,opengauss,
-                          greenplum,oracle,redis,elasticsearch,mongodb,
+                          greenplum,oracle,dm,redis,elasticsearch,mongodb,
                           oceanbase,oboracle
                           ("all" means the CI matrix targets)
   DB_INTEGRATION_CRUD     Enable disposable-table CRUD checks (default: 0)

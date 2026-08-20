@@ -5,8 +5,8 @@
 一款可在 Windows 上安装运行的桌面数据库连接管理工具，界面与操作参考 Navicat 设计。
 基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、
 TiDB、PolarDB for MySQL、StarRocks、Apache Doris、人大金仓 KingbaseES、openGauss / GaussDB、
-Greenplum、Oracle、OceanBase（MySQL 模式 / Oracle 模式·实验性）、
-以及非关系型的 **Redis、Elasticsearch / OpenSearch、MongoDB**（只读浏览）等 18 种数据库。
+Greenplum、Oracle、达梦 DM、OceanBase（MySQL 模式 / Oracle 模式·实验性）、
+以及非关系型的 **Redis、Elasticsearch / OpenSearch、MongoDB**（只读浏览）等 19 种数据库。
 
 > - StarRocks / Apache Doris 是 OLAP 引擎：支持浏览、查询与导出，网格只读、不提供可视化表设计器
 >   （建表需声明分桶与表属性），改数据请直接写 SQL。

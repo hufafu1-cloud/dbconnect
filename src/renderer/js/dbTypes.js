@@ -293,6 +293,24 @@ export const DB_TYPES = {
       + '参数需为严格 JSON（键加双引号）。不提供集合管理与文档编辑。',
     caps: { processes: false, manageDatabase: false, transactions: false, schemas: false, designer: false, merge: false },
   },
+  dm: {
+    label: '达梦 DM',
+    shortLabel: '达梦',
+    icon: 'dm',
+    // 达梦是 Oracle 兼容方言，与 oboracle / oracle 共用 oracleBase.js 的方言层
+    dialect: 'oracle',
+    cmMode: 'text/x-plsql',
+    formatLang: 'plsql',
+    // 达梦默认端口 5236、默认管理员 SYSDBA；「数据库」层级即 Schema，留空按登录用户的模式浏览
+    defaults: { port: 5236, user: 'SYSDBA', database: '' },
+    quote: 'double',
+    backslashEscape: false,
+    experimental: true,
+    note: '默认端口 5236、管理员 SYSDBA；「数据库」层级实为 Schema，留空即按登录用户的模式浏览。'
+      + '注意：达梦官方 Node 驱动按冒号切分连接串中的用户名与密码，'
+      + '密码中不能包含冒号（会被截断导致认证失败），如有请先在服务端改掉。',
+    caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, designer: true, merge: true },
+  },
 };
 
 /** 新建连接菜单与连接对话框的类型顺序 */
@@ -300,7 +318,7 @@ export const TYPE_ORDER = [
   'mysql', 'postgres', 'sqlite', 'mssql', 'clickhouse',
   'tidb', 'polardb', 'starrocks', 'doris',
   'kingbase', 'opengauss', 'greenplum',
-  'oracle', 'oceanbase', 'oboracle',
+  'oracle', 'dm', 'oceanbase', 'oboracle',
   'redis', 'elasticsearch', 'mongodb',
 ];
 

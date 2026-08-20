@@ -109,6 +109,10 @@ export const icons = {
     <path d="M8 2.4c1.7 1.9 2.9 3.9 2.9 6 0 2.1-1.2 3.4-2.9 4.3-1.7-.9-2.9-2.2-2.9-4.3 0-2.1 1.2-4.1 2.9-6z" fill="#4faa41"/>
     <path d="M8 2.4v10.3" stroke="#b8e986" stroke-width=".8"/>
     <path d="M8 12.7v1.2" stroke="#4faa41" stroke-width="1.1" stroke-linecap="round"/>`),
+  dm: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#0a4595"/>
+    <path d="M3.6 4.1h3.3c2.4 0 3.9 1.5 3.9 3.9s-1.5 3.9-3.9 3.9H3.6z" fill="#fff"/>
+    <circle cx="6.7" cy="8" r="1.5" fill="#0a4595"/>
+    <path d="M11.6 4.6v6.8" stroke="#ffd400" stroke-width="1.3" stroke-linecap="round"/>`),
   connection: cylinder('#5b6470'),
   database: svg(`<ellipse cx="8" cy="3.8" rx="5.4" ry="2.2" fill="#3fa34d"/>
     <path d="M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8" stroke="#3fa34d" stroke-width="1.6"/>

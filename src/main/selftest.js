@@ -2748,6 +2748,55 @@ async function runSelfTest() {
     && transfer.valueLiteral(ch, { key: 'value' }, 'Map(String, String)') === "map('key', 'value')"
     && transfer.valueLiteral(ch, { key: 1 }, 'JSON') === "'{\"key\":1}'");
 
+  // ---- 达梦 DM（Oracle 兼容方言，dmdb 纯 JS 驱动）----
+  //
+  // 达梦没有公开镜像，无法真机验证。能离线验的是两件事：
+  //   1. 它确实复用了 oracleBase 的 Oracle 方言（引号、字面量、限定名、ROWNUM 分页）
+  //   2. 连接串的构造——这是读驱动源码 + 实测 Node url.parse 得出的两个坑，
+  //      写错的直接后果就是"连不上"或"用错误的密码去认证"
+  {
+    const { DMAdapter } = require('./db/dm');
+    const { OracleBaseAdapter } = require('./db/oracleBase');
+    const dm = new DMAdapter({ host: 'h', user: 'SYSDBA', password: 'p' });
+
+    check('dm 注册', createAdapter({ type: 'dm', host: 'x' }) instanceof DMAdapter);
+    check('dm 复用 Oracle 方言基类', dm instanceof OracleBaseAdapter);
+    check('dm 方言为 oracle', dm.dialect === 'oracle');
+    check('dm quoteIdent 用双引号', dm.quoteIdent('a"b') === '"a""b"');
+    check('dm literal 无反斜杠转义', dm.literal("a\b'c") === "'a\b''c'");
+    check('dm 限定名', dm.qualify('SCOTT', null, 'EMP') === '"SCOTT"."EMP"');
+    const paged = dm.pageSql('SELECT * FROM "T"', ' ORDER BY "ID" ASC', 100, 200);
+    check('dm ROWNUM 分页', paged.includes('ROWNUM <= 300') && paged.includes('"RN__" > 200'), paged);
+
+    // 连接串：密码含 @ 必须转义，否则 url.parse 会把 host 切错
+    const at = new DMAdapter({ host: '10.0.0.5', port: 5237, user: 'SYSDBA', password: 'My@Pass' });
+    check('dm 连接串对密码做 percent 转义',
+      at._connectString() === 'dm://SYSDBA:My%40Pass@10.0.0.5:5237', at._connectString());
+    check('dm 连接串使用默认端口 5236',
+      new DMAdapter({ host: 'h', user: 'u', password: 'p' })._connectString().endsWith(':5236'));
+
+    // 密码含冒号：dmdb 按 auth.split(':') 取值，必然截断且转义救不了，
+    // 必须提前拦下并说明原因，而不是拿错误的密码去认证
+    let colonBlocked = null;
+    try { new DMAdapter({ host: 'h', user: 'u', password: 'has:colon' })._connectString(); }
+    catch (e) { colonBlocked = e.message; }
+    check('dm 含冒号的密码被提前拦截并说明原因',
+      colonBlocked && /冒号/.test(colonBlocked) && /截断/.test(colonBlocked), colonBlocked);
+
+    // 事务哨兵不得发往服务端
+    const sent = [];
+    const fakeConn = {
+      __dbpandaInTxn: false,
+      execute: async (sql) => { sent.push(sql); return { rowsAffected: 0 }; },
+    };
+    await dm._run(fakeConn, '--dbpanda:dm-txn-begin');
+    check('dm 事务开始哨兵只翻转标记、不发语句',
+      sent.length === 0 && fakeConn.__dbpandaInTxn === true, sent);
+    await dm._run(fakeConn, '--dbpanda:dm-txn-end');
+    check('dm 事务结束哨兵同理',
+      sent.length === 0 && fakeConn.__dbpandaInTxn === false, sent);
+  }
+
   // ---- StarRocks / Doris：CONNECT_ATTRS 必须摘掉 ----
   //
   // 真机验证抓到的致命 bug：mysql2 默认在握手响应里带连接属性
