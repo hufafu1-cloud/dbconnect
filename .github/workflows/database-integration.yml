@@ -142,3 +142,101 @@ jobs:
           CLICKHOUSE_DATABASE: datavia_ci
           CLICKHOUSE_HTTPS: "0"
         run: node scripts/integration-db.js
+
+  # 用 docker run 而不是 service container 启动的适配器。
+  #
+  # 上面的 adapters job 用 service container，但那是**整个矩阵共用一个 services 块**：
+  # 环境变量只能全量下发给每个目标，无法按目标省略。把 xpack.security.enabled 传给
+  # OpenSearch（它不认这个设置）或把 discovery.type 传给 MySQL，轻则无效重则启动失败。
+  # 这几个目标各自需要互不兼容的启动参数，因此单独用 docker run 拉起，各管各的。
+  #
+  # 顺带说明为什么 TiDB / StarRocks / Doris 仍不在 CI 里：它们需要**覆盖镜像启动命令**
+  # （TiDB 要 --store=unistore，StarRocks / Doris 的 all-in-one 要跑自带启动脚本并暴露多端口）。
+  # docker run 能做到，但这几个镜像体积大、就绪慢、吃内存，在 GitHub 托管 runner 上
+  # 稳定性没把握，留待有自建 runner 时再接。
+  adapters-docker:
+    name: ${{ matrix.target }} adapter
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 就绪判断一律用单条无管道、无引号的命令，避免经 ${{ }} 展开后被 shell 拆碎。
+          # gvenzl 的 Oracle 镜像自带 healthcheck.sh，正是为此准备的。
+          - target: oracle
+            image: gvenzl/oracle-free:23-slim
+            run_args: -p 1521:1521 -e ORACLE_PASSWORD=CiDbPanda2026
+            ready_cmd: docker exec db healthcheck.sh
+          - target: redis
+            image: redis:7-alpine
+            run_args: -p 6379:6379
+            ready_cmd: docker exec db redis-cli PING
+          - target: elasticsearch
+            image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+            run_args: -p 9200:9200 -e discovery.type=single-node -e xpack.security.enabled=false
+            ready_cmd: curl -sf http://127.0.0.1:9200/_cluster/health
+          - target: opensearch
+            image: opensearchproject/opensearch:2.17.1
+            run_args: -p 9200:9200 -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true
+            ready_cmd: curl -sf http://127.0.0.1:9200/_cluster/health
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+
+      - name: Use locked npm version
+        run: npm install --global npm@9.6.5
+
+      - name: Install production dependencies
+        run: npm ci --ignore-scripts --omit=dev
+
+      - name: Validate integration runner syntax
+        run: node --check scripts/integration-db.js
+
+      - name: Start ${{ matrix.target }}
+        run: docker run -d --name db ${{ matrix.run_args }} ${{ matrix.image }}
+
+      - name: Wait for ${{ matrix.target }} to become ready
+        run: |
+          for i in $(seq 1 90); do
+            if ${{ matrix.ready_cmd }} >/dev/null 2>&1; then
+              echo "ready after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::${{ matrix.target }} did not become ready in time"
+          docker logs db 2>&1 | tail -50
+          exit 1
+
+      - name: Test ${{ matrix.target }} adapter
+        env:
+          # opensearch 是 elasticsearch 适配器的别名（见 integration-db.js 的 ALIASES）。
+          # 两种发行版的 SQL 端点与响应结构不同，同一份代码必须各跑一遍。
+          DB_INTEGRATION_TARGETS: ${{ matrix.target }}
+          # 非 SQL 目标（redis / elasticsearch）会由脚本按 nonSql 分流，忽略这两个开关。
+          DB_INTEGRATION_CRUD: "1"
+          DB_INTEGRATION_CANCEL: "1"
+          DB_INTEGRATION_RETRIES: "20"
+          DB_INTEGRATION_RETRY_MS: "3000"
+          ORACLE_HOST: 127.0.0.1
+          ORACLE_PORT: "1521"
+          ORACLE_USER: system
+          ORACLE_PASSWORD: CiDbPanda2026
+          ORACLE_DATABASE: FREEPDB1
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6379"
+          ELASTICSEARCH_HOST: 127.0.0.1
+          ELASTICSEARCH_PORT: "9200"
+        run: node scripts/integration-db.js
+
+      - name: Dump ${{ matrix.target }} logs on failure
+        if: failure()
+        run: docker logs db 2>&1 | tail -100

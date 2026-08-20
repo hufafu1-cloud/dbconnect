@@ -42,6 +42,10 @@ const TARGETS = {
   opengauss: { prefix: 'OPENGAUSS', port: 5432, user: 'gaussdb', database: 'postgres' },
   greenplum: { prefix: 'GREENPLUM', port: 5432, user: 'gpadmin', database: 'postgres' },
   oracle: { prefix: 'ORACLE', port: 1521, user: 'system', database: 'FREEPDB1' },
+  // 非 SQL 数据源：不走 baselineSelect / CRUD / 取消 那套 SQL 形状的检查，
+  // 改跑 nonSqlCheck（只读浏览 + 续传导出），见下方说明
+  redis: { prefix: 'REDIS', port: 6379, user: '', nonSql: true },
+  elasticsearch: { prefix: 'ELASTICSEARCH', port: 9200, user: '', nonSql: true },
 };
 
 const ALIASES = {
@@ -60,6 +64,8 @@ const ALIASES = {
   gaussdb: 'opengauss',
   gp: 'greenplum',
   ora: 'oracle',
+  es: 'elasticsearch',
+  opensearch: 'elasticsearch',
 };
 
 function env(name, fallback) {
@@ -573,6 +579,175 @@ async function crudCheck(adapter, type, config) {
   });
 }
 
+/**
+ * 非 SQL 数据源的检查（Redis / Elasticsearch）。
+ *
+ * 现有的 baselineSelect / crudCheck / cancellationCheck 都是 SQL 形状，对这类数据源
+ * 没有意义。这里改验它们真正的契约：
+ *   列库 → 列对象 → 表结构 → 分页浏览 → 续传导出 → 只读边界
+ *
+ * 种子数据必须用**原始驱动**写入：适配器本身是只读的，这是刻意的产品约束，
+ * 不能为了测试给它开写入口子。
+ */
+async function nonSqlCheck(adapter, type, config) {
+  const seeded = type === 'redis'
+    ? await seedRedis(config)
+    : await seedElasticsearch(config);
+  // 清理必须放 finally：断言失败时若不释放种子用的驱动连接，
+  // 事件循环被挂住，进程打印完摘要也不退出（本地首次运行踩到过）
+  try {
+    return await nonSqlChecks(adapter, type, seeded);
+  } finally {
+    await seeded.cleanup().catch(() => {});
+  }
+}
+
+async function nonSqlChecks(adapter, type, seeded) {
+  const databases = await adapter.listDatabases();
+  assert(Array.isArray(databases) && databases.length > 0, 'listDatabases returned nothing');
+  const database = seeded.database || databases[0];
+  void type;
+
+  const objects = await adapter.listObjects(database);
+  assert(objects && Array.isArray(objects.tables), 'listObjects did not return a tables array');
+  assert(Array.isArray(objects.views), 'listObjects did not return a views array');
+  const table = objects.tables.find((t) => t.name === seeded.table);
+  assert(table, `seeded object ${seeded.table} was not returned by listObjects`);
+
+  const info = await adapter.tableInfo(database, null, seeded.table);
+  assert(info && Array.isArray(info.columns) && info.columns.length, 'tableInfo returned no columns');
+  assert(Array.isArray(info.pk) && info.pk.length === 0, 'non-SQL sources must not expose editable primary keys');
+  assert(adapter.readonlyReason, 'non-SQL sources must report a readonlyReason');
+
+  const page = await adapter.tableData(database, { table: seeded.table, page: 1, pageSize: 10 });
+  assert(page.rows.length === Math.min(10, seeded.count),
+    `tableData returned ${page.rows.length} rows, expected ${Math.min(10, seeded.count)}`);
+  assert(page.readonlyReason, 'tableData must carry readonlyReason for non-SQL sources');
+
+  // 续传令牌契约：必须靠 next 判断结束，且中途不得重复取
+  assert(typeof adapter.fetchTablePage === 'function', 'non-SQL sources must implement fetchTablePage');
+  let next;
+  let pages = 0;
+  let fetched = 0;
+  do {
+    const chunk = await adapter.fetchTablePage({
+      db: database, schema: null, table: seeded.table, limit: 10, next,
+    });
+    assert(Array.isArray(chunk.rows) && Array.isArray(chunk.columns), 'fetchTablePage returned no result set');
+    fetched += chunk.rows.length;
+    next = chunk.next;
+    pages++;
+    assert(pages < 100, 'fetchTablePage did not terminate: next never became null');
+  } while (next !== null && next !== undefined);
+  assert(fetched === seeded.count, `fetchTablePage returned ${fetched} rows, expected ${seeded.count}`);
+  assert(pages > 1, 'fetchTablePage finished in one page; the continuation path was never exercised');
+
+  // 整表导出走的是 fetchTablePage 分支
+  const file = path.join(os.tmpdir(), `dbpanda-${type}-${process.pid}.csv`);
+  try {
+    const result = await exportTable(adapter, {
+      db: database, schema: null, table: seeded.table, file, format: 'csv',
+    });
+    assert(result.rows === seeded.count,
+      `export wrote ${result.rows} rows, expected ${seeded.count}`);
+    const text = await fs.readFile(file, 'utf8');
+    const lines = text.trim().split('\n').filter(Boolean);
+    assert(lines.length === seeded.count + 1, `export file has ${lines.length} lines, expected ${seeded.count + 1}`);
+    assert(text.includes(seeded.marker), 'export lost the seeded UTF-8 marker value');
+  } finally {
+    await fs.unlink(file).catch(() => {});
+  }
+
+  // 只读边界：对象操作必须被拒
+  let refused = false;
+  try { await adapter.action(database, { action: 'dropTable', table: seeded.table }); }
+  catch (e) { refused = /只读/.test(e.message || ''); }
+  assert(refused, 'non-SQL sources must refuse object actions');
+
+  return { objects: objects.tables.length, exported: seeded.count };
+}
+
+/** 用 ioredis 直接写种子数据（适配器只读，不能用它写） */
+async function seedRedis(config) {
+  const Redis = require('ioredis');
+  const client = new Redis({
+    host: config.host, port: config.port, password: config.password || undefined,
+    lazyConnect: true, maxRetriesPerRequest: 1, retryStrategy: () => null,
+  });
+  await client.connect();
+  const prefix = `citest${process.pid}`;
+  // 必须多于一个 SCAN 批次（SCAN_BATCH=500），否则 Redis 一轮就扫完，
+  // fetchTablePage 单页返回，续传路径根本走不到——本地首次运行就是这么暴露的
+  const count = 1200;
+  const pipe = client.pipeline();
+  for (let i = 1; i <= count; i++) pipe.set(`${prefix}:${i}`, `值${i}`);
+  await pipe.exec();
+  return {
+    database: 'db0',
+    table: prefix,
+    count,
+    marker: '值1',
+    cleanup: async () => {
+      const keys = [];
+      let cursor = '0';
+      do {
+        const [next, batch] = await client.scan(cursor, 'MATCH', `${prefix}:*`, 'COUNT', 500);
+        cursor = next; keys.push(...batch);
+      } while (cursor !== '0');
+      if (keys.length) await client.del(...keys);
+      client.disconnect();
+    },
+  };
+}
+
+/** 用 HTTP 直接写种子数据 */
+async function seedElasticsearch(config) {
+  const httpMod = config.options && config.options.https ? require('https') : require('http');
+  const index = `citest${process.pid}`;
+  const count = 25;
+  const send = (method, urlPath, body, contentType) => new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : body;
+    const headers = { 'content-type': contentType || 'application/json' };
+    if (config.user) {
+      headers.authorization = 'Basic ' + Buffer.from(`${config.user}:${config.password || ''}`).toString('base64');
+    }
+    if (payload !== null) headers['content-length'] = Buffer.byteLength(payload);
+    const req = httpMod.request({
+      hostname: config.host, port: config.port, path: urlPath, method, headers,
+      rejectUnauthorized: !(config.options && config.options.trustCert),
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (d) => chunks.push(d));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(text);
+        else reject(new Error(`seed ${method} ${urlPath} -> HTTP ${res.statusCode}: ${text.slice(0, 200)}`));
+      });
+    });
+    req.on('error', reject);
+    if (payload !== null) req.write(payload);
+    req.end();
+  });
+
+  await send('DELETE', `/${index}`, undefined).catch(() => {});
+  await send('PUT', `/${index}`, JSON.stringify({
+    mappings: { properties: { n: { type: 'integer' }, name: { type: 'keyword' } } },
+  }));
+  const lines = [];
+  for (let i = 1; i <= count; i++) {
+    lines.push(JSON.stringify({ index: { _index: index, _id: String(i) } }));
+    lines.push(JSON.stringify({ n: i, name: `值${i}` }));
+  }
+  await send('POST', '/_bulk?refresh=true', lines.join('\n') + '\n', 'application/x-ndjson');
+  return {
+    database: null,
+    table: index,
+    count,
+    marker: '值1',
+    cleanup: async () => { await send('DELETE', `/${index}`, undefined).catch(() => {}); },
+  };
+}
+
 async function runTarget(type, globalCrud, globalCancel, attempts, retryMs) {
   const config = buildConfig(type);
   const prefix = TARGETS[type].prefix;
@@ -586,6 +761,12 @@ async function runTarget(type, globalCrud, globalCancel, attempts, retryMs) {
   try {
     adapter = await connectWithRetry(type, config, attempts, retryMs);
     console.log(`[${type}] connected: ${adapter.serverVersion || 'version unavailable'}`);
+    if (TARGETS[type].nonSql) {
+      const summary = await nonSqlCheck(adapter, type, config);
+      console.log(`[${type}] non-SQL browse, continuation export and read-only boundary passed `
+        + `(${summary.objects} objects, ${summary.exported} rows exported)`);
+      return { type, ok: true, ms: Date.now() - started };
+    }
     // Oracle 的 config.database 是连接串里的服务名/SID，不是可切换的 Schema，
     // 传给按库执行的接口会变成 ALTER SESSION SET CURRENT_SCHEMA = "服务名" 而 ORA-01435。
     // 首次探针不指定库，让驱动用登录用户自己的默认 Schema。
@@ -623,7 +804,8 @@ function printHelp() {
 Environment:
   DB_INTEGRATION_TARGETS  Comma-separated mysql,postgres,mssql,clickhouse,
                           tidb,polardb,starrocks,doris,kingbase,opengauss,
-                          greenplum,oracle,oceanbase,oboracle
+                          greenplum,oracle,redis,elasticsearch,
+                          oceanbase,oboracle
                           ("all" means the CI matrix targets)
   DB_INTEGRATION_CRUD     Enable disposable-table CRUD checks (default: 0)
   DB_INTEGRATION_CANCEL   Enable bounded request-scoped cancellation checks (default: 0)
