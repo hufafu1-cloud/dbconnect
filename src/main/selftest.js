@@ -2748,6 +2748,264 @@ async function runSelfTest() {
     && transfer.valueLiteral(ch, { key: 'value' }, 'Map(String, String)') === "map('key', 'value')"
     && transfer.valueLiteral(ch, { key: 1 }, 'JSON') === "'{\"key\":1}'");
 
+  // ---- Elasticsearch / OpenSearch（非关系型，只读浏览）----
+  //
+  // 不连真实集群也能验的几件事：mapping 展平、深翻页拦截、错误翻译、
+  // 以及 ES 与 OpenSearch 两种不同的 SQL 响应结构。
+  {
+    const { ElasticsearchAdapter } = require('./db/elasticsearch');
+    const es = new ElasticsearchAdapter({ host: 'x' });
+
+    check('es 注册', createAdapter({ type: 'elasticsearch', host: 'x' }) instanceof ElasticsearchAdapter);
+    check('es 方言', es.dialect === 'elasticsearch');
+    check('es 网格只读', !!es.readonlyReason);
+    check('es 禁用表设计器', !!es.designerReason);
+    check('es 不支持事务', es.transactionSupport.supported === false);
+
+    // mapping 展平：嵌套字段要变成 a.b.c
+    const flat = es._flattenMapping({
+      title: { type: 'text' },
+      user: { properties: { name: { type: 'keyword' }, addr: { properties: { city: { type: 'keyword' } } } } },
+    });
+    const names = flat.map((c) => c.name).sort();
+    check('es 嵌套 mapping 展平为点号路径',
+      names.join(',') === 'title,user.addr.city,user.name', names);
+
+    // 按路径取值
+    check('es 按路径取嵌套值',
+      es._pick({ user: { addr: { city: '杭州' } } }, 'user.addr.city') === '杭州');
+    check('es 路径缺失返回 null', es._pick({ a: 1 }, 'x.y.z') === null);
+    check('es 对象值转 JSON 文本',
+      es._pick({ tags: ['a', 'b'] }, 'tags') === '["a","b"]',
+      es._pick({ tags: ['a', 'b'] }, 'tags'));
+
+    // 深翻页：ES 的 from+size 上限必须提前拦下并说清怎么办，
+    // 而不是把 ES 的原始报错甩给用户
+    es.maxResultWindow = 10000;
+    let windowBlocked = false;
+    try {
+      await es.tableData('c', { table: 't', page: 21, pageSize: 500 });
+    } catch (e) {
+      windowBlocked = /max_result_window/.test(e.message) && /导出不受此限制|整表导出不受此限制/.test(e.message);
+    }
+    check('es 深翻页超限时明确拦截并给出出路', windowBlocked);
+
+    // 错误翻译
+    const authErr = es._errorText(401, { error: { type: 'security_exception', reason: 'missing auth' } }, '');
+    check('es 401 翻译为权限提示',
+      /拒绝访问/.test(authErr) && /用户名\/密码/.test(authErr), authErr);
+    const parseErr = es._errorText(400, {
+      error: { type: 'parsing_exception', root_cause: [{ reason: 'line 1:8: mismatched input' }] },
+    }, '');
+    check('es 语法错误带出 root_cause 的原因',
+      /mismatched input/.test(parseErr), parseErr);
+
+    // 两种发行版的 SQL 响应结构
+    const esLike = { columns: [{ name: 'a', type: 'text' }], rows: [['x']] };
+    const osLike = { schema: [{ name: 'a', type: 'text' }], datarows: [['x']] };
+    es._request = async () => esLike;
+    const r1 = await es._runSql('SELECT 1');
+    check('es 解析 Elasticsearch 的 columns/rows',
+      r1.columns[0].name === 'a' && r1.rows[0][0] === 'x', r1);
+    es._request = async () => osLike;
+    const r2 = await es._runSql('SELECT 1');
+    check('es 解析 OpenSearch 的 schema/datarows',
+      r2.columns[0].name === 'a' && r2.rows[0][0] === 'x', r2);
+
+    // 发行版识别决定 SQL 端点
+    const os = new ElasticsearchAdapter({ host: 'x' });
+    os._request = async () => ({ cluster_name: 'c1', version: { number: '2.11.0', distribution: 'opensearch' } });
+    await os.connect();
+    check('opensearch 识别与端点',
+      os.isOpenSearch === true && os.sqlPath.includes('_plugins/_sql')
+      && /^OpenSearch 2\.11\.0$/.test(os.serverVersion), { p: os.sqlPath, v: os.serverVersion });
+    // format 参数在两边含义相反（真机撞出来的）：
+    //   ES 的 ?format=json 给 {columns, rows}；
+    //   OpenSearch 的 ?format=json 是"返回 ES 原生 DSL 响应"，要 jdbc 才给 {schema, datarows}。
+    // 用错时 HTTP 200、有响应体，但解析出来空列空行，不报任何错——极难发现。
+    check('opensearch 必须用 format=jdbc 而非 json',
+      /format=jdbc/.test(os.sqlPath) && !/format=json/.test(os.sqlPath), os.sqlPath);
+    const es8 = new ElasticsearchAdapter({ host: 'x' });
+    es8._request = async () => ({ cluster_name: 'c2', version: { number: '8.15.0' } });
+    await es8.connect();
+    check('elasticsearch 识别与端点',
+      es8.isOpenSearch === false && es8.sqlPath === '/_sql?format=json'
+      && /^Elasticsearch 8\.15\.0$/.test(es8.serverVersion), { p: es8.sqlPath, v: es8.serverVersion });
+    check('es 伪库名用集群名', (await es8.listDatabases()).join() === 'c2');
+
+    // 响应结构无法识别时必须明确报错，不能静默返回空结果集
+    {
+      const weird = new ElasticsearchAdapter({ host: 'x' });
+      weird._request = async () => ({ took: 2, hits: { hits: [] } });
+      let shapeErr = null;
+      try { await weird._runSql('SELECT 1'); } catch (e) { shapeErr = e.message; }
+      check('es 无法解析的 SQL 响应结构会明确报错而非返回空',
+        shapeErr && /无法解析/.test(shapeErr) && /took, hits/.test(shapeErr), shapeErr);
+    }
+
+    // 只读边界
+    let esAction = false;
+    try { await es.action('c', { action: 'dropTable' }); }
+    catch (e) { esAction = /只读/.test(e.message) && /Kibana/.test(e.message); }
+    check('es 对象操作被拒并指向 Kibana', esAction);
+
+    // 导出扩展点：必须提供，且用 scroll 而非 from/size（否则一万条以后取不到）
+    check('es 提供非 SQL 导出扩展点', typeof es.fetchTablePage === 'function');
+    {
+      const calls = [];
+      const fake = new ElasticsearchAdapter({ host: 'x' });
+      fake.tableInfo = async () => ({ columns: [{ name: '_id' }, { name: 'title' }] });
+      fake._request = async (method, path, body) => {
+        calls.push(path);
+        if (path.includes('scroll=')) {
+          return { _scroll_id: 'S1', hits: { hits: [{ _id: '1', _source: { title: 'a' } }] } };
+        }
+        if (path === '/_search/scroll' && method === 'POST') {
+          return { _scroll_id: 'S1', hits: { hits: [] } };
+        }
+        return {};
+      };
+      const p1 = await fake.fetchTablePage({ db: 'c', table: 't', limit: 10 });
+      check('es 首页用 scroll 而不是 from/size',
+        calls[0].includes('scroll=') && !calls[0].includes('from='), calls[0]);
+      check('es 首页返回续传令牌', p1.next && p1.next.scrollId === 'S1', p1.next);
+      const p2 = await fake.fetchTablePage({ db: 'c', table: 't', limit: 10, next: p1.next });
+      check('es 取完后 next 为 null', p2.next === null && p2.rows.length === 0, p2);
+      check('es 取完后释放 scroll 上下文',
+        calls.some((c) => c === '/_search/scroll') && calls.length >= 3, calls);
+    }
+  }
+
+  // ---- Redis（非关系型，只读浏览）----
+  //
+  // 只读白名单是**安全边界**：它一旦破了，"Redis 连接是只读的"这个承诺就没了。
+  // 因此这里逐条验写命令被拒、读命令放行、以及几个容易漏的子命令。
+  // 键前缀映射与命令拆分同样验，它们决定树上看到的结构对不对。
+  {
+    const { RedisAdapter, READ_ONLY_COMMANDS, NO_PREFIX } = require('./db/redis');
+    const rd = new RedisAdapter({});
+
+    check('redis 注册', createAdapter({ type: 'redis', host: 'x' }) instanceof RedisAdapter);
+    check('redis 方言', rd.dialect === 'redis');
+    check('redis 网格只读', !!rd.readonlyReason);
+    check('redis 禁用表设计器', !!rd.designerReason);
+    check('redis 不支持事务', rd.transactionSupport.supported === false);
+    check('redis 无对象节点',
+      Object.values(rd.objectCaps).every((v) => v === false), rd.objectCaps);
+
+    // 库编号
+    check('redis 库名映射', rd._dbIndex('db0') === 0 && rd._dbIndex('db15') === 15 && rd._dbIndex('x') === 0);
+
+    // 键前缀 → 伪表
+    check('redis 键前缀归类',
+      rd._prefixOf('user:1001') === 'user' && rd._prefixOf('a:b:c') === 'a'
+      && rd._prefixOf('plain') === NO_PREFIX && rd._prefixOf(':lead') === NO_PREFIX);
+    check('redis 伪表匹配式',
+      rd._patternOf('user') === 'user:*' && rd._patternOf(NO_PREFIX) === '*');
+
+    // 命令拆分：引号包裹、含空格
+    check('redis 命令拆分处理引号',
+      JSON.stringify(rd._splitCommand('HGET "user:1001" name')) === '["HGET","user:1001","name"]',
+      JSON.stringify(rd._splitCommand('HGET "user:1001" name')));
+    check('redis 命令拆分保留空参数',
+      JSON.stringify(rd._splitCommand("GET ''")) === '["GET",""]',
+      JSON.stringify(rd._splitCommand("GET ''")));
+    let unbalanced = false;
+    try { rd._splitCommand('GET "abc'); } catch (e) { unbalanced = /引号没有闭合/.test(e.message); }
+    check('redis 引号未闭合时报错', unbalanced);
+
+    // 只读边界
+    const writeCommands = ['set', 'del', 'flushall', 'flushdb', 'hset', 'lpush', 'sadd', 'zadd',
+      'expire', 'rename', 'restore', 'migrate', 'shutdown', 'bgsave', 'script', 'eval', 'subscribe'];
+    let allBlocked = true;
+    let firstAllowed = null;
+    for (const cmd of writeCommands) {
+      try { rd._assertReadOnly([cmd, 'k', 'v']); allBlocked = false; firstAllowed = firstAllowed || cmd; }
+      catch (e) { /* 预期被拒 */ }
+    }
+    check('redis 写入/管理命令全部被拒', allBlocked, firstAllowed && ('放行了 ' + firstAllowed));
+
+    let readsPass = true;
+    let firstBlocked = null;
+    for (const cmd of ['get', 'hgetall', 'lrange', 'smembers', 'zrange', 'scan', 'ttl', 'type', 'info']) {
+      try { rd._assertReadOnly([cmd, 'k']); }
+      catch (e) { readsPass = false; firstBlocked = firstBlocked || cmd; }
+    }
+    check('redis 读取命令正常放行', readsPass, firstBlocked && ('误拒了 ' + firstBlocked));
+
+    // KEYS 会阻塞实例，即使是"读"也必须拒
+    let keysBlocked = false;
+    try { rd._assertReadOnly(['keys', '*']); } catch (e) { keysBlocked = /阻塞整个 Redis 实例/.test(e.message); }
+    check('redis 拒绝 KEYS（会阻塞实例）', keysBlocked);
+    check('redis 白名单里确实含 keys（靠专项拦截而非漏配）', READ_ONLY_COMMANDS.has('keys'));
+
+    // 白名单里的命令，其写入类子命令仍要拦住
+    let configSetBlocked = false;
+    try { rd._assertReadOnly(['config', 'set', 'maxmemory', '0']); }
+    catch (e) { configSetBlocked = /写入\/管理操作/.test(e.message); }
+    check('redis CONFIG SET 被拦截', configSetBlocked);
+    let configGetOk = true;
+    try { rd._assertReadOnly(['config', 'get', 'databases']); } catch (e) { configGetOk = false; }
+    check('redis CONFIG GET 放行', configGetOk);
+    let clientKillBlocked = false;
+    try { rd._assertReadOnly(['client', 'kill', 'id', '1']); }
+    catch (e) { clientKillBlocked = /写入\/管理操作/.test(e.message); }
+    check('redis CLIENT KILL 被拦截', clientKillBlocked);
+
+    // 对象操作一律拒绝
+    let actionBlocked = false;
+    try { await rd.action('db0', { action: 'dropTable', table: 't' }); }
+    catch (e) { actionBlocked = /只读/.test(e.message); }
+    check('redis 对象操作被拒绝', actionBlocked);
+
+    // 回复 → 结果集
+    const flat = rd._replyToResult('LRANGE', ['a', 'b']);
+    check('redis 数组回复转结果集',
+      flat.rows.length === 2 && flat.rows[0][0] === 'a', JSON.stringify(flat));
+    const obj = rd._replyToResult('HGETALL', { name: 'x', age: '3' });
+    check('redis 哈希回复转两列',
+      obj.columns.length === 2 && obj.rows.length === 2, JSON.stringify(obj));
+    const nil = rd._replyToResult('GET', null);
+    check('redis 空回复保留为 NULL', nil.rows[0][0] === null);
+
+    // 值预览
+    check('redis 哈希预览按 field=value 展开',
+      rd._preview('hash', ['0', ['a', '1', 'b', '2']]) === 'a=1, b=2',
+      rd._preview('hash', ['0', ['a', '1', 'b', '2']]));
+    check('redis 有序集预览带分值',
+      rd._preview('zset', ['one', '1', 'two', '2']) === 'one(1), two(2)',
+      rd._preview('zset', ['one', '1', 'two', '2']));
+    check('redis 超长字符串预览被截断',
+      rd._preview('string', 'x'.repeat(500)).endsWith(' …'));
+
+    // 导出扩展点：Redis 必须提供 fetchTablePage，否则导出会去拼 SQL
+    check('redis 提供非 SQL 导出扩展点', typeof rd.fetchTablePage === 'function');
+
+    // 续传令牌契约：导出循环靠 next 判断结束，返回 offset 语义会导致无限循环或提前中断。
+    // 真机验证时这里曾用 offset，每页从游标 0 重扫，既超出 SCAN 上限又是 O(n^2)。
+    {
+      const fake = new RedisAdapter({});
+      const scanned = [];
+      fake._withDb = async (_db, fn) => fn({
+        scan: async (cursor) => {
+          scanned.push(cursor);
+          // 模拟两批后结束：0 -> 17 -> 0
+          if (cursor === '0') return ['17', ['a:1', 'a:2']];
+          return ['0', ['a:3']];
+        },
+        pipeline: () => ({ type() { return this; }, ttl() { return this; },
+          strlen() { return this; }, getrange() { return this; }, exists() { return this; },
+          exec: async () => [] }),
+      });
+      const p1 = await fake.fetchTablePage({ db: 'db0', table: 'a', limit: 1 });
+      check('redis 未扫完时返回续传令牌', p1.next && p1.next.cursor === '17', p1.next);
+      const p2 = await fake.fetchTablePage({ db: 'db0', table: 'a', limit: 1, next: p1.next });
+      check('redis 扫完后 next 为 null（导出循环据此结束）', p2.next === null, p2.next);
+      check('redis 续传从上次游标继续而非重头扫',
+        scanned.join(',') === '0,17', scanned);
+    }
+  }
+
   // ---- 原生 Oracle（oracledb Thin 模式）----
   //
   // 方言层与 OceanBase Oracle 模式共用 oracleBase.js，已有 obo 的用例覆盖。

@@ -97,6 +97,14 @@ export const icons = {
     <path d="M8 3.6v1.5M8 10.9v1.5M3.6 8h1.5M10.9 8h1.5" stroke="#fff" stroke-width="1.2" stroke-linecap="round"/>`),
   oracle: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#c74634"/>
     <rect x="2.9" y="5.2" width="10.2" height="5.6" rx="2.8" stroke="#fff" stroke-width="1.5" fill="none"/>`),
+  redis: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#d82c20"/>
+    <path d="M2.7 5.1 8 3.3l5.3 1.8L8 6.9z" fill="#fff"/>
+    <path d="M2.7 7.9 8 6.1l5.3 1.8L8 9.7z" fill="#fff" opacity=".75"/>
+    <path d="M2.7 10.7 8 8.9l5.3 1.8L8 12.5z" fill="#fff" opacity=".5"/>`),
+  elasticsearch: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#1c1e23"/>
+    <path d="M3.1 4.3h8.3a2.1 2.1 0 0 1 0 2.4H3.1z" fill="#f0bf1a"/>
+    <path d="M3.1 6.9h9.6v2.4H3.1z" fill="#07a5de"/>
+    <path d="M3.1 9.5h8.3a2.1 2.1 0 0 0 0 2.4H3.1z" fill="#3ebeb0"/>`),
   connection: cylinder('#5b6470'),
   database: svg(`<ellipse cx="8" cy="3.8" rx="5.4" ry="2.2" fill="#3fa34d"/>
     <path d="M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8" stroke="#3fa34d" stroke-width="1.6"/>

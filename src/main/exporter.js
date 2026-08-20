@@ -397,8 +397,73 @@ async function promoteTemp(temp, file) {
   }
 }
 
+/**
+ * 非 SQL 数据源的整表导出。
+ *
+ * 下面的 exportTable 是拼 `SELECT … FROM …` 再交给 pageSql/exec 的，
+ * 对 Redis / MongoDB / Elasticsearch 这类没有 SQL 的数据源根本走不通。
+ * 与其给每种都伪造一段假 SQL 让 exec 去解析（脆弱且难排错），
+ * 不如开一个显式的扩展点：适配器实现 fetchTablePage 就走这条路。
+ *
+ * 契约：fetchTablePage({db, schema, table, limit, next}) →
+ *   { columns: [{name}], rows: [[…]], next }
+ *   - 首次调用 next 为 undefined；适配器返回的 next 原样回传给下一次调用
+ *   - next 为 null / undefined 表示已到末尾
+ *
+ * 刻意用**不透明的续传令牌**而不是 offset：Redis 的 SCAN、Elasticsearch 的
+ * search_after、MongoDB 的游标都是续传式的。若按 offset 翻页，每页都得从头重扫，
+ * 复杂度 O(n²)——真机验证时 25000 个键的导出就是这么暴露出来的。
+ */
+async function exportTableByPages(adapter, a) {
+  const pageSize = 5000;
+  const ctx = {
+    dialect: adapter.dialect,
+    quoteIdent: (n) => adapter.quoteIdent(n),
+    literal: (v) => adapter.literal(v),
+    blobLiteral: (v) => adapter.blobLiteral(v),
+    tableRef: a.sqlTableName ? a.sqlTableName : adapter.qualify(a.db, a.schema, a.table),
+  };
+  const temp = tempPath(a.file);
+  let written = 0;
+  let headerDone = false;
+  let w;
+  try {
+    w = await createWriter(a.format || 'csv', temp, ctx);
+    let next;
+    for (;;) {
+      const page = await adapter.fetchTablePage({
+        db: a.db, schema: a.schema, table: a.table, limit: pageSize, next,
+      });
+      if (!page || !Array.isArray(page.rows) || !Array.isArray(page.columns)) {
+        throw new Error('导出读取未返回结果集');
+      }
+      if (!headerDone) { await w.header(page.columns); headerDone = true; }
+      for (const row of page.rows) await w.row(row);
+      written += page.rows.length;
+      next = page.next;
+      if (next === null || next === undefined) break;
+    }
+    const writerMeta = await w.finish();
+    await promoteTemp(temp, a.file);
+    return {
+      rows: written, file: a.file, truncated: false, orderedBy: [],
+      pagination: 'token',
+      // 非 SQL 数据源按续传令牌翻页（Redis SCAN 等），导出期间若有写入可能重复或
+      // 遗漏行，与关系库的游标分页一样不提供跨页一致性快照，这里如实标注。
+      snapshotConsistent: false,
+      ...(writerMeta || {}),
+    };
+  } catch (err) {
+    if (w && w.abort) await w.abort().catch(() => {});
+    await fs.promises.rm(temp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
 /** 整表导出（分页拉取） */
 async function exportTable(adapter, a) {
+  // 非 SQL 数据源走各自的分页读取，不拼 SELECT
+  if (typeof adapter.fetchTablePage === 'function') return exportTableByPages(adapter, a);
   const ctx = {
     dialect: adapter.dialect,
     quoteIdent: (n) => adapter.quoteIdent(n),

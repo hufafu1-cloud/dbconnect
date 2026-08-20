@@ -5,7 +5,8 @@
 一款可在 Windows 上安装运行的桌面数据库连接管理工具，界面与操作参考 Navicat 设计。
 基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、
 TiDB、PolarDB for MySQL、StarRocks、Apache Doris、人大金仓 KingbaseES、openGauss / GaussDB、
-Greenplum、Oracle、OceanBase（MySQL 模式 / Oracle 模式·实验性）** 等 15 种数据库。
+Greenplum、Oracle、OceanBase（MySQL 模式 / Oracle 模式·实验性）、
+以及非关系型的 **Redis、Elasticsearch / OpenSearch**（只读浏览）等 17 种数据库。
 
 > - StarRocks / Apache Doris 是 OLAP 引擎：支持浏览、查询与导出，网格只读、不提供可视化表设计器
 >   （建表需声明分桶与表属性），改数据请直接写 SQL。
@@ -15,6 +16,11 @@ Greenplum、Oracle、OceanBase（MySQL 模式 / Oracle 模式·实验性）** �
 >   连接失败时应用会直接给出这段指引，不会只丢一句看不懂的驱动报错。
 > - **Oracle 无需安装 Instant Client**：使用 oracledb 的 Thin 模式（纯 JS 实现 Oracle 线协议）。
 >   连接时「数据库」处填服务名或 SID，两者连接串写法不同，可在对话框中切换。
+> - **Redis / Elasticsearch 为只读浏览**：不支持网格编辑，也不提供表设计器。
+>   Redis 的「表」是按键前缀（第一个冒号之前）归类出的视图，编辑器是只读命令控制台
+>   （拒绝写入类命令，且不执行会阻塞实例的 `KEYS`）；
+>   Elasticsearch 的「表」是索引、「视图」是别名，编辑器使用 ES SQL，
+>   浏览受 `index.max_result_window`（默认 10000）限制而整表导出不受限。
 
 ![表数据浏览与编辑](docs/screenshot-table.png)
 

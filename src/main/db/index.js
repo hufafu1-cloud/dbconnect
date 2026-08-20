@@ -14,6 +14,8 @@ const { KingbaseAdapter } = require('./kingbase');
 const { OpenGaussAdapter } = require('./opengauss');
 const { GreenplumAdapter } = require('./greenplum');
 const { OracleAdapter } = require('./oracle');
+const { RedisAdapter } = require('./redis');
+const { ElasticsearchAdapter } = require('./elasticsearch');
 
 const ADAPTERS = {
   mysql: MySQLAdapter,
@@ -31,6 +33,8 @@ const ADAPTERS = {
   opengauss: OpenGaussAdapter,
   greenplum: GreenplumAdapter,
   oracle: OracleAdapter,
+  redis: RedisAdapter,
+  elasticsearch: ElasticsearchAdapter,
 };
 
 const openMap = new Map(); // connId -> adapter
@@ -77,7 +81,7 @@ async function shutdownAdapter(ad, timeouts = SHUTDOWN_TIMEOUTS) {
 const DEFAULT_PORTS = {
   mysql: 3306, postgres: 5432, mssql: 1433, clickhouse: 8123, oceanbase: 2881, oboracle: 2881,
   tidb: 4000, polardb: 3306, starrocks: 9030, doris: 9030,
-  kingbase: 54321, opengauss: 5432, greenplum: 5432, oracle: 1521,
+  kingbase: 54321, opengauss: 5432, greenplum: 5432, oracle: 1521, redis: 6379, elasticsearch: 9200,
 };
 
 function createAdapter(cfg) {

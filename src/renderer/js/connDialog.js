@@ -167,6 +167,19 @@ export function openConnDialog(existing, presetType, presetGroup) {
           el('option', { value: 'sid', selected: kind === 'sid' ? 'selected' : null }, 'SID'));
         addAdvanced('连接标识', f.connectType);
       }
+      if (t === 'elasticsearch') {
+        // 自建集群用自签证书很常见；是否信任交由用户显式选择，不替他决定
+        f.esHttps = el('input', { type: 'checkbox' });
+        f.esHttps.checked = !!(cfg.options && cfg.options.https);
+        f.esTrustCert = el('input', { type: 'checkbox' });
+        f.esTrustCert.checked = !!(cfg.options && cfg.options.trustCert);
+        f.esHttps.addEventListener('change', () => {
+          if (f.esHttps.checked && f.port.value === '9200') f.port.value = '9243';
+          else if (!f.esHttps.checked && f.port.value === '9243') f.port.value = '9200';
+        });
+        addAdvanced('', el('div', { class: 'form-check' }, f.esHttps, '使用 HTTPS（云服务通常为 9243 端口）'));
+        addAdvanced('', el('div', { class: 'form-check' }, f.esTrustCert, '信任服务器证书（自签证书时勾选）'));
+      }
       if (t === 'clickhouse') {
         f.https = el('input', { type: 'checkbox' });
         f.https.checked = !!(cfg.options && cfg.options.https);
@@ -279,6 +292,7 @@ export function openConnDialog(existing, presetType, presetGroup) {
       if (t === 'mssql') out.options = { encrypt: f.encrypt.checked, trustCert: f.trustCert.checked };
       if (t === 'clickhouse') out.options = { https: f.https.checked };
       if (t === 'oracle') out.options = { connectType: f.connectType.value };
+      if (t === 'elasticsearch') out.options = { https: f.esHttps.checked, trustCert: f.esTrustCert.checked };
       out.ssh = {
         enabled: f.sshEnabled.checked,
         host: f.sshHost.value.trim(),

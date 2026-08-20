@@ -242,6 +242,40 @@ export const DB_TYPES = {
     // 「数据库」层级实为 Schema（用户），建删走 CREATE/DROP USER，不提供菜单
     caps: { processes: false, manageDatabase: false, transactions: true, schemas: false, designer: true, merge: true },
   },
+  redis: {
+    label: 'Redis',
+    icon: 'redis',
+    // 非 SQL：编辑器里写的是 Redis 命令，不做 SQL 高亮与格式化
+    dialect: 'redis',
+    cmMode: 'text/plain',
+    formatLang: 'sql',
+    defaults: { port: 6379, user: '', database: '' },
+    quote: 'double',
+    backslashEscape: false,
+    experimental: true,
+    note: '只读浏览：树上的「表」是按键前缀（第一个冒号之前）归类出来的视图，并非真实对象；'
+      + '编辑器为 Redis 命令控制台（每行一条），仅允许 GET/HGETALL/SCAN/INFO 等读取类命令。'
+      + '键扫描一律用 SCAN 且有上限，不会执行会阻塞实例的 KEYS。',
+    caps: { processes: false, manageDatabase: false, transactions: false, schemas: false, designer: false, merge: false },
+  },
+  elasticsearch: {
+    label: 'Elasticsearch / OpenSearch',
+    shortLabel: 'Elasticsearch',
+    icon: 'elasticsearch',
+    // 查询编辑器写的是 ES SQL，语法接近标准 SQL，沿用通用高亮
+    dialect: 'elasticsearch',
+    cmMode: 'text/x-sql',
+    formatLang: 'sql',
+    defaults: { port: 9200, user: '', database: '' },
+    quote: 'double',
+    backslashEscape: false,
+    experimental: true,
+    note: '只读浏览：索引即「表」，别名列在「视图」下，「查看定义」显示 mapping。'
+      + '查询编辑器使用 ES SQL（OpenSearch 走 _plugins/_sql，已自动识别）。'
+      + '浏览受 index.max_result_window（默认 10000）限制，超出会明确提示；整表导出走 scroll 不受此限。'
+      + '不提供索引管理与 mapping 编辑——那是 Kibana / OpenSearch Dashboards 的职责。',
+    caps: { processes: false, manageDatabase: false, transactions: false, schemas: false, designer: false, merge: false },
+  },
 };
 
 /** 新建连接菜单与连接对话框的类型顺序 */
@@ -250,6 +284,7 @@ export const TYPE_ORDER = [
   'tidb', 'polardb', 'starrocks', 'doris',
   'kingbase', 'opengauss', 'greenplum',
   'oracle', 'oceanbase', 'oboracle',
+  'redis', 'elasticsearch',
 ];
 
 const FALLBACK = DB_TYPES.mysql;
