@@ -46,6 +46,7 @@ const TARGETS = {
   // 改跑 nonSqlCheck（只读浏览 + 续传导出），见下方说明
   redis: { prefix: 'REDIS', port: 6379, user: '', nonSql: true },
   elasticsearch: { prefix: 'ELASTICSEARCH', port: 9200, user: '', nonSql: true },
+  mongodb: { prefix: 'MONGODB', port: 27017, user: '', nonSql: true },
 };
 
 const ALIASES = {
@@ -66,6 +67,7 @@ const ALIASES = {
   ora: 'oracle',
   es: 'elasticsearch',
   opensearch: 'elasticsearch',
+  mongo: 'mongodb',
 };
 
 function env(name, fallback) {
@@ -228,12 +230,32 @@ function probeDatabase(type, config, databases) {
   return nonSystem || databases[0];
 }
 
+/** PostgreSQL 协议族：分支之间的默认模式并不一致，不能一律假设 public */
+function isPostgresFamily(type) {
+  return ['postgres', 'kingbase', 'opengauss', 'greenplum'].includes(type);
+}
+
 function defaultSchema(type, schemas) {
-  if (type === 'postgres') {
+  if (isPostgresFamily(type)) {
     return schemas.find((name) => String(name).toLowerCase() === 'public') || schemas[0] || 'public';
   }
   if (type === 'mssql') return 'dbo';
   return null;
+}
+
+/**
+ * 向服务端问它自己的默认模式，而不是假设 public。
+ * openGauss 会为每个用户建同名模式并放在 search_path 首位——真机验证时
+ * CREATE TABLE 落在了 gaussdb 模式，而检查按 public 去找，于是「建好的表列不出来」。
+ */
+async function resolveSchema(adapter, type, database, schemas) {
+  if (!isPostgresFamily(type)) return defaultSchema(type, schemas);
+  try {
+    const r = await adapter.exec(database, 'SELECT current_schema() AS s');
+    const name = r && r.rows && r.rows[0] && r.rows[0][0];
+    if (name) return String(name);
+  } catch (e) { /* 取不到就退回下面的猜测 */ }
+  return defaultSchema(type, schemas);
 }
 
 async function metadataCheck(adapter, type, config) {
@@ -245,7 +267,7 @@ async function metadataCheck(adapter, type, config) {
   const listedSchemas = await adapter.listSchemas(database);
   assert(listedSchemas === null || Array.isArray(listedSchemas), 'listSchemas returned an invalid value');
   const schemas = listedSchemas || [];
-  const schema = defaultSchema(type, schemas);
+  const schema = await resolveSchema(adapter, type, database, schemas);
   const objects = await adapter.listObjects(database, schema);
   assert(objects && Array.isArray(objects.tables), 'listObjects did not return a tables array');
   assert(Array.isArray(objects.views), 'listObjects did not return a views array');
@@ -302,9 +324,18 @@ async function rowLimitCheck(adapter, type, database) {
 
 function cancellationSql(type) {
   switch (type) {
+    // MySQL 协议族：TiDB / PolarDB / StarRocks / Doris 都实现了 SLEEP()
     case 'mysql':
-    case 'oceanbase': return 'SELECT SLEEP(5) AS dbpanda_cancel_probe';
-    case 'postgres': return 'SELECT pg_sleep(5) AS dbpanda_cancel_probe';
+    case 'oceanbase':
+    case 'tidb':
+    case 'polardb':
+    case 'starrocks':
+    case 'doris': return 'SELECT SLEEP(5) AS dbpanda_cancel_probe';
+    // PostgreSQL 协议族：KingbaseES / openGauss / Greenplum 都有 pg_sleep
+    case 'postgres':
+    case 'kingbase':
+    case 'opengauss':
+    case 'greenplum': return 'SELECT pg_sleep(5) AS dbpanda_cancel_probe';
     case 'mssql': return "WAITFOR DELAY '00:00:05'; SELECT 1 AS dbpanda_cancel_probe";
     case 'clickhouse': return 'SELECT sleep(3) AS dbpanda_cancel_probe';
     // Oracle 没有免权限的 SLEEP（DBMS_LOCK/DBMS_SESSION 都要额外授权），
@@ -377,7 +408,7 @@ async function baselineSelect(adapter, type, database) {
 }
 
 async function tableMetadataCheck(adapter, type, database, tableName) {
-  const schema = defaultSchema(type, []);
+  const schema = await resolveSchema(adapter, type, database, []);
   const objects = await adapter.listObjects(database, schema);
   const listed = objects.tables.find((table) => String(table.name).toLowerCase() === tableName.toLowerCase());
   assert(listed, 'created table was not returned by listObjects');
@@ -403,7 +434,7 @@ async function exportCheck(adapter, type, database, tableName) {
   try {
     const result = await exportTable(adapter, {
       db: database,
-      schema: defaultSchema(type, []),
+      schema: await resolveSchema(adapter, type, database, []),
       table: tableName,
       format: 'json',
       file,
@@ -590,9 +621,8 @@ async function crudCheck(adapter, type, config) {
  * 不能为了测试给它开写入口子。
  */
 async function nonSqlCheck(adapter, type, config) {
-  const seeded = type === 'redis'
-    ? await seedRedis(config)
-    : await seedElasticsearch(config);
+  const seeders = { redis: seedRedis, elasticsearch: seedElasticsearch, mongodb: seedMongo };
+  const seeded = await seeders[type](config);
   // 清理必须放 finally：断言失败时若不释放种子用的驱动连接，
   // 事件循环被挂住，进程打印完摘要也不退出（本地首次运行踩到过）
   try {
@@ -637,7 +667,11 @@ async function nonSqlChecks(adapter, type, seeded) {
     fetched += chunk.rows.length;
     next = chunk.next;
     pages++;
-    assert(pages < 100, 'fetchTablePage did not terminate: next never became null');
+    // 守卫按预期页数推算，不写死常数：1200 行按 limit=10 翻页本来就要 121 次，
+    // 写死 100 会把正常翻页误判成死循环（Redis 一批 500 键碰不到，MongoDB 一页 10 条就撞上了）。
+    // +2 容纳"最后一页恰好取满、需再取一次空页才收到 null"的情况。
+    assert(pages <= Math.ceil(seeded.count / 10) + 2,
+      `fetchTablePage did not terminate: next never became null (${pages} pages)`);
   } while (next !== null && next !== undefined);
   assert(fetched === seeded.count, `fetchTablePage returned ${fetched} rows, expected ${seeded.count}`);
   assert(pages > 1, 'fetchTablePage finished in one page; the continuation path was never exercised');
@@ -665,6 +699,35 @@ async function nonSqlChecks(adapter, type, seeded) {
   assert(refused, 'non-SQL sources must refuse object actions');
 
   return { objects: objects.tables.length, exported: seeded.count };
+}
+
+/** 用 mongodb 驱动直接写种子数据（适配器只读，不能用它写） */
+async function seedMongo(config) {
+  const { MongoClient } = require('mongodb');
+  const auth = config.user
+    ? `${encodeURIComponent(config.user)}:${encodeURIComponent(config.password || '')}@` : '';
+  const client = new MongoClient(`mongodb://${auth}${config.host}:${config.port}/`, {
+    serverSelectionTimeoutMS: 8000,
+  });
+  await client.connect();
+  const database = `citest${process.pid}`;
+  const collection = 'docs';
+  // 必须多于一批（EXPORT_BATCH=1000），否则 fetchTablePage 单页返回，
+  // _id 续传路径根本走不到——Redis 那次就是这么发现断言是假绿的
+  const count = 1200;
+  const docs = [];
+  for (let i = 1; i <= count; i++) docs.push({ n: i, name: `值${i}` });
+  await client.db(database).collection(collection).insertMany(docs);
+  return {
+    database,
+    table: collection,
+    count,
+    marker: '值1',
+    cleanup: async () => {
+      await client.db(database).dropDatabase().catch(() => {});
+      await client.close().catch(() => {});
+    },
+  };
 }
 
 /** 用 ioredis 直接写种子数据（适配器只读，不能用它写） */
@@ -804,7 +867,7 @@ function printHelp() {
 Environment:
   DB_INTEGRATION_TARGETS  Comma-separated mysql,postgres,mssql,clickhouse,
                           tidb,polardb,starrocks,doris,kingbase,opengauss,
-                          greenplum,oracle,redis,elasticsearch,
+                          greenplum,oracle,redis,elasticsearch,mongodb,
                           oceanbase,oboracle
                           ("all" means the CI matrix targets)
   DB_INTEGRATION_CRUD     Enable disposable-table CRUD checks (default: 0)

@@ -57,6 +57,14 @@ class OpenGaussAdapter extends PostgresAdapter {
     return wrapped;
   }
 
+  /**
+   * openGauss 没有实现 DISCARD。父类在连接归池前执行 DISCARD ALL，
+   * 在这里会报 "DISCARD statement is not yet supported"，导致每条会话都被判定为
+   * 污染并销毁——连接池完全失效，且每次操作都往界面刷一条警告（真机验证发现）。
+   * 改用等价的逐项重置：openGauss 支持 RESET ALL 与 CLOSE ALL。
+   */
+  sessionResetSql() { return 'RESET ALL; CLOSE ALL'; }
+
   /** version() 形如 "(openGauss 5.0.0 build ...) compiled at ..."，取产品与版本号即可 */
   _formatVersion(raw) {
     const text = String(raw || '');

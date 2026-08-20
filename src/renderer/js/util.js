@@ -105,6 +105,10 @@ export const icons = {
     <path d="M3.1 4.3h8.3a2.1 2.1 0 0 1 0 2.4H3.1z" fill="#f0bf1a"/>
     <path d="M3.1 6.9h9.6v2.4H3.1z" fill="#07a5de"/>
     <path d="M3.1 9.5h8.3a2.1 2.1 0 0 0 0 2.4H3.1z" fill="#3ebeb0"/>`),
+  mongodb: svg(`<rect x="1" y="1" width="14" height="14" rx="3.2" fill="#0f2d1f"/>
+    <path d="M8 2.4c1.7 1.9 2.9 3.9 2.9 6 0 2.1-1.2 3.4-2.9 4.3-1.7-.9-2.9-2.2-2.9-4.3 0-2.1 1.2-4.1 2.9-6z" fill="#4faa41"/>
+    <path d="M8 2.4v10.3" stroke="#b8e986" stroke-width=".8"/>
+    <path d="M8 12.7v1.2" stroke="#4faa41" stroke-width="1.1" stroke-linecap="round"/>`),
   connection: cylinder('#5b6470'),
   database: svg(`<ellipse cx="8" cy="3.8" rx="5.4" ry="2.2" fill="#3fa34d"/>
     <path d="M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8" stroke="#3fa34d" stroke-width="1.6"/>

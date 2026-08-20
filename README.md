@@ -6,7 +6,7 @@
 基于 Electron 构建，支持 **MySQL / MariaDB、PostgreSQL、SQLite、SQL Server、ClickHouse、
 TiDB、PolarDB for MySQL、StarRocks、Apache Doris、人大金仓 KingbaseES、openGauss / GaussDB、
 Greenplum、Oracle、OceanBase（MySQL 模式 / Oracle 模式·实验性）、
-以及非关系型的 **Redis、Elasticsearch / OpenSearch**（只读浏览）等 17 种数据库。
+以及非关系型的 **Redis、Elasticsearch / OpenSearch、MongoDB**（只读浏览）等 18 种数据库。
 
 > - StarRocks / Apache Doris 是 OLAP 引擎：支持浏览、查询与导出，网格只读、不提供可视化表设计器
 >   （建表需声明分桶与表属性），改数据请直接写 SQL。
@@ -20,7 +20,10 @@ Greenplum、Oracle、OceanBase（MySQL 模式 / Oracle 模式·实验性）、
 >   Redis 的「表」是按键前缀（第一个冒号之前）归类出的视图，编辑器是只读命令控制台
 >   （拒绝写入类命令，且不执行会阻塞实例的 `KEYS`）；
 >   Elasticsearch 的「表」是索引、「视图」是别名，编辑器使用 ES SQL，
->   浏览受 `index.max_result_window`（默认 10000）限制而整表导出不受限。
+>   浏览受 `index.max_result_window`（默认 10000）限制而整表导出不受限；
+>   MongoDB 的「表」是集合、「视图」是 MongoDB 视图，集合无固定结构，
+>   列由样本文档推断（只取顶层字段，嵌套对象与数组按 JSON 文本显示），
+>   编辑器支持 `集合.find({…})` / `.aggregate([…])` / `.countDocuments({…})` / `.distinct("字段")`。
 
 ![表数据浏览与编辑](docs/screenshot-table.png)
 

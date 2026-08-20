@@ -68,6 +68,13 @@ class PostgresAdapter extends BaseAdapter {
 
   boolLiteral(v) { return v ? 'TRUE' : 'FALSE'; }
 
+  /**
+   * 连接归池前的会话重置语句。
+   * 独立成方法是因为并非所有 PostgreSQL 分支都实现了 DISCARD——openGauss 就没有，
+   * 沿用会导致每条会话用完即毁、连接池形同虚设（真机验证时每次操作都刷一条警告）。
+   */
+  sessionResetSql() { return 'DISCARD ALL'; }
+
   async withSession(db, fn, opts) {
     const requestId = this._requestId(opts);
     this._assertRequestActive(requestId);
@@ -123,7 +130,7 @@ class PostgresAdapter extends BaseAdapter {
         handle.released = true;
         let releaseError = sessionError;
         if (!releaseError) {
-          try { await client.query('DISCARD ALL'); }
+          try { await client.query(this.sessionResetSql()); }
           catch (error) { releaseError = error; }
         }
         client.release(releaseError || undefined);
@@ -565,6 +572,77 @@ class PostgresAdapter extends BaseAdapter {
     return rows.length && rows[0].relkind === 'r' ? 'ctid' : null;
   }
 
+  /**
+   * 索引明细。
+   *
+   * 首选写法用 `unnest(indkey) WITH ORDINALITY` 一次查出列顺序，但 **WITH ORDINALITY
+   * 是 PostgreSQL 9.4 才引入的语法**，openGauss（内核 9.2.4）上直接报语法错误，
+   * 后果是任何表的结构都打不开——比函数节点加载失败严重得多。
+   *
+   * 因此按项目惯例逐级降级：新语法 → 旧写法（取 indkey 原样，在客户端展开列顺序）。
+   * 旧写法同样拿不到 indnkeyatts（PG 11+ 才有），INCLUDE 列在那些版本上本就不存在。
+   */
+  async _indexRows(db, sch, table) {
+    const modern = `SELECT idx.relname AS name, ix.indisunique, ix.indisprimary,
+              COALESCE((row_to_json(ix)->>'indnkeyatts')::int, ix.indnatts) AS indnkeyatts,
+              ix.indexprs IS NOT NULL AS has_expression,
+              ix.indpred IS NOT NULL AS has_predicate,
+              ix.indnatts > COALESCE((row_to_json(ix)->>'indnkeyatts')::int, ix.indnatts) AS has_include,
+              pg_get_indexdef(ix.indexrelid) AS def, att.attname AS col, k.ord
+       FROM pg_index ix
+       JOIN pg_class tbl ON tbl.oid = ix.indrelid
+       JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace
+       JOIN pg_class idx ON idx.oid = ix.indexrelid
+       LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+       LEFT JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = k.attnum
+       WHERE nsp.nspname = $1 AND tbl.relname = $2
+       ORDER BY idx.relname, k.ord`;
+    if (!this.serverVersionNum || this.serverVersionNum >= 90400) {
+      try { return await this._q(db, modern, [sch, table]); }
+      catch (err) { /* 落到下面的旧写法 */ }
+    }
+    // 旧写法：一次取索引本身，一次取该表的 attnum→attname，再在 JS 里按 indkey 顺序展开
+    const idx = await this._q(db,
+      `SELECT idx.relname AS name, ix.indisunique, ix.indisprimary, ix.indnatts,
+              ix.indexprs IS NOT NULL AS has_expression,
+              ix.indpred IS NOT NULL AS has_predicate,
+              pg_get_indexdef(ix.indexrelid) AS def,
+              ix.indkey::text AS indkey
+       FROM pg_index ix
+       JOIN pg_class tbl ON tbl.oid = ix.indrelid
+       JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace
+       JOIN pg_class idx ON idx.oid = ix.indexrelid
+       WHERE nsp.nspname = $1 AND tbl.relname = $2
+       ORDER BY idx.relname`, [sch, table]);
+    if (!idx.length) return [];
+    const attrs = await this._q(db,
+      `SELECT a.attnum, a.attname FROM pg_attribute a
+       JOIN pg_class tbl ON tbl.oid = a.attrelid
+       JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace
+       WHERE nsp.nspname = $1 AND tbl.relname = $2 AND a.attnum > 0`, [sch, table]);
+    const nameOf = new Map(attrs.map((r) => [Number(r.attnum), r.attname]));
+    const out = [];
+    for (const row of idx) {
+      // indkey 是 int2vector，文本形式形如 "1 2"
+      const keys = String(row.indkey || '').trim().split(/\s+/).filter(Boolean).map(Number);
+      const shared = {
+        name: row.name,
+        indisunique: row.indisunique,
+        indisprimary: row.indisprimary,
+        indnkeyatts: keys.length,
+        has_expression: row.has_expression,
+        has_predicate: row.has_predicate,
+        has_include: false,
+        def: row.def,
+      };
+      if (!keys.length) { out.push({ ...shared, col: null, ord: 1 }); continue; }
+      keys.forEach((attnum, i) => {
+        out.push({ ...shared, col: nameOf.get(attnum) || null, ord: i + 1 });
+      });
+    }
+    return out;
+  }
+
   async tableInfo(db, schema, table) {
     const sch = schema || 'public';
     const reg = `${this.quoteIdent(sch)}.${this.quoteIdent(table)}`;
@@ -586,21 +664,7 @@ class PostgresAdapter extends BaseAdapter {
        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
        WHERE i.indrelid = $1::regclass AND i.indisprimary`, [reg]);
     const pk = pkRows.map((r) => r.attname);
-    const idxRows = await this._q(db,
-      `SELECT idx.relname AS name, ix.indisunique, ix.indisprimary,
-              COALESCE((row_to_json(ix)->>'indnkeyatts')::int, ix.indnatts) AS indnkeyatts,
-              ix.indexprs IS NOT NULL AS has_expression,
-              ix.indpred IS NOT NULL AS has_predicate,
-              ix.indnatts > COALESCE((row_to_json(ix)->>'indnkeyatts')::int, ix.indnatts) AS has_include,
-              pg_get_indexdef(ix.indexrelid) AS def, att.attname AS col, k.ord
-       FROM pg_index ix
-       JOIN pg_class tbl ON tbl.oid = ix.indrelid
-       JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace
-       JOIN pg_class idx ON idx.oid = ix.indexrelid
-       LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
-       LEFT JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = k.attnum
-       WHERE nsp.nspname = $1 AND tbl.relname = $2
-       ORDER BY idx.relname, k.ord`, [sch, table]);
+    const idxRows = await this._indexRows(db, sch, table);
     const indexMap = new Map();
     for (const row of idxRows) {
       if (!indexMap.has(row.name)) indexMap.set(row.name, {

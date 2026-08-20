@@ -12,6 +12,13 @@ class MySQLAdapter extends BaseAdapter {
   _transactionBeginSqls() { return ['SET AUTOCOMMIT = 0']; }
   _transactionCleanupSqls() { return ['SET AUTOCOMMIT = 1']; }
 
+  /**
+   * 派生适配器可以补充/覆盖连接池选项。
+   * 存在的原因：MySQL 协议的兼容实现对握手能力位的容忍度差别很大，
+   * 有的会因为一个未协商的能力位直接关闭连接（见 starrocks.js 的 CONNECT_ATTRS）。
+   */
+  extraPoolOptions() { return {}; }
+
   async connect() {
     const c = this.cfg;
     this.pool = mysql.createPool({
@@ -32,6 +39,7 @@ class MySQLAdapter extends BaseAdapter {
       jsonStrings: true,
       charset: 'utf8mb4',
       connectTimeout: 8000,
+      ...this.extraPoolOptions(),
     });
     const [rows] = await this.pool.query('SELECT VERSION() AS v');
     this.serverVersion = 'MySQL ' + rows[0].v;

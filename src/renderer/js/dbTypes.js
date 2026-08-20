@@ -276,6 +276,23 @@ export const DB_TYPES = {
       + '不提供索引管理与 mapping 编辑——那是 Kibana / OpenSearch Dashboards 的职责。',
     caps: { processes: false, manageDatabase: false, transactions: false, schemas: false, designer: false, merge: false },
   },
+  mongodb: {
+    label: 'MongoDB',
+    icon: 'mongodb',
+    // 非 SQL：编辑器里写的是 MongoDB 查询，不做 SQL 高亮
+    dialect: 'mongodb',
+    cmMode: 'application/json',
+    formatLang: 'sql',
+    defaults: { port: 27017, user: '', database: '' },
+    quote: 'double',
+    backslashEscape: false,
+    experimental: true,
+    note: '只读浏览：集合即「表」，MongoDB 视图列在「视图」下。'
+      + '集合没有固定结构，列由样本文档推断（只取顶层字段，嵌套对象与数组按 JSON 文本显示）。'
+      + '编辑器支持 集合.find({…}) / .aggregate([…]) / .countDocuments({…}) / .distinct("字段")，'
+      + '参数需为严格 JSON（键加双引号）。不提供集合管理与文档编辑。',
+    caps: { processes: false, manageDatabase: false, transactions: false, schemas: false, designer: false, merge: false },
+  },
 };
 
 /** 新建连接菜单与连接对话框的类型顺序 */
@@ -284,7 +301,7 @@ export const TYPE_ORDER = [
   'tidb', 'polardb', 'starrocks', 'doris',
   'kingbase', 'opengauss', 'greenplum',
   'oracle', 'oceanbase', 'oboracle',
-  'redis', 'elasticsearch',
+  'redis', 'elasticsearch', 'mongodb',
 ];
 
 const FALLBACK = DB_TYPES.mysql;

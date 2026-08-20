@@ -40,6 +40,31 @@ class TiDBAdapter extends MySQLAdapter {
     }
   }
 
+  /**
+   * 取消查询（编辑器的「停止」按钮）。
+   *
+   * 父类的做法是销毁客户端 socket，这在 MySQL 上能让语句立刻中断。
+   * **在 TiDB 上不行**：真机验证时，销毁 socket 后 SELECT SLEEP(8) 仍在服务端跑满 8 秒，
+   * 调用方要一直等到自然结束，最后只得到一句「执行结果未知」——等于「停止」什么也没停下。
+   *
+   * TiDB 需要服务端下发 KILL：它是分布式的，且必须用 TIDB 变体按全局 connection id
+   * 路由到正确的节点。实测同一条 8 秒查询，KILL TIDB QUERY 后 524ms 即结束。
+   * 先杀查询再销毁 socket：前者负责真正中断，后者保证连接不会被复用到后续请求。
+   */
+  async cancel(requestId) {
+    const handles = this._requestHandlesFor(requestId);
+    const ids = handles.map((conn) => conn && conn.threadId).filter((id) => Number.isInteger(id));
+    for (const id of ids) {
+      try {
+        await this.pool.query('KILL TIDB QUERY ' + id);
+      } catch (err) {
+        // 语法不被识别时退回标准写法；杀不掉也不能挡住下面的会话销毁
+        try { await this.pool.query('KILL QUERY ' + id); } catch (e) { /* 会话可能刚好结束 */ }
+      }
+    }
+    await super.cancel(requestId);
+  }
+
   async listSequences(db) {
     try {
       const rows = await this._q(

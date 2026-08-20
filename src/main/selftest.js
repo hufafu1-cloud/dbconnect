@@ -2748,6 +2748,248 @@ async function runSelfTest() {
     && transfer.valueLiteral(ch, { key: 'value' }, 'Map(String, String)') === "map('key', 'value')"
     && transfer.valueLiteral(ch, { key: 1 }, 'JSON') === "'{\"key\":1}'");
 
+  // ---- StarRocks / Doris：CONNECT_ATTRS 必须摘掉 ----
+  //
+  // 真机验证抓到的致命 bug：mysql2 默认在握手响应里带连接属性
+  // （_client_name / _client_version），StarRocks / Doris 的 FE 解析不了就**直接关闭连接**。
+  // 表现是 "Connection lost: The server closed the connection."，发生在握手之后、
+  // 认证完成之前，报错里完全看不出原因——不修的话这两种类型 100% 连不上。
+  {
+    const { MySQLAdapter } = require('./db/mysql');
+    const { StarRocksAdapter } = require('./db/starrocks');
+    const { DorisAdapter } = require('./db/doris');
+
+    check('mysql 默认不动能力位',
+      Object.keys(new MySQLAdapter({}).extraPoolOptions()).length === 0,
+      new MySQLAdapter({}).extraPoolOptions());
+    check('starrocks 摘掉 CONNECT_ATTRS',
+      new StarRocksAdapter({}).extraPoolOptions().flags === '-CONNECT_ATTRS',
+      new StarRocksAdapter({}).extraPoolOptions());
+    check('doris 继承同一处理',
+      new DorisAdapter({}).extraPoolOptions().flags === '-CONNECT_ATTRS',
+      new DorisAdapter({}).extraPoolOptions());
+    // 只摘这一个：其它能力位是逐个二分确认过不需要动的，别顺手多摘
+    check('不误伤其它能力位',
+      !/SESSION_TRACK|QUERY_ATTRIBUTES|PLUGIN_AUTH/.test(
+        new StarRocksAdapter({}).extraPoolOptions().flags),
+      new StarRocksAdapter({}).extraPoolOptions().flags);
+  }
+
+  // ---- openGauss：PG 9.2 内核缺的两样东西 ----
+  //
+  // 两条都是真机验证撞出来的，且后果都比"某个节点加载失败"严重：
+  //   1. WITH ORDINALITY 是 PG 9.4 才有的语法，openGauss（9.2.4 内核）直接语法错误，
+  //      导致**任何表的结构都打不开**。
+  //   2. openGauss 没实现 DISCARD，父类归池前执行 DISCARD ALL 会让每条会话都被判为
+  //      污染并销毁，连接池完全失效且每次操作刷一条警告。
+  {
+    const { PostgresAdapter } = require('./db/postgres');
+    const { OpenGaussAdapter } = require('./db/opengauss');
+
+    check('pg 默认会话重置语句是 DISCARD ALL',
+      new PostgresAdapter({}).sessionResetSql() === 'DISCARD ALL');
+    check('opengauss 不用 DISCARD（它没实现）',
+      !/DISCARD/i.test(new OpenGaussAdapter({}).sessionResetSql()),
+      new OpenGaussAdapter({}).sessionResetSql());
+
+    // 9.4 以下必须走不含 WITH ORDINALITY 的旧写法
+    const legacy = new PostgresAdapter({});
+    legacy.serverVersionNum = 90204;
+    const legacySql = [];
+    legacy._q = async (db, sql, params) => {
+      legacySql.push(sql);
+      if (/FROM pg_index/.test(sql)) {
+        return [{
+          name: 'idx_a', indisunique: true, indisprimary: false, indnatts: 2,
+          has_expression: false, has_predicate: false, def: 'CREATE INDEX ...', indkey: '2 1',
+        }];
+      }
+      return [{ attnum: 1, attname: 'id' }, { attnum: 2, attname: 'note' }];
+    };
+    const legacyRows = await legacy._indexRows('d', 'gaussdb', 't');
+    check('pg 9.2 上不发出 WITH ORDINALITY',
+      legacySql.every((sql) => !/WITH ORDINALITY/i.test(sql)), legacySql.length);
+    check('pg 9.2 上按 indkey 顺序在客户端展开列',
+      legacyRows.map((r) => r.col).join(',') === 'note,id',
+      legacyRows.map((r) => r.col));
+    check('pg 9.2 上列序号从 1 递增',
+      legacyRows.map((r) => r.ord).join(',') === '1,2', legacyRows.map((r) => r.ord));
+    check('pg 9.2 上不谎报 INCLUDE 列',
+      legacyRows.every((r) => r.has_include === false));
+
+    // 新版本仍走首选写法
+    const modern = new PostgresAdapter({});
+    modern.serverVersionNum = 160000;
+    let modernSql = null;
+    modern._q = async (db, sql) => { modernSql = sql; return []; };
+    await modern._indexRows('d', 'public', 't');
+    check('pg 9.4+ 仍使用 WITH ORDINALITY 的首选写法',
+      /WITH ORDINALITY/i.test(modernSql || ''), modernSql && modernSql.slice(0, 60));
+
+    // 版本号未知时先试首选写法，失败再降级——中间件后面版本号可能取不到
+    const unknown = new PostgresAdapter({});
+    unknown.serverVersionNum = 0;
+    const tried = [];
+    unknown._q = async (db, sql) => {
+      tried.push(/WITH ORDINALITY/i.test(sql) ? 'modern' : 'legacy');
+      if (/WITH ORDINALITY/i.test(sql)) throw new Error('syntax error at or near "."');
+      if (/FROM pg_index/.test(sql)) return [];
+      return [];
+    };
+    await unknown._indexRows('d', 'public', 't');
+    check('pg 版本号未知时首选写法失败会自动降级',
+      tried[0] === 'modern' && tried.includes('legacy'), tried);
+  }
+
+  // ---- TiDB：取消查询必须下发服务端 KILL ----
+  //
+  // 真机验证发现的坑：父类（MySQL）靠销毁客户端 socket 中断查询，这在 MySQL 上有效，
+  // 但在 TiDB 上语句仍会在服务端跑到自然结束——8 秒的 SLEEP 要等满 8 秒，
+  // 最后只得到一句「执行结果未知」，等于「停止查询」什么也没停下。
+  // TiDB 是分布式的，必须用 KILL TIDB QUERY 按全局 connection id 路由到正确节点。
+  {
+    const { TiDBAdapter } = require('./db/tidb');
+    const td = new TiDBAdapter({});
+    const issued = [];
+    td.pool = { query: async (sql) => { issued.push(sql); } };
+    td._requestHandlesFor = () => [{ threadId: 2097190 }];
+    td._markRequestCancelled = () => {};
+    await td.cancel('req-1');
+    check('tidb 取消时下发 KILL TIDB QUERY 而不是只销毁 socket',
+      issued.some((sql) => /^KILL TIDB QUERY 2097190$/.test(sql)), issued);
+
+    // 语法不被识别时要退回标准写法，不能让取消整个失效
+    const legacy = new TiDBAdapter({});
+    const legacyIssued = [];
+    legacy.pool = { query: async (sql) => {
+      legacyIssued.push(sql);
+      if (/KILL TIDB/.test(sql)) throw new Error("You have an error in your SQL syntax");
+    } };
+    legacy._requestHandlesFor = () => [{ threadId: 42 }];
+    legacy._markRequestCancelled = () => {};
+    await legacy.cancel('req-2');
+    check('tidb KILL TIDB 不被识别时退回 KILL QUERY',
+      legacyIssued.some((sql) => /^KILL QUERY 42$/.test(sql)), legacyIssued);
+  }
+
+  // ---- MongoDB（非关系型，只读浏览）----
+  //
+  // 不连真实实例也能验的：命令解析、只读边界、BSON 值转换。
+  // 只读边界尤其重要——它是产品承诺，解析器放过一个写操作就等于承诺失效。
+  {
+    const { MongoDBAdapter } = require('./db/mongodb');
+    const mg = new MongoDBAdapter({ host: 'x' });
+
+    check('mongodb 注册', createAdapter({ type: 'mongodb', host: 'x' }) instanceof MongoDBAdapter);
+    check('mongodb 方言', mg.dialect === 'mongodb');
+    check('mongodb 网格只读', !!mg.readonlyReason);
+    check('mongodb 禁用表设计器', !!mg.designerReason);
+    check('mongodb 不支持事务', mg.transactionSupport.supported === false);
+    check('mongodb 无对象节点', Object.values(mg.objectCaps).every((v) => v === false), mg.objectCaps);
+
+    // 命令解析
+    const find = mg._parseCommand('orders.find({"status":"paid"}, {"limit":10})');
+    check('mongodb 解析 find 与两个参数',
+      find.collection === 'orders' && find.op === 'find'
+      && find.args[0].status === 'paid' && find.args[1].limit === 10, find);
+    const agg = mg._parseCommand('orders.aggregate([{"$group":{"_id":"$city"}}])');
+    check('mongodb 解析 aggregate 管道',
+      agg.op === 'aggregate' && Array.isArray(agg.args[0]) && agg.args[0][0].$group, agg);
+    check('mongodb 允许 db. 前缀',
+      mg._parseCommand('db.orders.countDocuments({})').collection === 'orders');
+    check('mongodb 允许带点号的集合名',
+      mg._parseCommand('log.events.find({})').collection === 'log.events');
+    check('mongodb 允许无参数调用',
+      mg._parseCommand('orders.estimatedDocumentCount()').args.length === 0);
+
+    // 只读边界：写操作必须在解析阶段就被拒
+    const writeOps = ['insertOne', 'insertMany', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany',
+      'drop', 'replaceOne', 'findOneAndUpdate', 'findOneAndDelete', 'bulkWrite', 'createIndex', 'renameCollection'];
+    let allRefused = true;
+    let leaked = null;
+    for (const op of writeOps) {
+      try { mg._parseCommand(`orders.${op}({})`); allRefused = false; leaked = leaked || op; }
+      catch (e) { /* 预期被拒 */ }
+    }
+    check('mongodb 写操作全部被拒', allRefused, leaked && ('放行了 ' + leaked));
+
+    let readsOk = true;
+    let wrongly = null;
+    for (const op of ['find', 'aggregate', 'countDocuments', 'distinct', 'estimatedDocumentCount']) {
+      try { mg._parseCommand(`orders.${op}()`); }
+      catch (e) { readsOk = false; wrongly = wrongly || op; }
+    }
+    check('mongodb 只读操作正常放行', readsOk, wrongly && ('误拒了 ' + wrongly));
+
+    // 非法输入要给出可操作的提示，而不是抛底层异常
+    let badSyntax = null;
+    try { mg._parseCommand('SELECT * FROM orders'); } catch (e) { badSyntax = e.message; }
+    check('mongodb 非命令形式给出用法提示',
+      badSyntax && /支持的形式/.test(badSyntax), badSyntax);
+    let badJson = null;
+    try { mg._parseCommand('orders.find({status:"paid"})'); } catch (e) { badJson = e.message; }
+    check('mongodb 非严格 JSON 明确指出键要加双引号',
+      badJson && /双引号/.test(badJson), badJson);
+
+    // BSON 值转换
+    check('mongodb 原始类型直出',
+      mg._cellValue('a') === 'a' && mg._cellValue(3) === 3 && mg._cellValue(true) === true);
+    check('mongodb null 保持 null', mg._cellValue(null) === null && mg._cellValue(undefined) === null);
+    check('mongodb 嵌套对象转 JSON 文本',
+      mg._cellValue({ a: { b: 1 } }) === '{"a":{"b":1}}', mg._cellValue({ a: { b: 1 } }));
+    check('mongodb 数组转 JSON 文本',
+      mg._cellValue([1, 2]) === '[1,2]', mg._cellValue([1, 2]));
+    {
+      const { ObjectId } = require('mongodb');
+      const oid = new ObjectId('507f1f77bcf86cd799439011');
+      check('mongodb ObjectId 转十六进制字符串',
+        mg._cellValue(oid) === '507f1f77bcf86cd799439011', mg._cellValue(oid));
+    }
+
+    // 聚合管道里的写阶段必须拦掉——$out / $merge 会把结果写进集合
+    {
+      const fake = new MongoDBAdapter({ host: 'x' });
+      fake.client = { db: () => ({ collection: () => ({ aggregate: () => ({ toArray: async () => [] }) }) }) };
+      let outBlocked = false;
+      try { await fake._runCommand('d', 'orders.aggregate([{"$out":"copy"}])'); }
+      catch (e) { outBlocked = /只读/.test(e.message) && /\$out/.test(e.message); }
+      check('mongodb 聚合管道的 $out 被拦截', outBlocked);
+      let mergeBlocked = false;
+      try { await fake._runCommand('d', 'orders.aggregate([{"$merge":"copy"}])'); }
+      catch (e) { mergeBlocked = /只读/.test(e.message); }
+      check('mongodb 聚合管道的 $merge 被拦截', mergeBlocked);
+    }
+
+    // 对象操作
+    let mgAction = false;
+    try { await mg.action('d', { action: 'dropTable', table: 't' }); }
+    catch (e) { mgAction = /只读/.test(e.message) && /Compass/.test(e.message); }
+    check('mongodb 对象操作被拒并指向 Compass', mgAction);
+
+    // 导出扩展点：必须用 _id 续传而不是 skip（skip 在大集合上是 O(n)）
+    check('mongodb 提供非 SQL 导出扩展点', typeof mg.fetchTablePage === 'function');
+    {
+      const seen = [];
+      const fake = new MongoDBAdapter({ host: 'x' });
+      fake._inferColumns = async () => ({ columns: [{ name: '_id' }, { name: 'n' }], sampled: 0 });
+      let batch = 0;
+      fake.client = { db: () => ({ collection: () => ({
+        find: (filter) => { seen.push(filter); batch++; return { toArray: async () => (
+          batch === 1 ? [{ _id: 1, n: 'a' }, { _id: 2, n: 'b' }] : []
+        ) }; },
+      }) }) };
+      const p1 = await fake.fetchTablePage({ db: 'd', table: 't', limit: 2 });
+      check('mongodb 首页不带游标条件',
+        Object.keys(seen[0]).length === 0, seen[0]);
+      check('mongodb 首页返回最后一条的 _id 作为续传令牌',
+        p1.next && p1.next.afterId === 2, p1.next);
+      const p2 = await fake.fetchTablePage({ db: 'd', table: 't', limit: 2, next: p1.next });
+      check('mongodb 续传用 _id > 上次而不是 skip',
+        seen[1] && seen[1]._id && seen[1]._id.$gt === 2, seen[1]);
+      check('mongodb 取完后 next 为 null', p2.next === null, p2.next);
+    }
+  }
+
   // ---- Elasticsearch / OpenSearch（非关系型，只读浏览）----
   //
   // 不连真实集群也能验的几件事：mapping 展平、深翻页拦截、错误翻译、

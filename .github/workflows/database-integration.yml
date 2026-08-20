@@ -180,6 +180,10 @@ jobs:
             image: opensearchproject/opensearch:2.17.1
             run_args: -p 9200:9200 -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true
             ready_cmd: curl -sf http://127.0.0.1:9200/_cluster/health
+          - target: mongodb
+            image: mongo:7
+            run_args: -p 27017:27017
+            ready_cmd: docker exec db mongosh --quiet --eval db.runCommand({ping:1})
 
     steps:
       - name: Check out repository
@@ -235,6 +239,8 @@ jobs:
           REDIS_PORT: "6379"
           ELASTICSEARCH_HOST: 127.0.0.1
           ELASTICSEARCH_PORT: "9200"
+          MONGODB_HOST: 127.0.0.1
+          MONGODB_PORT: "27017"
         run: node scripts/integration-db.js
 
       - name: Dump ${{ matrix.target }} logs on failure

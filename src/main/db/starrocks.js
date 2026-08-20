@@ -43,6 +43,21 @@ class StarRocksAdapter extends MySQLAdapter {
     };
   }
 
+  /**
+   * 去掉 CONNECT_ATTRS 能力位。
+   *
+   * mysql2 默认会在握手响应里带上连接属性（_client_name / _client_version），
+   * 但 StarRocks / Doris 的 FE 解析不了这段内容，**直接关闭连接**——
+   * 表现为 "Connection lost: The server closed the connection."，
+   * 在握手之后、认证完成之前，报错里完全看不出原因。
+   *
+   * 真机验证时 Doris 2.1 上 100% 复现：逐个能力位二分后确认只要摘掉 CONNECT_ATTRS
+   * 即可正常连接。不改动其它能力位，避免影响别的 MySQL 兼容实现。
+   */
+  extraPoolOptions() {
+    return { flags: '-CONNECT_ATTRS' };
+  }
+
   async connect() {
     if (!this.cfg.port) this.cfg.port = this.defaultPort;
     await super.connect();
