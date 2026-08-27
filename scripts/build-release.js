@@ -80,7 +80,8 @@ function cleanReleaseOutput() {
   for (const name of fs.readdirSync(releaseDir)) {
     if (keep.has(name)) continue;
     // 发布目录只保存当前构建产物；旧安装包、旧 blockmap、旧 zip 和构建临时目录均可安全清理。
-    if (/^DBPanda-Setup-\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\.exe(?:\.blockmap)?|\.zip)$/.test(name)
+    // 产物名已去掉版本号，这里仍兼容历史上带版本号的文件名，免得旧构建残留在目录里。
+    if (/^DBPanda-Setup(?:-\d+\.\d+\.\d+(?:-[\w.-]+)?)?(?:\.exe(?:\.blockmap)?|\.zip)$/.test(name)
       || name === 'latest.yml' || name === 'builder-debug.yml' || name === 'win-unpacked') {
       fs.rmSync(path.join(releaseDir, name), { recursive: true, force: true });
     }

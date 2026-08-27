@@ -104,7 +104,60 @@ function testLegacyDataMigration() {
   }
 }
 
+/**
+ * 对外下载链接必须是固定的。
+ *
+ * GitHub 的 releases/latest/download/<文件名> 只在**文件名不变**时才是一个长期链接，
+ * 所以安装包产物名里不能再出现版本号——一旦有人把 ${version} 加回去，
+ * 官网/群里发出去的链接就会在下一次发版时集体失效，而且不会有任何报错提醒。
+ * 这里从 artifactName 推出真实文件名，再逐个核对发布流水线、校验脚本与 README 用的是同一个名字。
+ */
+function testStableDownloadName() {
+  const pkg = JSON.parse(text('package.json'));
+  const artifactName = pkg.build.win.artifactName;
+  assert.ok(
+    !/\$\{version\}/.test(artifactName),
+    `build.win.artifactName 不能包含 \${version}（当前：${artifactName}）：`
+    + '文件名带版本号会让 releases/latest/download 的固定下载链接每次发版失效',
+  );
+  const named = (ext) => artifactName
+    .replace('${productName}', pkg.build.productName)
+    .replace('${ext}', ext);
+  const installer = named('exe');
+  const portable = named('zip');
+
+  const workflow = text('.github/workflows/release.yml');
+  for (const file of [installer, portable]) {
+    assert.ok(
+      workflow.includes(`release/${file}`),
+      `发布流水线未上传 release/${file}：产物名改了就要同步改 .github/workflows/release.yml`,
+    );
+  }
+  assert.ok(
+    !/release\/DBPanda-Setup-\$\{\{/.test(workflow),
+    '发布流水线仍在按版本号拼产物名，与固定下载链接冲突',
+  );
+
+  const verifyScript = text('scripts/verify-windows-release.ps1');
+  for (const file of [installer, portable]) {
+    assert.ok(
+      verifyScript.includes(`release\\${file}`),
+      `release:verify 未检查 release\\${file}`,
+    );
+  }
+
+  // README 里公布的就是用户实际点的链接，必须和产物名一致
+  const readme = text('README.md');
+  for (const file of [installer, portable]) {
+    assert.ok(
+      readme.includes(`releases/latest/download/${file}`),
+      `README 的下载链接与产物名 ${file} 不一致`,
+    );
+  }
+}
+
 testPackageIdentity();
+testStableDownloadName();
 testVisibleBrandCopy();
 testLegacyDataMigration();
-console.log('DBPanda product identity and legacy migration checks passed');
+console.log('DBPanda product identity, stable download name and legacy migration checks passed');

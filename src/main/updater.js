@@ -41,6 +41,11 @@ function setup(win) {
   // 下载未完成时退出不能触发安装，避免把临时包当成完整安装包。
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowDowngrade = false;
+  // 安装包文件名不带版本号（对外只发一个固定下载链接），electron-updater 的增量下载
+  // 靠把新包 URL 里的版本号替换成旧版本来定位旧 blockmap，文件名里没有版本号就替换不出来，
+  // 只会拿同一个 blockmap 算出「零差异」，再靠 sha512 校验失败兜底回全量——白跑一趟。
+  // 何况 feed 走的是 generic + releases/latest，旧版本的 blockmap 本来就取不到。
+  autoUpdater.disableDifferentialDownload = true;
   autoUpdater.setFeedURL(feed);
   autoUpdater.removeAllListeners('checking-for-update');
   autoUpdater.removeAllListeners('update-available');

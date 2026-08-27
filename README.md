@@ -31,6 +31,19 @@ Greenplum、Oracle、达梦 DM、OceanBase（MySQL 模式 / Oracle 模式·实�
 |---|---|---|
 | ![查询](docs/screenshot-query.png) | ![设计器](docs/screenshot-designer.png) | ![筛选](docs/screenshot-filter.png) |
 
+## 下载
+
+下载链接是固定的，不随版本变化，永远指向最新发布版：
+
+| | 直连 GitHub | 国内加速（gh-proxy） |
+|---|---|---|
+| 安装包（推荐） | https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe | https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe |
+| 免安装 ZIP | https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip | https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip |
+
+发布产物的文件名不带版本号，因此这两个链接发新版后**无需修改**。
+具体版本看 [Releases 页面](https://github.com/hufafu1-cloud/dbconnect/releases/latest)
+的 tag，或安装包属性里的文件版本号。应用内的「检查更新」走的是同一套地址。
+
 ## 功能特性
 
 ### 连接管理
@@ -226,7 +239,9 @@ SQL Server 2022、ClickHouse 24.8 服务矩阵验证元数据、CRUD、高精度
 npm run dist
 ```
 
-输出 `release/DBPanda-Setup-<版本>.exe`（NSIS 安装包，支持选择安装目录、创建桌面/开始菜单快捷方式）。
+输出 `release/DBPanda-Setup.exe`（NSIS 安装包，支持选择安装目录、创建桌面/开始菜单快捷方式）
+与 `release/DBPanda-Setup.zip`（免安装）。文件名不带版本号，对外的下载链接才能固定不变；
+版本号写在安装包的文件属性里，`npm run release:verify` 会核对它与 package.json 一致。
 正式发布可通过 electron-builder 标准的 `CSC_LINK` / `CSC_KEY_PASSWORD` 环境变量注入代码签名证书；
 仓库不保存任何签名私钥。
 

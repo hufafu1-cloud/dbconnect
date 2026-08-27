@@ -96,10 +96,13 @@ jobs:
           prerelease: ${{ steps.version.outputs.prerelease }}
           # exe/zip 已由 verify 保证；blockmap / latest.yml 有则上传，没有不失败
           fail_on_unmatched_files: false
+          # 产物名不带版本号，对外只需要一个固定链接：
+          #   https://github.com/<owner>/<repo>/releases/latest/download/DBPanda-Setup.exe
+          # 版本从 tag 与安装包自身的文件版本号看，不靠文件名区分。
           files: |
-            release/DBPanda-Setup-${{ steps.version.outputs.version }}.exe
-            release/DBPanda-Setup-${{ steps.version.outputs.version }}.zip
-            release/DBPanda-Setup-${{ steps.version.outputs.version }}.exe.blockmap
+            release/DBPanda-Setup.exe
+            release/DBPanda-Setup.zip
+            release/DBPanda-Setup.exe.blockmap
             release/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

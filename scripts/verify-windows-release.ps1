@@ -12,7 +12,7 @@ if ([string]::IsNullOrWhiteSpace($ExpectedVersion)) {
   $ExpectedVersion = (Get-Content -Raw -LiteralPath (Join-Path $root "package.json") | ConvertFrom-Json).version
 }
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
-  $ExePath = "release\DBPanda-Setup-$ExpectedVersion.exe"
+  $ExePath = "release\DBPanda-Setup.exe"
 }
 $exe = [System.IO.Path]::GetFullPath((Join-Path $root $ExePath))
 $ico = [System.IO.Path]::GetFullPath((Join-Path $root $IconPath))
@@ -76,8 +76,9 @@ if ($meanDifference -gt 8) {
   throw ("Packaged EXE icon does not match assets/icon.ico (mean channel difference: {0:N2})" -f $meanDifference)
 }
 
-$installer = Join-Path $root "release\DBPanda-Setup-$ExpectedVersion.exe"
-$portable = Join-Path $root "release\DBPanda-Setup-$ExpectedVersion.zip"
+# 文件名不再带版本号，版本靠上面的 ProductVersion 断言把关
+$installer = Join-Path $root "release\DBPanda-Setup.exe"
+$portable = Join-Path $root "release\DBPanda-Setup.zip"
 if (-not (Test-Path -LiteralPath $installer)) { throw "Installer missing: $installer" }
 if (-not (Test-Path -LiteralPath $portable)) { throw "Portable ZIP missing: $portable" }
 
