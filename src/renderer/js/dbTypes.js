@@ -305,7 +305,6 @@ export const DB_TYPES = {
     defaults: { port: 5236, user: 'SYSDBA', database: '' },
     quote: 'double',
     backslashEscape: false,
-    experimental: true,
     note: '默认端口 5236、管理员 SYSDBA；「数据库」层级实为 Schema，留空即按登录用户的模式浏览。'
       + '注意：达梦官方 Node 驱动按冒号切分连接串中的用户名与密码，'
       + '密码中不能包含冒号（会被截断导致认证失败），如有请先在服务端改掉。',
@@ -399,5 +398,29 @@ export function quoteLiteralOf(type) {
     let s = String(v).replace(/'/g, "''");
     if (backslash) s = s.replace(/\\/g, '\\\\');
     return "'" + s + "'";
+  };
+}
+
+// 「看着像字符串」的列类型：character varying / text / nvarchar / uuid / enum / String(CH) …
+const STR_COL_TYPE_RE = /char|text|string|uuid|enum|clob|json|xml/i;
+const NUM_LITERAL_RE = /^-?\d+(\.\d+)?$/;
+
+/**
+ * 筛选条件里的值字面量。
+ *
+ * 只看值长得像不像数字是不够的：给 varchar 列填 23 会拼出 "bh" = 23，
+ * PostgreSQL 直接报 operator does not exist: character varying = integer。
+ * 所以确知是字符串列时一律加引号——给字符串列加引号各家都认。
+ * 列类型不明（查询结果集等）就退回按值判断：反过来给 ClickHouse 这类
+ * 强类型引擎的数字列加引号同样会炸，不能一刀切全加。
+ *
+ * @returns {(colType: string, value: any) => string} 可直接拼进 SQL 的字面量
+ */
+export function whereLiteralOf(type) {
+  const lit = quoteLiteralOf(type);
+  return (colType, value) => {
+    const text = String(value == null ? '' : value).trim();
+    if (colType && STR_COL_TYPE_RE.test(String(colType))) return lit(text);
+    return NUM_LITERAL_RE.test(text) ? text : lit(text);
   };
 }

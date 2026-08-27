@@ -14,6 +14,10 @@ import {
 
 let treeRoot = null;
 const connNodes = new Map(); // connId -> node element记录
+// 「收藏 / 最近打开」单独挂一个容器，收藏变动只重绘这一块，
+// 整棵树不跟着重建——否则打开一张表就把用户展开的层级全收了回去。
+let shortcutHost = null;
+const shortcutOpen = { favorites: false, recent: false };
 
 function nodeRow({ depth, icon, label, meta, twisty, onToggle, onSelect, onDblClick, onMenu, onSqlFileDrop, cls }) {
   const tw = el('span', { class: 'tree-twisty' + (twisty ? '' : ' leaf') }, '▶');
@@ -962,18 +966,24 @@ function renderShortcutNode(title, icon, items, kind) {
   if (!usable.length) return null;
   const container = el('div', { class: 'tree-node' });
   const children = makeBranch();
+  const toggle = () => {
+    const open = !children.classList.contains('open');
+    setOpen(tw, children, open);
+    shortcutOpen[kind] = open; // 记下来，下次重绘这块时照原样恢复
+  };
   const { row, tw } = nodeRow({
     depth: 0,
     icon,
     label: title,
     meta: String(usable.length),
     twisty: true,
-    onToggle: () => setOpen(tw, children, !children.classList.contains('open')),
-    onDblClick: () => setOpen(tw, children, !children.classList.contains('open')),
+    onToggle: toggle,
+    onDblClick: toggle,
     onMenu: (e) => showMenu(e.clientX, e.clientY, kind === 'recent'
       ? [{ label: '清空最近打开', icon: 'trash', onClick: () => clearRecent() }]
       : [{ label: `共 ${usable.length} 项`, disabled: true }]),
   });
+  row.dataset.shortcutKey = kind;
   for (const item of usable) {
     const target = { connId: item.connId, db: item.db, schema: item.schema, table: item.table };
     const leaf = nodeRow({
@@ -985,10 +995,35 @@ function renderShortcutNode(title, icon, items, kind) {
       onDblClick: () => actions.openTable(target),
       onMenu: (e) => leafMenu(e, target, item.kind === 'view'),
     });
+    leaf.row.dataset.shortcutKey = `${kind}|${item.connId}|${item.db || ''}|${item.schema || ''}|${item.table}`;
     children.append(leaf.row);
   }
+  if (shortcutOpen[kind]) setOpen(tw, children, true);
   container.append(row, children);
   return container;
+}
+
+/**
+ * 只重绘「收藏 / 最近打开」两个虚拟节点。
+ *
+ * 打开表会写「最近打开」，以前这里直接整棵 renderTree()，
+ * 结果双击一张表就把整棵树打回初始折叠状态。选中行如果正好在这一块里，
+ * 重绘后按 key 找回来，只补样式、不重新触发 onSelect。
+ */
+function renderShortcuts() {
+  if (!shortcutHost) return;
+  const selectedRow = treeRoot && treeRoot.querySelector('.tree-row.selected');
+  const keepKey = selectedRow && shortcutHost.contains(selectedRow)
+    ? selectedRow.dataset.shortcutKey : null;
+  shortcutHost.innerHTML = '';
+  const favoritesNode = renderShortcutNode('收藏', 'check', favoriteItems(), 'favorites');
+  if (favoritesNode) shortcutHost.append(favoritesNode);
+  const recentNode = renderShortcutNode('最近打开', 'history', recentItems(), 'recent');
+  if (recentNode) shortcutHost.append(recentNode);
+  if (keepKey) {
+    const again = shortcutHost.querySelector(`.tree-row[data-shortcut-key="${CSS.escape(keepKey)}"]`);
+    if (again) again.classList.add('selected');
+  }
 }
 
 // ---------------- 分组节点 ----------------
@@ -1074,8 +1109,8 @@ export function renderTree() {
   if (!treeRoot.hasAttribute('tabindex')) {
     treeRoot.setAttribute('tabindex', '0');
     treeRoot.addEventListener('keydown', treeKeyDown);
-    // 收藏/最近变动后重绘树，虚拟节点才会跟着更新
-    onRecentChange(() => renderTree());
+    // 收藏/最近变动后只刷这两个虚拟节点，不动已展开的连接树
+    onRecentChange(() => renderShortcuts());
   }
   treeRoot.innerHTML = '';
   connNodes.clear();
@@ -1096,10 +1131,9 @@ export function renderTree() {
     }
   }
   // 收藏 / 最近放在最上面：连接一多，每次展开找表很费事
-  const favoritesNode = renderShortcutNode('收藏', 'check', favoriteItems(), 'favorites');
-  if (favoritesNode) treeRoot.append(favoritesNode);
-  const recentNode = renderShortcutNode('最近打开', 'history', recentItems(), 'recent');
-  if (recentNode) treeRoot.append(recentNode);
+  shortcutHost = el('div', { class: 'tree-shortcuts' });
+  treeRoot.append(shortcutHost);
+  renderShortcuts();
   for (const [gname, conns] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     treeRoot.append(renderGroupNode(gname, conns));
   }

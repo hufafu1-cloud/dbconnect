@@ -21,10 +21,15 @@
 //
 // 4. **自动提交**由驱动选项控制，没有对应的服务端语句，沿用 oracle.js 的哨兵做法。
 //
-// ⚠ 未经真机验证：达梦没有公开可用的容器镜像（需授权），本适配器只经过
-// 静态检查与自检覆盖。首次接入真实实例时请重点关注连接握手与数据字典兼容性。
+// 5. **握手加密**。达梦服务端会协商通信加密算法，DM8 实测给出 DES-CFB，
+//    而 BoringSSL（Electron）与 OpenSSL 3（纯 Node）都不提供这个模式，
+//    必须先装 desCipherShim 才连得上。
+//
+// 已在真实 DM8（DM Database Server 64 V8）上验证过连接握手；
+// 达梦没有公开可用的容器镜像（需授权），因此仍未进入 CI 的自动化集成测试。
 const dmdb = require('dmdb');
 const { OracleBaseAdapter } = require('./oracleBase');
+const { installMissingDesModes } = require('./desCipherShim');
 
 // 与 oracle.js 同款哨兵：基类以 SQL 字符串驱动事务开始/清理，
 // 而这两步在达梦只是翻转驱动的 autoCommit，不对应任何服务端语句。
@@ -67,11 +72,19 @@ class DMAdapter extends OracleBaseAdapter {
   }
 
   async connect() {
-    const c = this.cfg;
+    // 达梦握手协商出的通信加密算法（DM8 实测为 DES-CFB）在 BoringSSL/OpenSSL 3 上缺失，
+    // 必须先补上模式实现，否则 dmdb 加密登录报文时就会失败。详见 desCipherShim.js。
+    installMissingDesModes();
     // 全进程一次性设置取值方式，保证精度与 LOB 内容不在驱动层丢失。
     // 只有本适配器使用 dmdb，不会影响其它连接类型。
     dmdb.fetchAsString = [dmdb.NUMBER, dmdb.CLOB];
     dmdb.fetchAsBuffer = [dmdb.BLOB];
+
+    // 先用不走池的直连探一次。
+    // dmdb 的连接池把握手/认证错误整个吞掉，只在排队超时后抛一句
+    // 「获取连接请求等待超时」——密码错、算法不支持、库没起来全长一个样，无从排查。
+    const probe = await dmdb.getConnection(this._connectString());
+    await probe.close().catch(() => {});
 
     this.pool = await dmdb.createPool({
       connectString: this._connectString(),

@@ -824,7 +824,99 @@ app.whenReady().then(async () => {
           && extras.afterDrop === 0 && extras.snapshotRoundTrip
           && extras.chartOpened && extras.chartBars === 3
           && extras.chartRejectsNonNumeric;
+        // 树的局部刷新：写「最近打开」（双击打开表会做这件事）不能把整棵树重建掉，
+        // 否则用户展开到第几层都会被打回折叠态。用 DOM 身份来验最直接。
+        const treeState = await win.webContents.executeJavaScript(`(async () => {
+          const { state } = await import('./js/state.js');
+          const { renderTree } = await import('./js/tree.js');
+          const { noteOpened } = await import('./js/recentStore.js');
+          renderTree();
+          const out = {};
+          const conn = state.connections[0];
+          const mark = document.querySelector('#tree .tree-node[data-conn]');
+          mark.dataset.smokeMark = '1';
+          const recentRow = () => [...document.querySelectorAll('.tree-shortcuts .tree-row')]
+            .find((r) => r.dataset.shortcutKey === 'recent');
+          noteOpened({ connId: conn.id, db: 'd', schema: null, table: 'smoke_t1', kind: 'table' });
+          const head = recentRow();
+          out.recentRendered = !!head;
+          if (head) head.querySelector('.tree-twisty').click();   // 展开「最近打开」
+          out.openedBefore = !!(head && head.parentElement.querySelector('.tree-children.open'));
+          noteOpened({ connId: conn.id, db: 'd', schema: null, table: 'smoke_t2', kind: 'table' });
+          const head2 = recentRow();
+          out.stillOpen = !!(head2 && head2.parentElement.querySelector('.tree-children.open'));
+          out.recentItems = head2
+            ? [...head2.parentElement.querySelectorAll('.tree-children .tree-label')].map((n) => n.textContent).join(',')
+            : '';
+          // 连接节点还是原来那个 DOM → 整棵树没被重建
+          out.treeKept = document.contains(mark) && mark.dataset.smokeMark === '1';
+          out.hosts = document.querySelectorAll('.tree-shortcuts').length;
+          return out;
+        })()`);
+        const treeStateOk = treeState.recentRendered && treeState.openedBefore
+          && treeState.stillOpen && treeState.recentItems === 'smoke_t2,smoke_t1'
+          && treeState.treeKept && treeState.hosts === 1;
         console.log('[SMOKE][extras]', JSON.stringify(extras));
+        // 达梦握手协商出的 DES-CFB 在 Electron 的 BoringSSL 里根本不存在（连不上的真正原因）。
+        // desCipherShim 负责补这个模式，这里拿 OpenSSL 算出的已知答案逐字节比对——
+        // 补错了照样能跑完握手前几步，只有对答案才能发现。
+        const desShim = (() => {
+          const shimCrypto = require('crypto');
+          const shim = require('./db/desCipherShim');
+          const out = { nativeCfb: shimCrypto.getCiphers().includes('des-cfb') };
+          out.patched = shim.installMissingDesModes().join(',');
+          const key = Buffer.from('0123456789abcdef', 'hex');
+          const iv = Buffer.from('fedcba9876543210', 'hex');
+          const data = Buffer.from('dbpanda-dm-handshake', 'utf8'); // 20 字节：跨两个整块 + 一个半块
+          const run = (algorithm, k) => {
+            const c = shimCrypto.createCipheriv(algorithm, k, iv);
+            c.setAutoPadding(false);
+            return Buffer.concat([c.update(data), c.final()]);
+          };
+          const cfb = run('des-cfb', key);
+          out.cfb = cfb.toString('hex');
+          // 3DES 变体按驱动的用法给足 24 字节密钥；三段同密钥即等价于单 DES
+          out.ofb = run('des-ede3-ofb', Buffer.concat([key, key, key])).toString('hex');
+          const d = shimCrypto.createDecipheriv('des-cfb', key, iv);
+          d.setAutoPadding(false);
+          out.roundTrip = Buffer.concat([d.update(cfb), d.final()]).equals(data);
+          // 分片喂入必须与一次喂入等价（CFB 的移位寄存器要跨 update 保持）
+          const chunked = shimCrypto.createCipheriv('des-cfb', key, iv);
+          out.chunked = Buffer.concat([chunked.update(data.slice(0, 5)), chunked.update(data.slice(5, 13)),
+            chunked.update(data.slice(13)), chunked.final()]).equals(cfb);
+          // 不在补位名单里的算法必须原样交回原生实现
+          const aes = shimCrypto.createCipheriv('aes-128-cbc', Buffer.alloc(16), Buffer.alloc(16));
+          out.nativeIntact = Buffer.concat([aes.update(data), aes.final()]).length === 32;
+          return out;
+        })();
+        // 期望值由 OpenSSL 的 des-ede3-cfb / des-ede3-ofb 以三倍密钥算出（等价于单 DES）
+        const desShimOk = desShim.cfb === '76a456ce6bef2216f251fc73a1d4c18fdf1d8831'
+          && desShim.ofb === '76a456ce6bef2216c360302d98f85b5f2e121d08'
+          && desShim.roundTrip && desShim.chunked && desShim.nativeIntact;
+        console.log('[SMOKE][desShim]', JSON.stringify(desShim));
+        // 筛选条件的值字面量：字符串列上填数字必须加引号，
+        // 否则 PostgreSQL 直接报 operator does not exist: character varying = integer
+        const whereLit = await win.webContents.executeJavaScript(`(async () => {
+          const { whereLiteralOf } = await import('./js/dbTypes.js');
+          const pg = whereLiteralOf('postgres');
+          const my = whereLiteralOf('mysql');
+          return {
+            strColNum: pg('character varying', '23'),
+            strColText: pg('text', 'abc'),
+            intCol: pg('integer', '23'),
+            numericCol: pg('numeric', '23.5'),
+            unknownCol: pg('', '23'),
+            uuidCol: pg('uuid', '42'),
+            trimmed: pg('varchar', '  7  '),
+            quoteEscaped: my('varchar', "'a"),
+          };
+        })()`);
+        const whereLitOk = whereLit.strColNum === "'23'"
+          && whereLit.intCol === '23' && whereLit.numericCol === '23.5' && whereLit.unknownCol === '23'
+          && whereLit.strColText === "'abc'" && whereLit.uuidCol === "'42'" && whereLit.trimmed === "'7'"
+          && whereLit.quoteEscaped === "'''a'";
+        console.log('[SMOKE][whereLit]', JSON.stringify(whereLit));
+        console.log('[SMOKE][treeState]', JSON.stringify(treeState));
         console.log('[SMOKE][tabs]', JSON.stringify(tabsProbe));
         console.log('[SMOKE][tasks]', JSON.stringify(taskCenter));
         console.log('[SMOKE][security]', JSON.stringify(security));
@@ -849,11 +941,12 @@ app.whenReady().then(async () => {
         const failedSessionRetryPrompt = await win.webContents.executeJavaScript(
           `!!document.querySelector('.password-prompt') && document.querySelector('.modal-head').textContent.includes('Smoke failed session password')`);
         await win.webContents.executeJavaScript('window.__test.closeMenus()');
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk && experimentalOk
-          && workspaceOk && passwordPromptOk && failedSessionRetryPrompt && errors.length === 0 ? 0 : 1);
+          && workspaceOk && treeStateOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt
+          && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);
         app.exit(1);

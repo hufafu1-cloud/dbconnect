@@ -3,7 +3,7 @@ import { el, iconEl, fmtCount } from './util.js';
 import { connLabel, connColor, state, setActiveTarget } from './state.js';
 import { addTab } from './tabs.js';
 import { DataGrid } from './grid.js';
-import { quoteIdentOf, quoteLiteralOf } from './dbTypes.js';
+import { quoteIdentOf, quoteLiteralOf, whereLiteralOf } from './dbTypes.js';
 import { toast, confirmDialog } from './toast.js';
 import { statusbar } from './statusbar.js';
 import { authorizeOperation } from './danger.js';
@@ -96,7 +96,7 @@ export function openTableTab(target, openOpts) {
       connType: (state.connections.find((c) => c.id === target.connId) || {}).type,
     },
     onJumpFk: (fk, value) => {
-      const cond = `${qi(fk.refColumn)} = ${numOrLit(value)}`;
+      const cond = `${qi(fk.refColumn)} = ${jumpLit(value)}`;
       openTableTab({ connId: target.connId, db: target.db, schema: fk.refSchema || target.schema, table: fk.refTable }, { initialWhere: cond });
     },
   });
@@ -147,7 +147,16 @@ export function openTableTab(target, openOpts) {
   const connType = (state.connections.find((c) => c.id === target.connId) || {}).type || 'mysql';
   const qi = quoteIdentOf(connType);
   const lit = quoteLiteralOf(connType);
-  const numOrLit = (v) => (/^-?\d+(\.\d+)?$/.test(String(v).trim()) ? String(v).trim() : lit(v));
+  const whereLit = whereLiteralOf(connType);
+  const colTypeOf = (name) => {
+    const c = (grid.columns || []).find((x) => x.name === name);
+    return c && c.type ? String(c.type) : '';
+  };
+  /** 条件里的值字面量：按列类型决定要不要加引号，详见 whereLiteralOf */
+  const valueLit = (col, v) => whereLit(colTypeOf(col), v);
+  // 外键跳转的目标列在另一张表里，拿不到它的类型定义；
+  // 但驱动返回的 JS 类型已经说明了问题：字符串列回来的就是字符串。
+  const jumpLit = (v) => (typeof v === 'number' ? String(v) : lit(v));
 
   /**
    * 把列头筛选行的原文拼成 WHERE 片段。
@@ -160,7 +169,7 @@ export function openTableTab(target, openOpts) {
    *   >100     → > 100      （>= <= <> != > < = 都支持）
    *   null     → IS NULL
    *   !null    → IS NOT NULL
-   * 值一律走 lit()/numOrLit() 转义，不直接拼用户原文。
+   * 值一律走 lit()/valueLit() 转义，不直接拼用户原文。
    */
   function filterWhere() {
     const parts = [];
@@ -171,7 +180,7 @@ export function openTableTab(target, openOpts) {
       if (/^!\s*null$/i.test(text)) { parts.push(`${qi(col)} IS NOT NULL`); continue; }
       const m = /^(>=|<=|<>|!=|>|<|=)\s*(.+)$/.exec(text);
       if (m) {
-        parts.push(`${qi(col)} ${m[1] === '!=' ? '<>' : m[1]} ${numOrLit(m[2])}`);
+        parts.push(`${qi(col)} ${m[1] === '!=' ? '<>' : m[1]} ${valueLit(col, m[2])}`);
         continue;
       }
       parts.push(`${qi(col)} LIKE ${lit(`%${text}%`)}`);
@@ -249,11 +258,11 @@ export function openTableTab(target, openOpts) {
       case 'in': {
         const parts = String(r.val).split(/[,，]/).map((s) => s.trim()).filter(Boolean);
         if (!parts.length) return null;
-        return `${c} IN (${parts.map(numOrLit).join(', ')})`;
+        return `${c} IN (${parts.map((v) => valueLit(r.col, v)).join(', ')})`;
       }
       case 'null': return `${c} IS NULL`;
       case 'notnull': return `${c} IS NOT NULL`;
-      default: return r.val === '' ? null : `${c} ${r.op} ${numOrLit(r.val)}`;
+      default: return r.val === '' ? null : `${c} ${r.op} ${valueLit(r.col, r.val)}`;
     }
   }
 
