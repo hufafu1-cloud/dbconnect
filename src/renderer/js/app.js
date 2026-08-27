@@ -911,6 +911,11 @@ async function boot() {
   setupTreeFilter();
   const savedWorkspace = await getStoredWorkspace();
   const knownIds = new Set(state.connections.map((c) => c.id));
+  // 上次开着哪些连接仍然记着，但**启动时不再自动连回去**。
+  // 以前是在这里挨个 await 连接，只要有一个库连不上（网络不通、实例没起来），
+  // 驱动握手要拖几十秒才超时，这段时间整个界面卡在 workspace-loading 上，
+  // 表现就是打开工具后假死。哪个库值得等只有用户知道，交回给用户自己点。
+  // 记录仍然保留：需要连接才能恢复的标签页据此挂起，用户一打开对应连接就自动补上。
   const restoreIds = Array.isArray(savedWorkspace.context && savedWorkspace.context.openConnectionIds)
     ? [...new Set(savedWorkspace.context.openConnectionIds.filter((id) => typeof id === 'string' && knownIds.has(id)))]
     : [];
@@ -925,13 +930,6 @@ async function boot() {
     ])],
     activeTarget: state.activeTarget ? { ...state.activeTarget } : null,
   }));
-
-  if (restoreIds.length) statusbar.setLeft(`正在恢复工作区连接（0/${restoreIds.length}）…`);
-  for (let i = 0; i < restoreIds.length; i++) {
-    try { await openConnectionById(restoreIds[i]); } catch (e) { /* 单个连接失败不阻止草稿恢复 */ }
-    if (state.open.has(restoreIds[i])) pendingRestoreConnectionIds.delete(restoreIds[i]);
-    statusbar.setLeft(`正在恢复工作区连接（${i + 1}/${restoreIds.length}）…`);
-  }
 
   workspaceEntryRestorer = async (entry) => {
     const s = entry && entry.state;
@@ -968,8 +966,8 @@ async function boot() {
   workspaceBooted = true;
   const savedTarget = savedWorkspace.context && savedWorkspace.context.activeTarget;
   if (savedTarget && state.open.has(savedTarget.connId)) await revealTarget(savedTarget).catch(() => {});
-  statusbar.setLeft(recovery.restored || state.open.size
-    ? `工作区已恢复 · ${state.open.size} 个连接 · ${recovery.restored} 个标签${recovery.deferred ? ` · ${recovery.deferred} 个待连接后恢复` : ''}`
+  statusbar.setLeft(recovery.restored || recovery.deferred
+    ? `工作区已恢复 · ${recovery.restored} 个标签${recovery.deferred ? ` · ${recovery.deferred} 个待打开连接后恢复` : ''}`
     : '就绪 — 新建或打开一个连接开始使用');
   $('#app').classList.remove('workspace-loading');
   window.__APP_READY = true;

@@ -941,11 +941,41 @@ app.whenReady().then(async () => {
         const failedSessionRetryPrompt = await win.webContents.executeJavaScript(
           `!!document.querySelector('.password-prompt') && document.querySelector('.modal-head').textContent.includes('Smoke failed session password')`);
         await win.webContents.executeJavaScript('window.__test.closeMenus()');
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} errors=${errors.length}`);
+        // 启动不再自动连回上次开着的连接。这条必须整页重载来验——
+        // 以前那个循环是在 boot() 里挨个 await 的，库连不上要等驱动握手超时，
+        // 密码没保存的还会直接弹框把 boot 卡死，界面一直停在 workspace-loading。
+        // 这里先把「上次开着」写进工作区（故意挑那个不保存密码的连接），再重载。
+        await win.webContents.executeJavaScript(`window.api.workspace.write({
+          version: 1, savedAt: Date.now(), activeId: null, tabs: [],
+          context: { openConnectionIds: [${JSON.stringify(passwordPromptConnection.id)}] },
+        }).then(() => true)`);
+        const rebootAt = Date.now();
+        win.webContents.reload();
+        await new Promise((r) => win.webContents.once('did-finish-load', r));
+        let rebootReady = false;
+        for (let attempt = 0; attempt < 40; attempt++) {
+          rebootReady = await win.webContents.executeJavaScript('window.__APP_READY === true');
+          if (rebootReady) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        const noAutoConnect = await win.webContents.executeJavaScript(`(async () => {
+          const { state } = await import('./js/state.js');
+          return {
+            open: state.open.size,
+            prompt: !!document.querySelector('.password-prompt'),
+            loading: document.getElementById('app').classList.contains('workspace-loading'),
+            connections: state.connections.length,
+          };
+        })()`);
+        const noAutoConnectOk = rebootReady && noAutoConnect.open === 0 && !noAutoConnect.prompt
+          && !noAutoConnect.loading && noAutoConnect.connections >= 1;
+        console.log('[SMOKE][noAutoConnect]',
+          JSON.stringify({ ...noAutoConnect, ready: rebootReady, ms: Date.now() - rebootAt }));
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} noAutoConnect=${noAutoConnectOk} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk && experimentalOk
-          && workspaceOk && treeStateOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt
+          && workspaceOk && treeStateOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt && noAutoConnectOk
           && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);
