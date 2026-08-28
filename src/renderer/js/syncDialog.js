@@ -4,6 +4,7 @@ import { openModal, toast, confirmDialog } from './toast.js';
 import { state, emit, connLabel, objectsCacheKey } from './state.js';
 import { authorizeOperation } from './danger.js';
 import { startTask } from './taskCenter.js';
+import { hasCap } from './dbTypes.js';
 
 function openConnsOptions(selected) {
   return [...state.open.keys()].map((id) =>

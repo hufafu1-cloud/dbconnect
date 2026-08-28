@@ -535,10 +535,46 @@ function testNoControlChars() {
   });
 }
 
+/**
+ * 渲染层模块必须 import 自己用到的每一个 dbTypes 导出。
+ *
+ * 这条是被两个真实缺陷逼出来的：searchDialog.js 与 syncDialog.js 都调用了 hasCap()
+ * 却没有 import，于是「在库中查找」和「结构同步」两个对话框一打开就抛
+ * ReferenceError。ES Module 不做静态检查，node --check 也只看语法——
+ * 只有用户真的点开那个菜单才会炸，而这两个对话框恰好都不在冒烟路径上。
+ *
+ * 只查 dbTypes：它是「能力表收敛」之后被到处引用的模块，也正是出事的那个。
+ */
+function testDbTypesImports() {
+  console.log('\n[渲染层导入]');
+  const dir = path.join(__dirname, '..', 'src', 'renderer', 'js');
+  const source = fs.readFileSync(path.join(dir, 'dbTypes.js'), 'utf8');
+  const names = [...source.matchAll(/^export function (\w+)/gm)].map((m) => m[1]);
+  const offenders = [];
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith('.js') || file === 'dbTypes.js') continue;
+    const text = fs.readFileSync(path.join(dir, file), 'utf8');
+    const imported = new Set(
+      (/import\s*\{([^}]*)\}\s*from\s*'\.\/dbTypes\.js'/.exec(text) || ['', ''])[1]
+        .split(',').map((part) => part.trim()).filter(Boolean),
+    );
+    for (const name of names) {
+      // 前瞻排除 obj.name(…) 这类成员调用，只认裸函数调用
+      const used = new RegExp(String.raw`(?<![\w.])` + name + String.raw`\s*\(`).test(text);
+      if (used && !imported.has(name)) offenders.push(`${file} 用了 ${name} 却没有 import`);
+    }
+  }
+  check(`渲染层用到的 dbTypes 导出都已 import（共 ${names.length} 个导出）`, () => {
+    assert.deepStrictEqual(offenders, [], offenders.join('；'));
+  });
+}
+
+
 async function main() {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbpanda-step1-'));
   try {
     testNoControlChars();
+    testDbTypesImports();
     await testCommands();
     await testKeymapSchemes();
     await testMainSettings(userDataDir);

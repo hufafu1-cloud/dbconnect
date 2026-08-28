@@ -2,7 +2,7 @@
 import { el, iconEl } from './util.js';
 import { openModal, toast } from './toast.js';
 import { state, connLabel } from './state.js';
-import { quoteIdentOf, quoteLiteralOf } from './dbTypes.js';
+import { quoteIdentOf, quoteLiteralOf, hasCap } from './dbTypes.js';
 
 function connTypeOf(connId) {
   const c = state.connections.find((x) => x.id === connId);
