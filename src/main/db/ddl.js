@@ -1023,6 +1023,26 @@ const FROM_GENERIC = {
   },
 };
 
+/**
+ * 单个列类型的跨方言翻译（translateModel 的单列版）。
+ *
+ * translateModel 处理的是设计器模型——整表、带长度与小数位；而跨库联邦查询只需要
+ * 「源列类型 → 本地引擎类型」这一步，没有模型可给。两者共用同一张
+ * TO_GENERIC / FROM_GENERIC 映射表，新增数据库类型时仍然只改一处。
+ *
+ * 源类型可能带长度（varchar(50)、numeric(10,2)）或修饰词（int unsigned），
+ * 先剥掉再查表；查不到时按 text 处理并置 known=false，由调用方决定是否提示。
+ */
+function translateType(typeName, toDialect) {
+  const base = String(typeName || '').toLowerCase().trim()
+    .replace(/\(.*$/, '')
+    .replace(/\s+unsigned$/, '')
+    .trim();
+  const generic = TO_GENERIC[base] || null;
+  const toMap = FROM_GENERIC[toDialect] || FROM_GENERIC.mysql;
+  const spec = toMap[generic || 'text'] || toMap.text;
+  return { generic: generic || 'text', type: spec[0], known: !!generic };
+}
 /** 把设计器模型的列类型翻译到目标方言；返回 warnings 数组 */
 function translateModel(model, fromDialect, toDialect) {
   if (fromDialect === toDialect) return { model, warnings: [] };
@@ -1048,4 +1068,4 @@ function translateModel(model, fromDialect, toDialect) {
   return { model: out, warnings };
 }
 
-module.exports = { typeOptions, caps, buildCreateTable, buildAlterTable, buildAddColumns, infoToModel, composeType, composeDefault, translateModel };
+module.exports = { typeOptions, caps, buildCreateTable, buildAlterTable, buildAddColumns, infoToModel, composeType, composeDefault, translateModel, translateType };

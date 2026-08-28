@@ -3932,6 +3932,731 @@ async function runSelfTest() {
     check('ai 拒绝非 HTTP 接口', aiProtocolDenied);
   } catch (eAi) { fail++; console.log('  ✗ AI 块异常:', eAi && eAi.stack || eAi); }
 
+  // ---- 多连接并发执行器（v2.7.0 共用地基 M1） ----
+  try {
+    const multiExec = require('./multiExec');
+    const order = [];
+    let peak = 0, live = 0;
+    const slow = (key, ms) => ({ key, run: async () => {
+      live++; peak = Math.max(peak, live);
+      await new Promise((r) => setTimeout(r, ms));
+      live--; order.push(key);
+      return key;
+    } });
+    const conc = await multiExec.runAll(
+      [slow('a', 40), slow('b', 40), slow('c', 40), slow('d', 40), slow('e', 40)],
+      { concurrency: 2 });
+    check('multiExec 遵守并发上限', peak <= 2 && conc.results.length === 5 && conc.ok, { peak });
+    check('multiExec 结果与任务顺序一致', conc.results.map((x) => x.key).join('') === 'abcde',
+      conc.results.map((x) => x.key));
+
+    const mixed = await multiExec.runAll([
+      { key: 'ok', run: async () => 1 },
+      { key: 'bad', run: async () => { throw new Error('这个库挂了'); } },
+      { key: 'ok2', run: async () => 2 },
+    ], { concurrency: 3 });
+    check('multiExec 单个任务失败不影响其它任务',
+      mixed.results[0].ok && mixed.results[2].ok && !mixed.results[1].ok
+      && mixed.results[1].error === '这个库挂了' && mixed.failed === 1 && !mixed.ok, mixed.results);
+
+    let abortSeen = false;
+    const timed = await multiExec.runAll([
+      { key: 'fast', run: async () => 'ok' },
+      { key: 'slow', run: async ({ signal }) => {
+        signal.addEventListener('abort', () => { abortSeen = true; });
+        await new Promise((r) => setTimeout(r, 3000));
+        return 'never';
+      } },
+    ], { concurrency: 2, taskTimeoutMs: 60 });
+    check('multiExec 超时是逐任务隔离的', timed.results[0].ok && !timed.results[1].ok
+      && timed.results[1].timedOut === true, timed.results);
+    check('multiExec 超时会 abort 任务信号（让适配器有机会真正取消）', abortSeen);
+
+    const cancelRun = multiExec.createRun({ concurrency: 1, token: 'selftest-cancel' });
+    const cancelPromise = cancelRun.run([
+      { key: 'one', run: async () => { await new Promise((r) => setTimeout(r, 200)); return 1; } },
+      { key: 'two', run: async () => 2 },
+      { key: 'three', run: async () => 3 },
+    ]);
+    const cancelHit = multiExec.cancelRun('selftest-cancel', '自检取消');
+    const cancelled = await cancelPromise;
+    multiExec.releaseRun(cancelRun);
+    check('multiExec 可按令牌统一取消', cancelHit && cancelled.cancelled
+      && cancelled.results.length === 3
+      && cancelled.results.slice(1).every((x) => x.cancelled), cancelled.results);
+    check('multiExec 取消后令牌失效', multiExec.cancelRun('selftest-cancel') === false);
+  } catch (eMulti) { fail++; console.log('  ✗ multiExec 块异常:', eMulti && eMulti.stack || eMulti); }
+
+  // ---- 多库广播执行（v2.7.0 M2） ----
+  try {
+    const broadcast = require('./broadcast');
+
+    // 通配展开
+    check('广播 通配转正则', broadcast.globToRegExp('order_db_*').test('order_db_07')
+      && !broadcast.globToRegExp('order_db_*').test('user_db_07')
+      && broadcast.globToRegExp('shop').test('SHOP'));
+    check('广播 通配里的正则元字符按字面处理',
+      broadcast.globToRegExp('a.b').test('a.b') && !broadcast.globToRegExp('a.b').test('axb'));
+
+    const bcConns = [
+      { id: 'c1', name: '订单库-01', type: 'mysql', env: '' },
+      { id: 'c2', name: '订单库-02', type: 'mysql', env: 'prod' },
+      { id: 'c3', name: '用户库', type: 'postgres', env: '' },
+      { id: 'c4', name: '没打开的库', type: 'mysql', env: '' },
+    ];
+    const bcDbs = { c1: ['shop_01', 'shop_02', 'other'], c2: ['shop_09'], c3: ['users'] };
+    const bcDeps = {
+      connections: () => bcConns,
+      isOpen: (id) => id !== 'c4',
+      databases: (id) => bcDbs[id] || [],
+      adapter: () => { throw new Error('本用例不执行'); },
+    };
+    const expanded = broadcast.expandTargets([{ conn: '订单库-*', db: 'shop_*' }], bcDeps);
+    check('广播 连接与库都支持通配',
+      expanded.targets.map((t) => `${t.connName}/${t.db}`).join(',')
+        === '订单库-01/shop_01,订单库-01/shop_02,订单库-02/shop_09', expanded.targets);
+    const missed = broadcast.expandTargets([{ conn: '没打开的库' }, { conn: '压根不存在' }], bcDeps);
+    check('广播 未打开与不存在的连接如实报告，不静默跳过',
+      missed.targets.length === 0 && missed.misses.length === 2
+      && missed.misses.some((m) => /尚未打开/.test(m))
+      && missed.misses.some((m) => /没有匹配/.test(m)), missed.misses);
+    const deduped = broadcast.expandTargets(
+      [{ conn: '订单库-01', db: 'shop_01' }, { conn: '订单库-01', db: 'shop_0*' }], bcDeps);
+    check('广播 同一个目标被选中多次只保留一个',
+      deduped.targets.map((t) => t.db).join(',') === 'shop_01,shop_02', deduped.targets);
+
+    // ---- 验收：32 个 SQLite 库广播 SELECT ----
+    const bcAdapters = {};
+    const bcTargets = [];
+    for (let i = 1; i <= 32; i++) {
+      const id = `bc${i}`;
+      const adapter = new SQLiteAdapter({ id, type: 'sqlite', file: ':memory:' });
+      await adapter.connect();
+      await adapter.exec('main', 'CREATE TABLE t (id INTEGER PRIMARY KEY, shard INTEGER, name TEXT)');
+      await adapter.exec('main', `INSERT INTO t VALUES (1, ${i}, 'n${i}a'), (2, ${i}, 'n${i}b')`);
+      bcAdapters[id] = adapter;
+      bcTargets.push({ connId: id, connName: `分库${i}`, db: 'main', env: '' });
+    }
+    const runDeps = { ...bcDeps, adapter: (id) => bcAdapters[id] };
+    const broadcasted = await broadcast.run(
+      { targets: bcTargets, sql: 'SELECT id, shard, name FROM t ORDER BY id', concurrency: 8 },
+      runDeps);
+    check('广播 【验收】32 个库的结果纵向合并，且带来源列',
+      broadcasted.kind === 'select'
+      && broadcasted.columns.slice(0, 2).map((c) => c.name).join(',') === '来源连接,来源库'
+      && broadcasted.rows.length === 64
+      && broadcasted.rows[0][0] === '分库1' && broadcasted.rows[0][1] === 'main'
+      && broadcasted.matrix.length === 32 && broadcasted.matrix.every((m) => m.ok),
+      { kind: broadcasted.kind, rows: broadcasted.rows.length, cols: broadcasted.columns.map((c) => c.name) });
+    check('广播 来源列指向的确实是那个库的数据', (() => {
+      const row = broadcasted.rows.find((r) => r[0] === '分库7');
+      return row && Number(row[3]) === 7;
+    })(), broadcasted.rows.find((r) => r[0] === '分库7'));
+    check('广播 如实标注不是原子操作', broadcasted.atomic === false);
+
+    // ---- 验收：一个库故意报错，其余成功且错误可见 ----
+    await bcAdapters.bc5.exec('main', 'DROP TABLE t');
+    const partial = await broadcast.run(
+      { targets: bcTargets, sql: 'SELECT id FROM t', concurrency: 8 }, runDeps);
+    const bad = partial.matrix.filter((m) => !m.ok);
+    check('广播 【验收】单库失败不影响其余，失败项可见且带原因',
+      bad.length === 1 && bad[0].connName === '分库5' && /t/.test(bad[0].error)
+      && partial.matrix.filter((m) => m.ok).length === 31
+      && partial.rows.length === 62 && partial.failed === 1 && !partial.ok,
+      { failed: bad.map((m) => [m.connName, m.error]) });
+    // 失败项单独重试：把失败的目标挑出来再跑一次即可，接口不变
+    await bcAdapters.bc5.exec('main', 'CREATE TABLE t (id INTEGER PRIMARY KEY, shard INTEGER, name TEXT)');
+    await bcAdapters.bc5.exec('main', "INSERT INTO t VALUES (1,5,'x'),(2,5,'y')");
+    const retried = await broadcast.run(
+      { targets: bcTargets.filter((t) => bad.some((m) => m.connId === t.connId)), sql: 'SELECT id FROM t' },
+      runDeps);
+    check('广播 失败项可以单独重试', retried.ok && retried.matrix.length === 1
+      && retried.rows.length === 2, retried.matrix);
+
+    // 列不一致：按列名取并集并如实报告，绝不按位置对齐
+    await bcAdapters.bc9.exec('main', 'ALTER TABLE t ADD COLUMN extra TEXT');
+    const uneven = await broadcast.run(
+      { targets: bcTargets.slice(0, 10), sql: 'SELECT * FROM t', concurrency: 4 }, runDeps);
+    check('广播 各库列不一致时取并集并标注出来',
+      uneven.mismatched === true
+      && uneven.columns.map((c) => c.name).includes('extra')
+      && uneven.rows.filter((r) => r[r.length - 1] !== null).length === 0,
+      uneven.columns.map((c) => c.name));
+
+    // ---- 验收：执行中取消 ----
+    const slowAdapters = {};
+    const slowTargets = [];
+    for (let i = 1; i <= 6; i++) {
+      const id = `slow${i}`;
+      slowAdapters[id] = {
+        dialect: 'sqlite',
+        runScript: async () => { await new Promise((r) => setTimeout(r, 3000)); return [{ columns: [{ name: 'a' }], rows: [[1]] }]; },
+        cancelOperation: async () => true,
+      };
+      slowTargets.push({ connId: id, connName: `慢库${i}`, db: 'main' });
+    }
+    const cancelStarted = Date.now();
+    const cancelPromise = broadcast.run(
+      { targets: slowTargets, sql: 'SELECT 1', concurrency: 6, token: 'selftest-bc-cancel' },
+      { ...runDeps, adapter: (id) => slowAdapters[id] });
+    await new Promise((r) => setTimeout(r, 120));
+    const cancelHit = require('./multiExec').cancelRun('selftest-bc-cancel', '自检取消');
+    const cancelled = await cancelPromise;
+    const cancelMs = Date.now() - cancelStarted;
+    check('广播 【验收】执行中取消，2 秒内全部结束',
+      cancelHit && cancelled.cancelled && cancelMs < 2000
+      && cancelled.matrix.every((m) => !m.ok && m.cancelled),
+      { ms: cancelMs, states: cancelled.matrix.map((m) => m.cancelled) });
+
+    // 逐库超时隔离
+    const mixedAdapters = {
+      fast: { dialect: 'sqlite', runScript: async () => [{ columns: [{ name: 'a' }], rows: [[1]] }] },
+      slow: { dialect: 'sqlite', runScript: async () => { await new Promise((r) => setTimeout(r, 3000)); return []; } },
+    };
+    const timedOut = await broadcast.run({
+      targets: [{ connId: 'fast', connName: '快库', db: 'main' }, { connId: 'slow', connName: '慢库', db: 'main' }],
+      sql: 'SELECT 1', concurrency: 2, taskTimeoutMs: 150,
+    }, { ...runDeps, adapter: (id) => mixedAdapters[id] });
+    check('广播 逐库超时隔离：慢库超时不拖累快库',
+      timedOut.matrix[0].ok && !timedOut.matrix[1].ok && timedOut.matrix[1].timedOut,
+      timedOut.matrix.map((m) => [m.connName, m.ok, m.timedOut]));
+
+    // 多环境对比
+    const compareAdapters = {
+      dev: { dialect: 'sqlite', runScript: async () => [{ columns: [{ name: 'k' }], rows: [['a'], ['b']] }] },
+      test: { dialect: 'sqlite', runScript: async () => [{ columns: [{ name: 'k' }], rows: [['a'], ['b']] }] },
+      prod: { dialect: 'sqlite', runScript: async () => [{ columns: [{ name: 'k' }], rows: [['a'], ['c']] }] },
+    };
+    const compared = await broadcast.run({
+      targets: [
+        { connId: 'dev', connName: 'dev', db: 'main' },
+        { connId: 'test', connName: 'test', db: 'main' },
+        { connId: 'prod', connName: 'prod', db: 'main' },
+      ],
+      sql: 'SELECT k FROM cfg', compare: true,
+    }, { ...runDeps, adapter: (id) => compareAdapters[id] });
+    check('广播 多环境对比找出配置漂移',
+      compared.diff.comparable && compared.diff.baseline === 'dev / main'
+      && compared.diff.items[0].same === true
+      && compared.diff.items[1].same === false
+      && compared.diff.items[1].onlyBase === 1 && compared.diff.items[1].onlyThis === 1,
+      compared.diff);
+
+    let noTarget = '';
+    try { await broadcast.run({ targets: [], sql: 'SELECT 1' }, runDeps); } catch (e) { noTarget = e.message; }
+    check('广播 没选目标时明确报错', /没有选择任何目标库/.test(noTarget), noTarget);
+
+    for (const adapter of Object.values(bcAdapters)) await adapter.close();
+  } catch (eBc) { fail++; console.log('  ✗ 广播块异常:', eBc && eBc.stack || eBc); }
+
+  // ---- 跨库联邦查询（v2.7.0 M4） ----
+  try {
+    const fed = require('./federated');
+
+    // SQL 扫描：字符串与注释里的方括号不是引用
+    const scanned = fed.scanRefs(
+      "SELECT * FROM [a.b.c] WHERE note = '[not.a.ref]' -- [nor.this.one]\n"
+      + '/* [nor.this] */ JOIN [d.e.f] ON 1=1');
+    check('联邦 扫描只认真正的跨源引用', scanned.length === 2
+      && scanned[0].inner === 'a.b.c' && scanned[1].inner === 'd.e.f',
+      scanned.map((x) => x.inner));
+    let unclosed = false;
+    try { fed.scanRefs('SELECT * FROM [a.b.c'); } catch (e) { unclosed = /右方括号/.test(e.message); }
+    check('联邦 未闭合的引用明确报错', unclosed);
+    check('联邦 引用内双引号保护含点的名字',
+      fed.splitRefParts('"华东.订单".app.orders').join('|') === '华东.订单|app|orders',
+      fed.splitRefParts('"华东.订单".app.orders'));
+
+    // 引用解析
+    const conns = [
+      { id: 'c1', name: '订单库', type: 'mysql', database: 'shop' },
+      { id: 'c2', name: '华东.用户', type: 'postgres', database: 'users' },
+      { id: 'c3', name: '重名', type: 'mysql' },
+      { id: 'c4', name: '重名', type: 'mysql' },
+    ];
+    const r1 = fed.resolveRef('订单库.shop.orders', conns);
+    check('联邦 解析 连接.库.表', r1.conn.id === 'c1' && r1.db === 'shop' && r1.table === 'orders', r1);
+    const r2 = fed.resolveRef('"华东.用户".users.public.profile', conns);
+    check('联邦 连接名含点时按最长前缀匹配', r2.conn.id === 'c2' && r2.db === 'users'
+      && r2.schema === 'public' && r2.table === 'profile', r2);
+    const r3 = fed.resolveRef('订单库.orders', conns);
+    check('联邦 省略库名时用连接的默认库', r3.conn.id === 'c1' && r3.db === 'shop' && r3.table === 'orders', r3);
+    const r4 = fed.resolveRef('c2.users.profile', conns);
+    check('联邦 允许直接用连接 ID', r4.conn.id === 'c2' && r4.table === 'profile', r4);
+    let dupErr = '';
+    try { fed.resolveRef('重名.db.t', conns); } catch (e) { dupErr = e.message; }
+    check('联邦 连接重名时拒绝猜测并给出可操作出路', /对应 2 个连接/.test(dupErr) && /连接 ID/.test(dupErr), dupErr);
+    let missErr = '';
+    try { fed.resolveRef('不存在的连接.db.t', conns); } catch (e) { missErr = e.message; }
+    check('联邦 连接不存在时列出已知连接', /找不到名为/.test(missErr) && /订单库/.test(missErr), missErr);
+
+    // 只读判定
+    const selectOk = (sql) => { try { fed.assertSingleSelect(sql); return true; } catch (e) { return false; } };
+    check('联邦 允许 SELECT 与 CTE', selectOk('SELECT 1') && selectOk('WITH x AS (SELECT 1) SELECT * FROM x'));
+    check('联邦 拒绝写操作与多语句',
+      !selectOk('UPDATE t SET a = 1') && !selectOk('DELETE FROM t')
+      && !selectOk('SELECT 1; SELECT 2') && !selectOk('CREATE TABLE t (a int)'));
+
+    // 值绑定：搬运的是明文原值，不能套用出境用的 sanitizeValue
+    check('联邦 值绑定 布尔转 0/1、Date 转字符串、对象转 JSON',
+      fed.bindValue(true) === 1 && fed.bindValue(false) === 0
+      && fed.bindValue(new Date(2026, 0, 2, 3, 4, 5)) === '2026-01-02 03:04:05'
+      && fed.bindValue({ a: 1 }) === '{"a":1}'
+      && fed.bindValue(null) === null && fed.bindValue(undefined) === null);
+    check('联邦 值绑定 保留 Buffer 原样（不转十六进制预览）',
+      Buffer.isBuffer(fed.bindValue(Buffer.alloc(1000, 7)))
+      && fed.bindValue(Buffer.alloc(1000, 7)).length === 1000);
+    check('联邦 读回时把 BigInt 收窄回 number，超安全范围的保持原样',
+      fed.narrowInt(42n) === 42 && typeof fed.narrowInt(42n) === 'number'
+      && typeof fed.narrowInt(9223372036854775807n) === 'bigint'
+      && fed.narrowInt('x') === 'x');
+
+    // ---- 端到端：两个独立连接 join ----
+    // 用两个内存 SQLite 冒充两个连接。走的是和真实 MySQL×PostgreSQL 完全相同的代码路径
+    // （readTablePages 取数 → 类型映射 → 本地建表 → 改写 SQL → 本地执行），
+    // 差别只在适配器实例，因此这条链路的正确性不依赖任何外部数据库即可回归。
+    const srcA = new SQLiteAdapter({ id: 'fa', type: 'sqlite', file: ':memory:' });
+    const srcB = new SQLiteAdapter({ id: 'fb', type: 'sqlite', file: ':memory:' });
+    await srcA.connect();
+    await srcB.connect();
+    await srcA.exec('main', 'CREATE TABLE orders (id INTEGER PRIMARY KEY, uid INTEGER, amount REAL)');
+    await srcA.exec('main', 'INSERT INTO orders VALUES (1,10,99.5),(2,11,20.0),(3,10,5.25),(4,99,1.0)');
+    await srcB.exec('main', 'CREATE TABLE users (uid INTEGER PRIMARY KEY, name TEXT, vip INTEGER)');
+    await srcB.exec('main', "INSERT INTO users VALUES (10,'张三',1),(11,'李四',0),(12,'王五',1)");
+
+    const fedConns = [
+      { id: 'fa', name: '订单源', type: 'sqlite', database: 'main' },
+      { id: 'fb', name: '用户源', type: 'sqlite', database: 'main' },
+    ];
+    const adapters = { fa: srcA, fb: srcB };
+    const deps = {
+      connections: () => fedConns,
+      isOpen: (id) => !!adapters[id],
+      adapter: (id) => adapters[id],
+    };
+
+    const opened = await fed.openSession('selftest');
+    const sid = opened.sessionId;
+    const joinSql = 'SELECT u.name, COUNT(*) AS cnt, SUM(o.amount) AS total\n'
+      + 'FROM [订单源.main.orders] o JOIN [用户源.main.users] u ON o.uid = u.uid\n'
+      + 'GROUP BY u.name ORDER BY u.name';
+    const joined = await fed.runQuery({ sessionId: sid, sql: joinSql }, 'selftest', { deps });
+    // 手工算出的期望值：uid=99 在用户表里没有，必须被 join 掉
+    const expected = [['张三', 2, 104.75], ['李四', 1, 20]];
+    check('联邦 跨两个连接的 join 结果与手工比对一致',
+      JSON.stringify(joined.rows) === JSON.stringify(expected), joined.rows);
+    check('联邦 报告每个源表的拉取情况', joined.sources.length === 2
+      && joined.sources.every((s) => s.rows > 0 && s.ms >= 0)
+      && joined.sources.map((s) => s.rows).sort().join(',') === '3,4', joined.sources);
+    check('联邦 如实标注非一致性快照', joined.snapshotConsistent === false);
+    check('联邦 结果集不可就地编辑', joined.editable === undefined);
+
+    // 自连接：同一张表出现两次只拉一次
+    const selfJoin = await fed.runQuery({
+      sessionId: sid,
+      sql: 'SELECT a.id FROM [订单源.main.orders] a JOIN [订单源.main.orders] b ON a.uid = b.uid AND a.id < b.id ORDER BY a.id',
+    }, 'selftest', { deps });
+    check('联邦 同一张表被引用两次只拉取一次',
+      selfJoin.sources.length === 1 && JSON.stringify(selfJoin.rows) === JSON.stringify([[1]]),
+      { sources: selfJoin.sources.length, rows: selfJoin.rows });
+
+    // 行数上限：明确拒绝而不是静默截断
+    let capErr = '';
+    try {
+      await fed.runQuery({ sessionId: sid, sql: 'SELECT * FROM [订单源.main.orders]', maxRowsPerSource: 2 },
+        'selftest', { deps });
+    } catch (e) { capErr = e.message; }
+    check('联邦 超过单源行数上限时明确拒绝', /拉取上限/.test(capErr) && /数据传输/.test(capErr), capErr);
+    check('联邦 拒绝时说明为什么不截断', /截断/.test(capErr), capErr);
+
+    // 连接没打开时给出可操作提示，而不是「连接未打开或已断开」
+    const closedDeps = { ...deps, isOpen: () => false };
+    let notOpenErr = '';
+    try {
+      await fed.runQuery({ sessionId: sid, sql: 'SELECT * FROM [订单源.main.orders]' }, 'selftest', { deps: closedDeps });
+    } catch (e) { notOpenErr = e.message; }
+    check('联邦 连接未打开时提示先打开连接', /尚未打开/.test(notOpenErr) && /连接树/.test(notOpenErr), notOpenErr);
+
+    // 无损：长文本与大 BLOB 必须按原值存进本地引擎
+    await srcA.exec('main', 'CREATE TABLE big (id INTEGER PRIMARY KEY, txt TEXT, bin BLOB)');
+    const longText = 'x'.repeat(300000);
+    const stmtBig = srcA.db.prepare('INSERT INTO big VALUES (?,?,?)');
+    stmtBig.run([1, longText, Buffer.alloc(1000, 7)]);
+    const lossless = await fed.runQuery({
+      sessionId: sid,
+      sql: 'SELECT length(txt) AS tlen, length(bin) AS blen FROM [订单源.main.big]',
+    }, 'selftest', { deps });
+    check('联邦 长文本与大 BLOB 按原值搬运（不套用出境截断）',
+      JSON.stringify(lossless.rows) === JSON.stringify([[300000, 1000]]), lossless.rows);
+
+    // 把上一个结果集当表继续查
+    let noResultErr = '';
+    const fresh = await fed.openSession('selftest');
+    try { await fed.saveResult({ sessionId: fresh.sessionId, name: 't' }, 'selftest'); }
+    catch (e) { noResultErr = e.message; }
+    fed.closeSession(fresh.sessionId, 'selftest');
+    check('联邦 没有结果时拒绝保存结果表', /还没有可保存的结果/.test(noResultErr), noResultErr);
+
+    await fed.runQuery({ sessionId: sid, sql: joinSql }, 'selftest', { deps });
+    const saved = await fed.saveResult({ sessionId: sid, name: '按人汇总' }, 'selftest');
+    check('联邦 结果表名允许中文，保存的就是刚才那份结果',
+      saved.name === '按人汇总' && saved.rows === 2, saved);
+    const reuse = await fed.runQuery({
+      sessionId: sid, sql: 'SELECT name FROM 按人汇总 WHERE cnt > 1',
+    }, 'selftest', { deps });
+    check('联邦 结果表可以被后续查询当普通表引用（无需再回源库）',
+      reuse.sources.length === 0 && JSON.stringify(reuse.rows) === JSON.stringify([['张三']]),
+      { sources: reuse.sources.length, rows: reuse.rows });
+    let badName = '';
+    try { await fed.saveResult({ sessionId: sid, name: '1bad' }, 'selftest'); }
+    catch (e) { badName = e.message; }
+    check('联邦 拒绝非法结果表名', /只能是字母、数字、下划线或中文/.test(badName), badName);
+    let reservedName = '';
+    try { await fed.saveResult({ sessionId: sid, name: '_src_x' }, 'selftest'); }
+    catch (e) { reservedName = e.message; }
+    check('联邦 结果表名不能占用源表快照的前缀', /保留给源表快照/.test(reservedName), reservedName);
+
+    const described = fed.describeSession({ sessionId: sid }, 'selftest');
+    check('联邦 会话能列出已拉取的源表与结果表',
+      described.sources.length >= 1 && described.results.some((r) => r.name === '按人汇总'), described);
+
+    // 会话关闭即释放（受限版承诺「本地内存计算」，关掉就什么都不剩）
+    check('联邦 关闭会话返回成功', fed.closeSession(sid, 'selftest') === true);
+    let goneErr = '';
+    try { fed.describeSession({ sessionId: sid }, 'selftest'); } catch (e) { goneErr = e.message; }
+    check('联邦 会话关闭后不可再用', /不存在或已关闭/.test(goneErr), goneErr);
+    check('联邦 重复关闭是幂等的', fed.closeSession(sid, 'selftest') === false);
+
+    // ---- 谓词下推与列裁剪 ----
+    // 下推的价值在于「少拉行」，风险在于「推错了不报错、只给出看着正常的错结果」。
+    // 因此每条用例都同时验两件事：拉回来的行数确实少了，且结果与不下推时完全一致。
+    const pushA = new SQLiteAdapter({ id: 'pa', type: 'sqlite', file: ':memory:' });
+    const pushB = new SQLiteAdapter({ id: 'pb', type: 'sqlite', file: ':memory:' });
+    await pushA.connect();
+    await pushB.connect();
+    await pushA.exec('main',
+      'CREATE TABLE big (id INTEGER PRIMARY KEY, uid INTEGER, amount REAL, note TEXT, created TEXT)');
+    const chunk = [];
+    for (let i = 1; i <= 10000; i++) {
+      chunk.push(`(${i}, ${(i % 20) + 1}, ${i}, 'note-${i}', '2026-01-${String((i % 28) + 1).padStart(2, '0')}')`);
+    }
+    for (let i = 0; i < chunk.length; i += 2000) {
+      await pushA.exec('main', `INSERT INTO big VALUES ${chunk.slice(i, i + 2000).join(',')}`);
+    }
+    await pushB.exec('main', 'CREATE TABLE dim (uid INTEGER PRIMARY KEY, label TEXT)');
+    await pushB.exec('main',
+      "INSERT INTO dim SELECT 1, 'L1' UNION SELECT 2, 'L2' UNION SELECT 3, 'L3'");
+    const pushConns = [
+      { id: 'pa', name: '大表源', type: 'sqlite', database: 'main' },
+      { id: 'pb', name: '维表源', type: 'sqlite', database: 'main' },
+    ];
+    const pushAdapters = { pa: pushA, pb: pushB };
+    const pushDeps = {
+      connections: () => pushConns,
+      isOpen: (cid) => !!pushAdapters[cid],
+      adapter: (cid) => pushAdapters[cid],
+    };
+    const pushSession = (await fed.openSession('selftest')).sessionId;
+    const runFed = (sql, extra) => fed.runQuery(
+      { sessionId: pushSession, sql, resultMaxRows: 100000, ...(extra || {}) },
+      'selftest', { deps: pushDeps },
+    );
+
+    // 数字列上的范围条件：能推，且必须少拉行
+    const pushed = await runFed(
+      'SELECT b.id, b.amount FROM [大表源.main.big] b WHERE b.amount > 9990 ORDER BY b.id');
+    check('下推 数字列范围条件推给源库，拉回的行数大幅减少',
+      pushed.sources[0].rows === 10 && pushed.pushdown.pushed === 1
+      && /b\.amount > 9990/.test(pushed.sources[0].pushed[0]),
+      { rows: pushed.sources[0].rows, pushed: pushed.sources[0].pushed });
+
+    // 同一条查询，把条件写成函数调用让它推不动；结果必须一模一样
+    const notPushed = await runFed(
+      'SELECT b.id, b.amount FROM [大表源.main.big] b WHERE abs(b.amount) > 9990 ORDER BY b.id');
+    check('下推 推不动时整表拉取，结果与下推版完全一致',
+      notPushed.sources[0].rows === 10000 && notPushed.pushdown.pushed === 0
+      && JSON.stringify(notPushed.rows) === JSON.stringify(pushed.rows),
+      { pulled: notPushed.sources[0].rows, same: JSON.stringify(notPushed.rows) === JSON.stringify(pushed.rows) });
+
+    // 多表 join：两边的条件各推各的
+    const pushJoined = await runFed(
+      'SELECT b.id, d.label FROM [大表源.main.big] b JOIN [维表源.main.dim] d ON b.uid = d.uid '
+      + "WHERE b.amount > 9990 AND d.label = 'L1' ORDER BY b.id");
+    check('下推 join 两侧的条件各自推给各自的源库',
+      pushJoined.sources.length === 2 && pushJoined.pushdown.pushed === 2
+      && pushJoined.sources.every((s) => s.rows <= 10), pushJoined.sources.map((s) => [s.ref, s.rows]));
+
+    // 字符串列上的范围比较不能推：各家排序规则不同，推过去可能少捞行
+    const strRange = await runFed(
+      "SELECT b.id FROM [大表源.main.big] b WHERE b.note > 'note-9990' ORDER BY b.id");
+    check('下推 字符串列的范围比较拒绝下推并说明原因',
+      strRange.pushdown.pushed === 0 && strRange.sources[0].rows === 10000
+      && strRange.pushdown.skipped.some((s) => /排序规则/.test(s.reason)),
+      strRange.pushdown.skipped);
+    // 但字符串列的等值是安全的（源库只会更宽松，本地那份条件会把多的滤掉）
+    const strEq = await runFed(
+      "SELECT b.id FROM [大表源.main.big] b WHERE b.note = 'note-777'");
+    check('下推 字符串列的等值可以推', strEq.pushdown.pushed === 1 && strEq.sources[0].rows === 1,
+      { rows: strEq.sources[0].rows });
+
+    // 顶层 OR：条件不是合取式，任何一段都不能单独推
+    const orQuery = await runFed(
+      'SELECT b.id FROM [大表源.main.big] b WHERE b.amount > 9990 OR b.uid = 1');
+    check('下推 顶层 OR 时整体不推', orQuery.pushdown.pushed === 0
+      && orQuery.sources[0].rows === 10000);
+
+    // 外连接：提前过滤空侧会改变结果，整体不推
+    const outer = await runFed(
+      'SELECT b.id FROM [大表源.main.big] b LEFT JOIN [维表源.main.dim] d ON b.uid = d.uid '
+      + 'WHERE b.amount > 9990');
+    check('下推 出现外连接时整体不推', outer.pushdown.pushed === 0
+      && !outer.pushdown.ok && /外连接/.test(outer.pushdown.reason), outer.pushdown.reason);
+
+    // 列裁剪：全限定写法时只取用得上的列（主键始终保留，keyset 翻页要用）
+    check('下推 全限定查询会裁剪列，但保留主键',
+      pushed.sources[0].columns.includes('id') && pushed.sources[0].columns.includes('amount')
+      && !pushed.sources[0].columns.includes('note'), pushed.sources[0].columns);
+    const starQuery = await runFed('SELECT * FROM [维表源.main.dim]');
+    check('下推 SELECT * 时不裁剪列',
+      starQuery.sources[0].columns.length === 2, starQuery.sources[0].columns);
+
+    // ---- 这才是「摘掉受限」的证据：下推之后，原本超限的查询能跑通 ----
+    let cappedErr = '';
+    try {
+      await runFed('SELECT b.id FROM [大表源.main.big] b WHERE abs(b.amount) > 9990',
+        { maxRowsPerSource: 100 });
+    } catch (e) { cappedErr = e.message; }
+    check('下推 推不动时仍会撞上行数上限', /拉取上限/.test(cappedErr), cappedErr);
+    const withinCap = await runFed('SELECT b.id FROM [大表源.main.big] b WHERE b.amount > 9990',
+      { maxRowsPerSource: 100 });
+    check('下推 【关键】同样的 100 行上限下，可下推的等价查询顺利跑通',
+      withinCap.rows.length === 10 && withinCap.sources[0].rows === 10,
+      { rows: withinCap.rows.length });
+
+    fed.closeSession(pushSession, 'selftest');
+    await pushA.close();
+    await pushB.close();
+
+    await srcA.close();
+    await srcB.close();
+  } catch (eFed) { fail++; console.log('  ✗ 联邦查询块异常:', eFed && eFed.stack || eFed); }
+
+  // ---- 本地加密快照存储（v2.7.0 共用地基 M1） ----
+  try {
+    const localStore = require('./localStore');
+    if (!localStore.available()) {
+      check('localStore 安全存储不可用时明确拒绝而不是明文落盘', (() => {
+        try { localStore.put('selftest', { a: 1 }, [[1]]); return false; }
+        catch (e) { return /安全存储不可用/.test(e.message); }
+      })());
+    } else {
+      const secret = '自检口令-1cb3f7d9-不应明文出现在磁盘上';
+      const putResult = localStore.put('selftest', { table: 't', note: secret }, [[secret, 42], [null, 0]]);
+      check('localStore 写入返回 id 与占用字节', /^[a-z0-9]+-[0-9a-f]{12}$/.test(putResult.id)
+        && putResult.bytes > 0, putResult);
+      const listed = localStore.list('selftest');
+      check('localStore 列表只需解头信息就能拿到元数据',
+        listed.length === 1 && listed[0].table === 't' && listed[0].rowCount === 2
+        && listed[0].createdAt > 0, listed[0]);
+      const back = localStore.read('selftest', putResult.id);
+      check('localStore 读回的行数据与写入完全一致',
+        JSON.stringify(back.rows) === JSON.stringify([[secret, 42], [null, 0]]), back.rows);
+      // 硬约束：磁盘上不得出现明文
+      const dir = path.join(localStore.rootDir(), 'selftest');
+      const bytes = Buffer.concat(fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f))));
+      check('localStore 落盘内容确实是密文（明文不出现在任何文件里）',
+        !bytes.includes(Buffer.from(secret, 'utf8')) && !bytes.includes(Buffer.from('selftest', 'utf8')));
+      const usage = localStore.usage('selftest');
+      check('localStore 占用可见', usage.entries === 1 && usage.bytes === putResult.bytes, usage);
+      // 份数配额：只留 2 份
+      for (let i = 0; i < 4; i++) localStore.put('selftest', { seq: i }, [[i]], { keep: 2 });
+      check('localStore 按份数自动清理最老的',
+        localStore.list('selftest').length === 2, localStore.list('selftest').map((x) => x.seq));
+      check('localStore 按天数清理', (() => {
+        localStore.put('selftest', { old: true }, [[1]]);
+        return localStore.prune('selftest', { days: -1 }) >= 1 && localStore.list('selftest').length === 0;
+      })());
+      check('localStore 清空返回条数', (() => {
+        localStore.put('selftest', { x: 1 }, [[1]]);
+        localStore.put('selftest', { x: 2 }, [[2]]);
+        return localStore.clear('selftest') === 2 && localStore.list('selftest').length === 0;
+      })());
+      let badId = false;
+      try { localStore.read('selftest', '../../etc/passwd'); } catch (e) { badId = /无效的快照 ID/.test(e.message); }
+      check('localStore 拒绝非法快照 ID（不能拿它做路径穿越）', badId);
+      let badBucket = false;
+      try { localStore.list('../evil'); } catch (e) { badBucket = /无效的存储分区名/.test(e.message); }
+      check('localStore 拒绝非法分区名', badBucket);
+    }
+  } catch (eLocal) { fail++; console.log('  ✗ localStore 块异常:', eLocal && eLocal.stack || eLocal); }
+
+  // ---- SQL 后悔药 / 回滚中心（v2.7.0 M3） ----
+  try {
+    const undo = require('./undo');
+    const localStore = require('./localStore');
+
+    // INSERT 解析：只认能确定行身份的形态
+    const okInsert = undo.analyzeInsert("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')");
+    check('后悔药 解析显式 VALUES 的 INSERT', okInsert && okInsert.supported
+      && okInsert.table.trim() === 't' && okInsert.columns.join(',') === 'id,name'
+      && okInsert.tuples.length === 2 && okInsert.tuples[1][1] === "'b'", okInsert);
+    check('后悔药 拒绝 INSERT … SELECT',
+      /无法确定插入了哪些行/.test((undo.analyzeInsert('INSERT INTO t SELECT * FROM s') || {}).reason || ''));
+    check('后悔药 拒绝 ON CONFLICT / ON DUPLICATE',
+      /无法确定/.test((undo.analyzeInsert("INSERT INTO t (id) VALUES (1) ON CONFLICT DO NOTHING") || {}).reason || ''));
+    check('后悔药 非 INSERT 返回 null', undo.analyzeInsert('UPDATE t SET a = 1') === null);
+    check('后悔药 字符串里的括号不会骗过解析',
+      (undo.analyzeInsert("INSERT INTO t (id, name) VALUES (1, 'a),(b')") || {}).tuples.length === 1);
+
+    // 值编解码：反向 SQL 的字面量靠它还原类型
+    const samples = [null, 'x', 42, -1.5, true, 9007199254740993n, new Date('2026-01-02T03:04:05.000Z'),
+      Buffer.from('二进制内容'), { a: [1, 2] }, NaN];
+    const roundTripped = samples.map((v) => undo.decodeValue(undo.encodeValue(v)));
+    check('后悔药 值编解码保住 BigInt / Date / Buffer / 非有限浮点',
+      roundTripped[5] === 9007199254740993n
+      && roundTripped[6] instanceof Date && roundTripped[6].getTime() === Date.parse('2026-01-02T03:04:05.000Z')
+      && Buffer.isBuffer(roundTripped[7]) && roundTripped[7].toString() === '二进制内容'
+      && JSON.stringify(roundTripped[8]) === '{"a":[1,2]}'
+      && Number.isNaN(roundTripped[9]) && roundTripped[0] === null && roundTripped[4] === true,
+      roundTripped.map((x) => typeof x));
+    check('后悔药 用户数据里的 __t 字段不会被误当成类型标签',
+      JSON.stringify(undo.decodeValue(undo.encodeValue({ __t: 'buf', v: 'not-really' })))
+        === '{"__t":"buf","v":"not-really"}');
+
+    const undoFile = path.join(os.tmpdir(), `dbpanda-undo-${process.pid}.db`);
+    fs.rmSync(undoFile, { force: true });
+    const ua = new SQLiteAdapter({ id: 'undo-src', type: 'sqlite', file: undoFile });
+    await ua.connect();
+    const runSelect = (sql) => ua.exec('main', sql);
+    const ctx = { connId: 'undo-src', connName: '自检库', dialect: ua.dialect };
+    await ua.exec('main', 'CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL, bin BLOB)');
+    await ua.exec('main', 'CREATE TABLE nopk (a INTEGER, b TEXT)');
+    const seed = [];
+    for (let i = 1; i <= 10000; i++) seed.push(`(${i}, 'n${i}', ${(i % 97) + 0.5})`);
+    for (let i = 0; i < seed.length; i += 1000) {
+      await ua.exec('main', `INSERT INTO t (id, name, score) VALUES ${seed.slice(i, i + 1000).join(',')}`);
+    }
+    const bigBlob = Buffer.alloc(2000, 9);
+    ua.db.prepare('UPDATE t SET bin = ? WHERE id = 1').run([bigBlob]);
+
+    // 不做快照的几种情况都要说清楚原因
+    const noPk = await undo.planFor(ua, { db: 'main', schema: null, sql: 'UPDATE nopk SET b = 1' });
+    check('后悔药 无主键表明确拒绝并给出理由',
+      !noPk.supported && /没有主键/.test(noPk.reason) && /备份/.test(noPk.reason), noPk.reason);
+    const multi = await undo.planFor(ua, { db: 'main', schema: null, sql: 'UPDATE t SET score=1; UPDATE t SET score=2' });
+    check('后悔药 多语句脚本拒绝快照', !multi.supported && /多条语句/.test(multi.reason), multi.reason);
+    const notDml = await undo.planFor(ua, { db: 'main', schema: null, sql: 'SELECT 1' });
+    check('后悔药 非 DML 无需快照', !notDml.supported && /无需快照/.test(notDml.reason), notDml.reason);
+    const aliased = await undo.planFor(ua, { db: 'main', schema: null, sql: 'UPDATE t AS x SET score = 1' });
+    check('后悔药 带别名的语句拒绝快照', !aliased.supported && /别名/.test(aliased.reason), aliased.reason);
+    const overLimitPlan = await undo.planFor(ua, { db: 'main', schema: null, sql: 'UPDATE t SET score = 0', maxRows: 100 });
+    let overLimitErr = '';
+    try { await undo.captureBefore(ua, overLimitPlan, runSelect); } catch (e) { overLimitErr = e.message; }
+    check('后悔药 超过行数阈值时明确拒绝并指向备份',
+      /超过快照上限/.test(overLimitErr) && /备份/.test(overLimitErr), overLimitErr);
+
+    // ---- 验收：1 万行表上漏写 WHERE 的 UPDATE，回滚后逐行比对完全一致 ----
+    const snapshotBefore = (await runSelect('SELECT id, name, score, bin FROM t ORDER BY id')).rows
+      .map((r) => [String(r[0]), r[1], r[2], r[3] === null ? null : Buffer.from(r[3]).toString('hex')]);
+    const accidentSql = 'UPDATE t SET score = 0, name = \'oops\'';   // 漏写 WHERE
+    const plan = await undo.planFor(ua, { db: 'main', schema: null, sql: accidentSql });
+    check('后悔药 能为漏写 WHERE 的 UPDATE 建立计划',
+      plan.supported && plan.kind === 'update' && plan.target.table === 't'
+      && plan.pk.join(',') === 'id' && plan.columns.length === 4, plan.reason || plan.pk);
+    const beforeRows = await undo.captureBefore(ua, plan, runSelect);
+    check('后悔药 取到全部受影响行的原值', beforeRows.length === 10000, beforeRows.length);
+    await ua.exec('main', accidentSql);
+    const keys = undo.keyLiteralsOf(ua, plan, beforeRows);
+    const afterRows = await undo.captureAfter(ua, plan, keys, runSelect);
+    const recorded = undo.record(ctx, plan, beforeRows, afterRows);
+    check('后悔药 快照已加密落盘', recorded.bytes > 0 && !!recorded.id, recorded);
+
+    const damaged = (await runSelect("SELECT COUNT(*) FROM t WHERE name = 'oops'")).rows[0][0];
+    check('后悔药 事故确实发生了（10000 行被改）', Number(damaged) === 10000, damaged);
+
+    const snap = localStore.read(undo.BUCKET, recorded.id);
+    check('后悔药 快照头记录了连接 / 表 / 语句 / 行数',
+      snap.kind === 'update' && snap.table === 't' && snap.connName === '自检库'
+      && snap.affected === 10000 && /漏|UPDATE t SET/.test(snap.sql), {
+        kind: snap.kind, table: snap.table, affected: snap.affected,
+      });
+    const conflicts = await undo.detectConflicts(ua, snap, snap.rows, runSelect);
+    check('后悔药 无人改动时不报冲突', conflicts.every((c) => !c.conflict));
+    const sqls = undo.reverseSql(ua, snap, snap.rows);
+    check('后悔药 生成逐行反向 UPDATE', sqls.length === 10000 && /^UPDATE /.test(sqls[0]), sqls[0]);
+    await ua.execTxn('main', sqls);
+    const restored = (await runSelect('SELECT id, name, score, bin FROM t ORDER BY id')).rows
+      .map((r) => [String(r[0]), r[1], r[2], r[3] === null ? null : Buffer.from(r[3]).toString('hex')]);
+    check('后悔药 【验收】1 万行回滚后逐行比对与快照前完全一致',
+      JSON.stringify(restored) === JSON.stringify(snapshotBefore),
+      { first: restored[0], expectFirst: snapshotBefore[0] });
+    check('后悔药 大 BLOB 也被原样还原（没有被出境用的 256 字节预览截断）',
+      restored[0][3] === bigBlob.toString('hex'));
+
+    // ---- 冲突：回滚前别人又改了一行 ----
+    await ua.exec('main', "UPDATE t SET score = 5 WHERE id <= 3");
+    const plan2 = await undo.planFor(ua, { db: 'main', schema: null, sql: "UPDATE t SET score = 6 WHERE id <= 3" });
+    const before2 = await undo.captureBefore(ua, plan2, runSelect);
+    await ua.exec('main', "UPDATE t SET score = 6 WHERE id <= 3");
+    const after2 = await undo.captureAfter(ua, plan2, undo.keyLiteralsOf(ua, plan2, before2), runSelect);
+    const rec2 = undo.record(ctx, plan2, before2, after2);
+    // 第三方在我们之后改了 id=2
+    await ua.exec('main', "UPDATE t SET score = 999 WHERE id = 2");
+    const snap2 = localStore.read(undo.BUCKET, rec2.id);
+    const conflicts2 = await undo.detectConflicts(ua, snap2, snap2.rows, runSelect);
+    const conflicted = conflicts2.filter((c) => c.conflict);
+    check('后悔药 回滚前检出「本次操作之后又被改动过」的行',
+      conflicted.length === 1 && /之后又被改动过/.test(conflicted[0].reason), conflicted);
+    const safeRows = snap2.rows.filter((_r, i) => !conflicts2[i].conflict);
+    await ua.execTxn('main', undo.reverseSql(ua, snap2, safeRows));
+    const afterPartial = (await runSelect('SELECT id, score FROM t WHERE id <= 3 ORDER BY id')).rows
+      .map((r) => [Number(r[0]), Number(r[1])]);
+    check('后悔药 冲突行默认跳过，其余正常回滚',
+      JSON.stringify(afterPartial) === JSON.stringify([[1, 5], [2, 999], [3, 5]]), afterPartial);
+
+    // ---- DELETE → 反向 INSERT ----
+    const planDel = await undo.planFor(ua, { db: 'main', schema: null, sql: 'DELETE FROM t WHERE id > 9995' });
+    const beforeDel = await undo.captureBefore(ua, planDel, runSelect);
+    await ua.exec('main', 'DELETE FROM t WHERE id > 9995');
+    const afterDel = await undo.captureAfter(ua, planDel, undo.keyLiteralsOf(ua, planDel, beforeDel), runSelect);
+    const recDel = undo.record(ctx, planDel, beforeDel, afterDel);
+    const snapDel = localStore.read(undo.BUCKET, recDel.id);
+    check('后悔药 DELETE 的反向是 INSERT',
+      undo.reverseSql(ua, snapDel, snapDel.rows).every((s) => /^INSERT INTO/.test(s)));
+    const gone = Number((await runSelect('SELECT COUNT(*) FROM t')).rows[0][0]);
+    await ua.execTxn('main', undo.reverseSql(ua, snapDel, snapDel.rows));
+    const backAgain = Number((await runSelect('SELECT COUNT(*) FROM t')).rows[0][0]);
+    check('后悔药 DELETE 回滚后行数恢复', gone === 9995 && backAgain === 10000, { gone, backAgain });
+    const delConflict = await undo.detectConflicts(ua, snapDel, snapDel.rows, runSelect);
+    check('后悔药 已经回滚过的 DELETE 再回滚会报主键冲突',
+      delConflict.every((c) => c.conflict && /主键冲突/.test(c.reason)));
+
+    // ---- INSERT → 反向 DELETE ----
+    const insSql = "INSERT INTO t (id, name, score) VALUES (20001, 'x', 1), (20002, 'y', 2)";
+    const planIns = await undo.planFor(ua, { db: 'main', schema: null, sql: insSql });
+    check('后悔药 显式主键的 INSERT 可以快照',
+      planIns.supported && planIns.kind === 'insert' && planIns.insertKeys.length === 2, planIns.reason);
+    await ua.exec('main', insSql);
+    const afterIns = await undo.captureAfter(ua, planIns, undo.keyLiteralsOf(ua, planIns, []), runSelect);
+    const recIns = undo.record(ctx, planIns, [], afterIns);
+    const snapIns = localStore.read(undo.BUCKET, recIns.id);
+    const insReverse = undo.reverseSql(ua, snapIns, snapIns.rows);
+    check('后悔药 INSERT 的反向是按主键 DELETE',
+      insReverse.length === 2 && insReverse.every((s) => /^DELETE FROM .* WHERE /.test(s)), insReverse[0]);
+    await ua.execTxn('main', insReverse);
+    check('后悔药 INSERT 回滚后新行消失',
+      Number((await runSelect('SELECT COUNT(*) FROM t WHERE id >= 20001')).rows[0][0]) === 0);
+    const autoInc = await undo.planFor(ua, {
+      db: 'main', schema: null, sql: "INSERT INTO t (name, score) VALUES ('z', 1)",
+    });
+    check('后悔药 主键靠自增的 INSERT 明确拒绝', !autoInc.supported
+      && /没有显式给出全部主键列/.test(autoInc.reason), autoInc.reason);
+
+    localStore.clear(undo.BUCKET);
+    await ua.close();
+    fs.rmSync(undoFile, { force: true });
+  } catch (eUndo) { fail++; console.log('  ✗ 后悔药块异常:', eUndo && eUndo.stack || eUndo); }
+
   console.log(`[SELFTEST] 通过 ${pass} 项, 失败 ${fail} 项`);
   return fail === 0 ? 0 : 1;
 }

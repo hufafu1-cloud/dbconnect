@@ -171,6 +171,8 @@ export const icons = {
   history: svg(`<path d="M8 1.8a6.2 6.2 0 1 1-5.9 4.3" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" fill="none"/>
     <path d="M2 2.4v3.7h3.7" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
     <path d="M8 4.8V8l2.6 1.6" stroke="#2b7de9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`),
+  undo: svg(`<path d="M3.2 6.6h6.2a3.6 3.6 0 0 1 0 7.2H6" stroke="#d9534f" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+    <path d="M6 3.4L2.8 6.6 6 9.8" stroke="#d9534f" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`),
   func: svg(`<path d="M10.5 2.2c-1.6 0-2.2.9-2.4 2.3L7.2 11c-.2 1.5-.9 2.7-2.6 2.7" stroke="#7c5cd6" stroke-width="1.5" stroke-linecap="round" fill="none"/>
     <path d="M4.6 6h5M9.6 9.6l3.4 3.4M13 9.6l-3.4 3.4" stroke="#7c5cd6" stroke-width="1.4" stroke-linecap="round"/>`),
   trigger: svg(`<path d="M8.8 1.6L3.6 9h3.2l-1 5.4L11.4 7H8.2l.6-5.4z" fill="#d97706"/>`),

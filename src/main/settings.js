@@ -44,6 +44,20 @@ const SCHEMA = {
   // 默认值必须与 css/app.css 里 #sidebar 的 width 一致，否则首次启动会静默改变布局
   sidebarWidth: { def: 280, parse: intRange(170, 560) },
   queryMaxRows: { def: 2000, parse: numberIn(200, 2000, 10000) },
+  // 跨库联邦查询每张源表的拉取上限。默认值必须与 federated.js 的
+  // DEFAULT_MAX_ROWS_PER_SOURCE 一致，否则改设置前后行为对不上。
+  federatedMaxRows: { def: 100000, parse: numberIn(10000, 50000, 100000, 500000, 1000000) },
+  // SQL 后悔药：执行 UPDATE/DELETE/INSERT 前把受影响行的原值快照下来。
+  //
+  // 默认开着，这一条是有意偏离「默认值必须与现有表现一致」的：那条约定是为了
+  // 升级后布局/行为不被静默改掉，而后悔药是张安全网——**要用它的人正是没想到
+  // 要提前打开它的人**，默认关等于永远用不上。代价是有界的：只对单条 DML 生效，
+  // 影响行数超过 undoMaxRows 就直接不快照并说明原因，不会出现悄悄拖慢的情况。
+  undoSnapshot: { def: 'on', parse: stringIn('on', 'off') },
+  // 单次快照的行数上限。默认值须与 undo.js 的 DEFAULT_MAX_ROWS 一致
+  undoMaxRows: { def: 50000, parse: numberIn(1000, 10000, 50000, 200000) },
+  // 回滚中心保留份数，超出的自动清理
+  undoKeep: { def: 50, parse: intRange(1, 200) },
   tablePageSize: { def: 500, parse: numberIn(100, 500, 1000) },
 };
 

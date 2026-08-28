@@ -278,6 +278,9 @@ function connectionStamps(operation, payload) {
   for (const key of ['connId', 'srcConnId', 'dstConnId']) {
     if (p[key]) ids.push(String(p[key]));
   }
+  for (const target of (Array.isArray(p.targets) ? p.targets : [])) {
+    if (target && target.connId) ids.push(String(target.connId));
+  }
   if (operation === 'conn.save' && p.id) ids.push(String(p.id));
   return [...new Set(ids)].sort().map((id) => {
     const cfg = store.getById(id);
@@ -332,6 +335,27 @@ function describe(operation, payload) {
       intrinsicallyDangerous = splitStatements(p.sql).length > 0;
       title = `即将在生产连接「${target.name}」上执行 SQL`;
       break;
+    // 多库广播：审批**一次**覆盖整批目标。一批里有三个生产库就弹一次窗、
+    // 把三个都列出来，而不是逐库弹三次——弹三次的结果一定是闭着眼连点三下。
+    case 'db.broadcast': {
+      const targets = Array.isArray(p.targets) ? p.targets : [];
+      if (!targets.length) throw new Error('广播审批缺少目标列表');
+      const all = targets.map((item) => connection(item && item.connId));
+      const prod = all.filter((item) => item.env === 'prod');
+      target = prod[0] || all[0];
+      intrinsicallyDangerous = prod.length > 0 && splitStatements(p.sql).length > 0;
+      title = `即将向 ${targets.length} 个目标广播 SQL，其中 ${prod.length} 个是生产连接`;
+      const scope = targets.map((item, i) => {
+        const conn = all[i];
+        return `${conn.name}${item.db ? ' / ' + item.db : ''}${conn.env === 'prod' ? '（生产）' : ''}`;
+      });
+      items = [
+        ...genericItem(`广播目标共 ${targets.length} 个，其中生产连接 ${prod.length} 个`,
+          scope.slice(0, 40).join('\n') + (scope.length > 40 ? `\n…另有 ${scope.length - 40} 个` : '')),
+        ...analyzeForExecution(p.sql),
+      ];
+      break;
+    }
     case 'conn.save': {
       if (!p.id) {
         target = { id: '', name: p.name || '新连接', env: '' };
@@ -499,6 +523,18 @@ function assertNotReadOnly(operation, payload) {
     // 未知函数调用一律不算只读，宁可误拦也不放过写操作。
     for (const statement of splitStatements(p.sql)) {
       if (!isExplicitlyReadOnly(statement)) refuseReadOnly(target.name, '写操作 SQL');
+    }
+    return;
+  }
+  if (operation === 'db.broadcast') {
+    // 广播里只要有一个只读成员，整批就不放行——单独跳过那一个会让
+    // 「32 个库都执行了」变成「31 个库执行了」，而用户以为是 32 个。
+    const readOnly = (Array.isArray(p.targets) ? p.targets : [])
+      .map((item) => readOnlyConnection(item && item.connId))
+      .filter(Boolean);
+    if (!readOnly.length) return;
+    for (const statement of splitStatements(p.sql)) {
+      if (!isExplicitlyReadOnly(statement)) refuseReadOnly(readOnly[0].name, '写操作 SQL 广播');
     }
     return;
   }

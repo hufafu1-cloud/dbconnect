@@ -814,6 +814,107 @@ async function seedElasticsearch(config) {
   };
 }
 
+/**
+ * 跨库联邦查询：真机跨方言验收。
+ *
+ * 路线图对 M4 的验收是「MySQL 表与 PostgreSQL 表 join 的结果与手工导出比对完全一致」。
+ * selftest 用两个内存 SQLite 覆盖了同一条代码路径，但覆盖不到跨方言才有的东西：
+ * 类型名不同（int / integer、varchar / character varying）、驱动回传的 JS 类型不同
+ * （PG 的 numeric 是字符串、MySQL 的 DECIMAL 也是字符串、整数则是 number）、
+ * 大小写折叠规则不同。这些只有真连上两种库才试得出来。
+ *
+ * 需要建表，因此与 CRUD 用同一个开关；也可以单独用 DB_INTEGRATION_FEDERATED=1 打开。
+ * 取选中目标里的前两个 SQL 型目标，例如：
+ *   DB_INTEGRATION_TARGETS=mysql,postgres DB_INTEGRATION_FEDERATED=1 node scripts/integration-db.js
+ */
+async function federatedCrossCheck(types, attempts, retryMs) {
+  const sqlTypes = types.filter((type) => !TARGETS[type].nonSql);
+  if (sqlTypes.length < 2) {
+    console.log('[federated] 跳过：需要至少两个 SQL 型目标（例如 mysql,postgres）');
+    return { skipped: true };
+  }
+  const federated = require('../src/main/federated');
+  const [typeA, typeB] = sqlTypes.slice(0, 2);
+  const suffix = `${Date.now().toString(36)}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
+  const nameA = `dbpanda_fed_a_${suffix}`;
+  const nameB = `dbpanda_fed_b_${suffix}`;
+
+  const setup = async (type, table, rows) => {
+    const config = buildConfig(type);
+    const adapter = await connectWithRetry(type, config, attempts, retryMs);
+    const metadata = await metadataCheck(adapter, type, config);
+    const database = metadata.database;
+    const schema = type === 'mssql' ? 'dbo' : null;
+    const qualified = adapter.qualify(database, schema, table);
+    const id = adapter.quoteIdent('id');
+    const val = adapter.quoteIdent('val');
+    await adapter.exec(database,
+      `CREATE TABLE ${qualified} (${id} INT NOT NULL PRIMARY KEY, ${val} VARCHAR(50) NOT NULL)`);
+    await adapter.exec(database,
+      `INSERT INTO ${qualified} (${id}, ${val}) VALUES ${rows.map(([i, v]) => `(${i}, '${v}')`).join(', ')}`);
+    return { type, adapter, config, database, schema, table, qualified };
+  };
+
+  let a = null;
+  let b = null;
+  let sessionId = null;
+  try {
+    a = await setup(typeA, nameA, [[1, 'alpha'], [2, 'beta'], [3, 'gamma']]);
+    b = await setup(typeB, nameB, [[1, 'one'], [2, 'two'], [9, 'nine']]);
+    console.log(`[federated] ${typeA}.${nameA} × ${typeB}.${nameB} 已就绪`);
+
+    // 冒充连接库：真实的 store/dbm 在这里用不上，注入两个已连上的适配器即可，
+    // 走的是与界面完全相同的 runQuery 代码路径。
+    const conns = [
+      { id: 'fedA', name: 'FedA', type: a.type, database: a.database },
+      { id: 'fedB', name: 'FedB', type: b.type, database: b.database },
+    ];
+    const byId = { fedA: a.adapter, fedB: b.adapter };
+    const deps = {
+      connections: () => conns,
+      isOpen: (id) => !!byId[id],
+      adapter: (id) => byId[id],
+    };
+
+    const refA = `[FedA.${a.database}${a.schema ? `.${a.schema}` : ''}.${a.table}]`;
+    const refB = `[FedB.${b.database}${b.schema ? `.${b.schema}` : ''}.${b.table}]`;
+    const opened = await federated.openSession('integration');
+    sessionId = opened.sessionId;
+    const result = await federated.runQuery({
+      sessionId,
+      sql: `SELECT x.id AS id, x.val AS va, y.val AS vb FROM ${refA} x JOIN ${refB} y ON x.id = y.id ORDER BY x.id`,
+    }, 'integration', { deps });
+
+    // 手工比对：只有 id 1、2 两边都有；id 3 只在 A、id 9 只在 B，都必须被 join 掉
+    const expected = [[1, 'alpha', 'one'], [2, 'beta', 'two']];
+    const actual = result.rows.map((row) => [Number(row[0]), String(row[1]), String(row[2])]);
+    assert(JSON.stringify(actual) === JSON.stringify(expected),
+      `federated join mismatch: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+    assert(result.sources.length === 2 && result.sources.every((s) => s.rows === 3),
+      `federated source row counts wrong: ${JSON.stringify(result.sources.map((s) => s.rows))}`);
+    assert(result.snapshotConsistent === false, 'federated must declare a non-consistent snapshot');
+
+    // 超限必须明确拒绝，而不是悄悄截断出一份看着正常的错结果
+    let capped = '';
+    try {
+      await federated.runQuery({ sessionId, sql: `SELECT * FROM ${refA}`, maxRowsPerSource: 2 },
+        'integration', { deps });
+    } catch (error) { capped = error.message; }
+    assert(/拉取上限/.test(capped), `federated row cap must be refused, got: ${capped}`);
+
+    console.log(`[federated] 跨 ${typeA} × ${typeB} 的 join 与手工结果一致，超限拒绝正常`);
+    return { skipped: false, typeA, typeB };
+  } finally {
+    if (sessionId) federated.closeSession(sessionId, 'integration');
+    for (const item of [a, b]) {
+      if (!item) continue;
+      try { await item.adapter.exec(item.database, `DROP TABLE ${item.qualified}`); }
+      catch (error) { console.error(`[federated] 清理 ${item.table} 失败: ${safeError(error, '')}`); }
+      await safeClose(item.adapter);
+    }
+  }
+}
+
 async function runTarget(type, globalCrud, globalCancel, attempts, retryMs) {
   const config = buildConfig(type);
   const prefix = TARGETS[type].prefix;
@@ -905,6 +1006,17 @@ async function main() {
     results.push(await runTarget(target, globalCrud, globalCancel, attempts, retryMs));
   }
 
+  // 跨库联邦查询要两个库同时在线，因此放在逐目标检查之后单独跑一遍
+  const federatedWanted = boolEnv('DB_INTEGRATION_FEDERATED', globalCrud);
+  if (federatedWanted && results.every((r) => r.ok)) {
+    try {
+      await federatedCrossCheck(targets, attempts, retryMs);
+    } catch (error) {
+      console.error(`[federated] FAIL: ${safeError(error, '')}`);
+      process.exitCode = 1;
+    }
+  }
+
   console.log('\n[db-integration] summary');
   for (const result of results) {
     if (result.ok) console.log(`  PASS ${result.type} (${result.ms} ms)`);
@@ -922,6 +1034,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  federatedCrossCheck,
   metadataCheck,
   rowLimitCheck,
   crudCheck,

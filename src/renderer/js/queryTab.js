@@ -893,6 +893,25 @@ export function openQueryTab(target, initialSql, opts) {
       }
     }
     if (!results.length) list.append(el('div', { class: 'msg-item' }, '（没有要执行的语句）'));
+    // 后悔药状态由主进程随结果带回来（挂在第一个结果上）。
+    // 「存了」和「没存、因为什么」都必须显示：以为有后悔药、真出事时却没有，
+    // 比一开始就知道没有更糟。
+    const undoNote = results.length && results[0].undo;
+    if (undoNote) {
+      if (undoNote.saved) {
+        list.append(el('div', { class: 'msg-item undo-saved' },
+          iconEl('undo'),
+          el('b', {}, `已存后悔药：${undoNote.table} 的 ${fmtCount(undoNote.rows)} 行原值`),
+          el('button', {
+            class: 'pbtn', style: { marginLeft: '8px' },
+            onClick: async () => (await import('./undoTab.js')).openUndoTab(),
+          }, '打开回滚中心')));
+      } else if (undoNote.reason && !/无需快照/.test(undoNote.reason)) {
+        list.append(el('div', { class: 'msg-item undo-skipped' },
+          el('b', {}, '未做快照'),
+          el('span', { class: 'msg-sql' }, ' — ' + undoNote.reason)));
+      }
+    }
     if (!errors.length) {
       list.append(el('div', { style: { color: 'var(--text-muted)', marginTop: '6px' } }, `总耗时 ${totalMs} ms`));
     }

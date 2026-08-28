@@ -170,12 +170,17 @@ function analyzeStatement(sql) {
   const whereClause = whereStart >= 0
     ? original.slice(whereStart).trim().replace(/;+$/, '').trim()
     : '';
+  const tail = whereClause ? ` ${whereClause}` : '';
   return {
     kind,
     supported: true,
     table,
+    whereClause,
     hasWhere: !!whereClause,
-    countSql: `SELECT COUNT(*) AS dbpanda_impact FROM ${table}${whereClause ? ` ${whereClause}` : ''}`,
+    countSql: `SELECT COUNT(*) AS dbpanda_impact FROM ${table}${tail}`,
+    // 回滚快照要的是「这条语句将要改动的那些行的原值」，范围与 COUNT 完全一致，
+    // 因此复用同一份表名与 WHERE 切片——两者绝不能各自解析出不同的行集。
+    selectSql: `SELECT * FROM ${table}${tail}`,
     sql: original,
   };
 }

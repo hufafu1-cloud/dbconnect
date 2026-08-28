@@ -916,6 +916,146 @@ app.whenReady().then(async () => {
           && whereLit.strColText === "'abc'" && whereLit.uuidCol === "'42'" && whereLit.trimmed === "'7'"
           && whereLit.quoteEscaped === "'''a'";
         console.log('[SMOKE][whereLit]', JSON.stringify(whereLit));
+        // 跨库联邦查询：整条链路（命令 → 标签 → IPC → 本地引擎 → 网格）在真实应用里跑一遍。
+        // 不引用跨源表的查询不需要任何数据库连接，因此这条能在冒烟环境里端到端验证；
+        // 跨连接 join 的正确性由 selftest 用两个内存 SQLite 覆盖。
+        const federated = await win.webContents.executeJavaScript(`(async () => {
+          const out = {};
+          const tab = await window.__test.openFederated();
+          const pane = tab.pane;
+          // 常驻边界标注必须一直在，不能是可关掉的提示
+          const notice = pane.querySelector('.fed-notice');
+          out.notice = notice ? notice.textContent.trim() : null;
+          out.buttons = [...pane.querySelectorAll('.pane-toolbar .pbtn')].map((b) => b.textContent.trim());
+          const btn = (label) => [...pane.querySelectorAll('.pane-toolbar .pbtn')]
+            .find((b) => b.textContent.trim().startsWith(label));
+          out.saveDisabledBefore = btn('结果存为本地表').disabled;
+          out.exportDisabledBefore = btn('导出').disabled;
+
+          tab._setSql("SELECT 1 AS n, 'x' AS s");
+          await tab._run();
+          out.sessionOpened = !!tab._sessionId();
+          const head = [...pane.querySelectorAll('.result-body thead th')].map((n) => n.textContent.trim());
+          const cells = [...pane.querySelectorAll('.result-body tbody tr[data-dr] td')].map((n) => n.textContent.trim());
+          out.head = head.join(',');
+          out.cells = cells.join(',');
+          out.info = (pane.querySelector('.result-body .pane-info') || {}).textContent || '';
+          out.saveEnabledAfter = !btn('结果存为本地表').disabled;
+          out.exportEnabledAfter = !btn('导出').disabled;
+          // 结果不可就地编辑：本地临时表改了也改不到源库
+          out.gridEditable = !!(pane.querySelector('.result-body td[contenteditable]'));
+
+          // 把结果固化成本地表，再当普通表继续查——「把上一个结果集当表继续查」
+          await tab._saveResult('r1');
+          tab._setSql('SELECT n * 10 AS n10 FROM r1');
+          await tab._run();
+          out.reuse = [...pane.querySelectorAll('.result-body tbody tr[data-dr] td')]
+            .map((n) => n.textContent.trim()).join(',');
+
+          // 写操作必须被拒绝，且理由说得清
+          tab._setSql('UPDATE r1 SET n = 2');
+          await tab._run();
+          out.writeRejected = (pane.querySelector('.msg-item.error') || {}).textContent || '';
+
+          // 引用不存在的连接时，报错要能指导用户
+          tab._setSql('SELECT * FROM [压根没有这个连接.db.t]');
+          await tab._run();
+          out.unknownConn = (pane.querySelector('.msg-item.error') || {}).textContent || '';
+
+          // 关标签必须释放会话：它在主进程里攥着一份内存数据副本
+          const sid = tab._sessionId();
+          await tab.close(true);
+          await new Promise((r) => setTimeout(r, 120));
+          let released = false;
+          try { await window.api.fed.describe(sid); }
+          catch (e) { released = /不存在或已关闭/.test(e.message); }
+          out.sessionReleased = released;
+          return out;
+        })()`);
+        const federatedOk = /本地内存计算/.test(federated.notice || '')
+          && /非跨库一致性快照/.test(federated.notice || '')
+          && federated.saveDisabledBefore && federated.exportDisabledBefore
+          && federated.sessionOpened
+          && federated.head === '#,n,s' && federated.cells === '1,1,x'   // 首列是网格的行号列
+          && /只读/.test(federated.info)
+          && federated.saveEnabledAfter && federated.exportEnabledAfter
+          && !federated.gridEditable
+          && federated.reuse === '1,10'
+          && /只读的 SELECT/.test(federated.writeRejected)
+          && /找不到名为/.test(federated.unknownConn)
+          && federated.sessionReleased;
+        // SQL 后悔药：冒烟环境里没有真能连上的库，跑不了真实 DML，
+        // 因此这里守的是「界面能开、通道能通、空状态说得清楚」。
+        // 真实的「漏写 WHERE → 回滚 → 逐行比对」由 selftest（1 万行）与 demo（真实连接）覆盖。
+        const undoUi = await win.webContents.executeJavaScript(`(async () => {
+          const out = {};
+          const listed = await window.api.undo.list();
+          out.available = listed.available;
+          out.entries = (listed.entries || []).length;
+          const tab = await window.__test.openUndo();
+          await new Promise((r) => setTimeout(r, 200));
+          const pane = tab.pane;
+          out.empty = (pane.querySelector('.undo-empty') || {}).textContent || '';
+          out.buttons = [...pane.querySelectorAll('.pane-toolbar .pbtn')].map((b) => b.textContent.trim());
+          out.rollbackDisabled = !![...pane.querySelectorAll('.pane-toolbar .pbtn')]
+            .find((b) => b.textContent.includes('回滚') && b.disabled);
+          out.usage = (pane.querySelector('.undo-usage') || {}).textContent || '';
+          // 快照 ID 是拼进文件路径的，必须挡住路径穿越
+          let traversal = '';
+          try { await window.api.undo.preview('../../key'); } catch (e) { traversal = e.message; }
+          out.traversal = traversal;
+          await tab.close(true);
+          return out;
+        })()`);
+        const undoOk = undoUi.available === true && undoUi.entries === 0
+          && /还没有可回滚的操作/.test(undoUi.empty)
+          && undoUi.buttons.some((b) => b.includes('全部清空'))
+          && undoUi.rollbackDisabled
+          && /份快照/.test(undoUi.usage)
+          && /无效的快照 ID/.test(undoUi.traversal);
+        console.log('[SMOKE][undo]', JSON.stringify(undoUi));
+        // 多库广播：冒烟环境没有真能连上的库，跑不了真实广播，
+        // 这里守的是「界面能开、目标展开说得清、广播组能存能读」。
+        // 32 库合并 / 单库失败 / 取消由 selftest 覆盖，真实连接由 demo 覆盖。
+        const broadcastUi = await win.webContents.executeJavaScript(`(async () => {
+          const out = {};
+          const tab = await window.__test.openBroadcast();
+          await new Promise((r) => setTimeout(r, 200));
+          const pane = tab.pane;
+          out.buttons = [...pane.querySelectorAll('.pane-toolbar .pbtn')].map((b) => b.textContent.trim());
+          out.notice = (pane.querySelector('.fed-notice') || {}).textContent || '';
+          // 连接都没打开，展开必须给出可操作的原因而不是静默空列表
+          await tab._setSelectors([{ conn: '*', db: '' }]);
+          await new Promise((r) => setTimeout(r, 200));
+          out.targets = tab._targets().length;
+          out.miss = (pane.querySelector('.bc-miss') || {}).textContent || '';
+          out.empty = (pane.querySelector('.bc-target-empty') || {}).textContent || '';
+          out.runDisabled = !![...pane.querySelectorAll('.pane-toolbar .pbtn')]
+            .find((b) => b.textContent.includes('广播执行') && b.disabled);
+          // 广播组存的是选择器而不是展开后的目标：分库会增减，存死了就会漏
+          await window.api.bc.saveGroup('冒烟组', [{ conn: '订单库-*', db: 'shop_*' }]);
+          const groups = await window.api.bc.groups();
+          out.group = groups.find((g) => g.name === '冒烟组');
+          await window.api.bc.deleteGroup('冒烟组');
+          out.afterDelete = (await window.api.bc.groups()).some((g) => g.name === '冒烟组');
+          let badName = '';
+          try { await window.api.bc.saveGroup('', [{ conn: 'x' }]); } catch (e) { badName = e.message; }
+          out.badName = badName;
+          await tab.close(true);
+          return out;
+        })()`);
+        const broadcastOk = broadcastUi.buttons.some((b) => b.includes('广播执行'))
+          && broadcastUi.buttons.some((b) => b.includes('重试失败项'))
+          && /非原子操作/.test(broadcastUi.notice)
+          && broadcastUi.targets === 0
+          && /尚未打开/.test(broadcastUi.miss)
+          && /还没有匹配到目标/.test(broadcastUi.empty)
+          && broadcastUi.runDisabled
+          && broadcastUi.group && broadcastUi.group.selectors[0].db === 'shop_*'
+          && broadcastUi.afterDelete === false
+          && /名称不能为空/.test(broadcastUi.badName);
+        console.log('[SMOKE][broadcast]', JSON.stringify(broadcastUi));
+        console.log('[SMOKE][federated]', JSON.stringify(federated));
         console.log('[SMOKE][treeState]', JSON.stringify(treeState));
         console.log('[SMOKE][tabs]', JSON.stringify(tabsProbe));
         console.log('[SMOKE][tasks]', JSON.stringify(taskCenter));
@@ -971,11 +1111,11 @@ app.whenReady().then(async () => {
           && !noAutoConnect.loading && noAutoConnect.connections >= 1;
         console.log('[SMOKE][noAutoConnect]',
           JSON.stringify({ ...noAutoConnect, ready: rebootReady, ms: Date.now() - rebootAt }));
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} noAutoConnect=${noAutoConnectOk} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} federated=${federatedOk} broadcast=${broadcastOk} undo=${undoOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} noAutoConnect=${noAutoConnectOk} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk && experimentalOk
-          && workspaceOk && treeStateOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt && noAutoConnectOk
+          && workspaceOk && treeStateOk && federatedOk && broadcastOk && undoOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt && noAutoConnectOk
           && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);

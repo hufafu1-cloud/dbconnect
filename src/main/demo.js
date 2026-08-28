@@ -67,10 +67,43 @@ async function buildSampleDb() {
   return file;
 }
 
+/**
+ * 第二个示例库：会员系统。
+ *
+ * 联邦查询必须有**两个真实可打开的连接**才演示得起来，而演示环境里能真连上的
+ * 只有 SQLite。刻意让它和主库形成真实的跨库关系：会员表按 customer_id 关联
+ * 主库的客户，正是"微服务拆库后订单库 join 用户库"那个场景。
+ */
+async function buildMemberDb() {
+  const file = path.join(app.getPath('userData'), 'demo-members.db');
+  const ad = new SQLiteAdapter({ id: 'demo-members', type: 'sqlite', file });
+  await ad.connect();
+  const levels = ['钻石', '白金', '黄金', '白银'];
+  let sql = `
+    CREATE TABLE members (
+      customer_id INTEGER PRIMARY KEY,
+      level TEXT NOT NULL,
+      points INTEGER NOT NULL,
+      joined_at TEXT
+    );
+  `;
+  for (let i = 1; i <= 20; i++) {
+    sql += `INSERT INTO members (customer_id, level, points, joined_at) VALUES (${i}, '${levels[i % levels.length]}', ${i * 137 % 5000}, '2024-0${(i % 9) + 1}-1${i % 10}');
+`;
+  }
+  const res = await ad.runScript('main', sql);
+  const errs = res.filter((r) => r.error);
+  if (errs.length) throw new Error('会员示例库创建失败: ' + errs[0].error);
+  await ad.close();
+  return file;
+}
+
 async function runDemo(createWindow) {
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const dbFile = await buildSampleDb();
+  const memberFile = await buildMemberDb();
   const saved = store.save({ name: '演示连接 SQLite', type: 'sqlite', file: dbFile, color: '#e5484d', group: '演示分组' });
+  const memberConn = store.save({ name: '会员库', type: 'sqlite', file: memberFile, color: '#3b82f6', group: '演示分组' });
   // 各类型未打开连接（验证类型图标颜色区分 + 关闭状态 + 生产/测试链接类型标记）
   store.save({ name: '河南下行库', type: 'mysql', host: '172.18.15.33', port: 9130, user: 'root', env: 'prod', color: '#e5484d' });
   store.save({ name: '漯河财产精细化', type: 'postgres', host: '172.19.30.12', port: 5432, user: 'postgres', readOnly: true });
@@ -267,6 +300,241 @@ async function runDemo(createWindow) {
       && bigGrid.scrollHeight > 35000 ? 'PASS' : 'FAIL');
   await shot('shot-24-bigresult.png');
 
+  // 跨库联邦查询：两个真实连接跨库 join。这是 v2.7.0 M4 的门面场景，
+  // 演示模式里必须真跑一遍——截图只能证明画得出来，断言才能证明算得对。
+  await ej(`window.__test.openConnection(${JSON.stringify(memberConn.id)})`);
+  await wait(900);
+  const fedProbe = await ej(`(async () => {
+    const tab = await window.__test.openFederated();
+    tab._setSql([
+      '-- 订单在「演示连接 SQLite」，会员等级在「会员库」，两个库跨库 join',
+      'SELECT m.level AS 会员等级, COUNT(*) AS 客户数, ROUND(SUM(o.amount), 2) AS 总金额',
+      'FROM [演示连接 SQLite.main.orders] o',
+      'JOIN [会员库.main.members] m ON m.customer_id = o.customer_id',
+      'GROUP BY m.level',
+      'ORDER BY 总金额 DESC',
+    ].join(String.fromCharCode(10)));
+    await tab._run();
+    const pane = tab.pane;
+    const head = [...pane.querySelectorAll('.result-body thead th')].map((n) => n.textContent.trim());
+    const rows = [...pane.querySelectorAll('.result-body tbody tr[data-dr]')]
+      .map((tr) => [...tr.querySelectorAll('td')].slice(1).map((td) => td.textContent.trim()));
+    return {
+      head, rows,
+      sources: [...pane.querySelectorAll('.fed-source-ref')].map((n) => n.textContent.trim()),
+      sourceRows: [...pane.querySelectorAll('.fed-source-rows')].map((n) => n.textContent.trim()),
+      notice: (pane.querySelector('.fed-notice') || {}).textContent || '',
+    };
+  })()`);
+  await wait(400);
+  console.log('[DEMO] 联邦查询:', JSON.stringify(fedProbe));
+  // 基准值不写死：直接在源库上把同样的合计算一遍再比。
+  // 会员表覆盖 customer_id 1..20，而订单的 customer_id 也落在这个范围，
+  // 因此跨库 join 的合计必须与源库里 orders 的合计一模一样——
+  // 少一分钱都说明 join 丢了行，多一分钱说明重复了。
+  const baseline = await ej(`(async () => {
+    const r = await window.api.db.query(${JSON.stringify(saved.id)}, {
+      db: 'main', sql: 'SELECT COUNT(*), ROUND(SUM(amount), 2) FROM orders',
+      maxRows: 10, requestId: 'demo-fed-baseline',
+    });
+    return r[0].rows[0];
+  })()`);
+  const fedTotal = fedProbe.rows.reduce((sum, r) => sum + Number(r[2] || 0), 0);
+  const fedCount = fedProbe.rows.reduce((sum, r) => sum + Number(r[1] || 0), 0);
+  const baseCount = Number(baseline[0]);
+  const baseTotal = Number(baseline[1]);
+  console.log('[DEMO] 联邦查询基准（源库直算）:', JSON.stringify({ baseCount, baseTotal, fedCount, fedTotal }));
+  console.log('[DEMO] 联邦查询:',
+    fedProbe.rows.length === 4 && fedCount === baseCount
+      && Math.abs(fedTotal - baseTotal) < 0.01
+      && fedProbe.sources.length === 2
+      && fedProbe.sourceRows.length === 2
+      && /非跨库一致性快照/.test(fedProbe.notice)
+        ? 'PASS'
+        : `FAIL(联邦 ${fedCount}/${fedTotal} vs 源库 ${baseCount}/${baseTotal})`);
+  // 谓词下推：同一张 120 行的订单表，加上可下推的条件后只拉回需要的行。
+  // 这是「摘掉受限版」的可见证据，所以要在真实应用里跑一遍并与源库直算比对。
+  const fedPush = await ej(`(async () => {
+    const tab = await window.__test.openFederated();
+    tab._setSql([
+      '-- 下推演示：金额条件会被交给源库执行，只拉回需要的行',
+      'SELECT o.id, o.amount, m.level',
+      'FROM [演示连接 SQLite.main.orders] o',
+      'JOIN [会员库.main.members] m ON m.customer_id = o.customer_id',
+      'WHERE o.amount > 4500',
+      'ORDER BY o.id',
+    ].join(String.fromCharCode(10)));
+    await tab._run();
+    const pane = tab.pane;
+    return {
+      badge: (pane.querySelector('.fed-push-badge') || {}).textContent || '',
+      pushMarks: [...pane.querySelectorAll('.fed-source-push')].map((n) => n.textContent.trim()),
+      sourceRows: [...pane.querySelectorAll('.fed-source-rows')].map((n) => n.textContent.trim()),
+      colMarks: [...pane.querySelectorAll('.fed-source-cols')].map((n) => n.textContent.trim()),
+      resultRows: pane.querySelectorAll('.result-body tbody tr[data-dr]').length,
+      skipped: (pane.querySelector('.fed-skipped') || {}).textContent || '',
+    };
+  })()`);
+  await wait(300);
+  const fedPushBase = await ej(`(async () => {
+    const r = await window.api.db.query(${JSON.stringify(saved.id)}, {
+      db: 'main', sql: 'SELECT COUNT(*) FROM orders WHERE amount > 4500',
+      maxRows: 10, requestId: 'demo-fed-push-baseline',
+    });
+    return Number(r[0].rows[0][0]);
+  })()`);
+  console.log('[DEMO] 联邦下推:', JSON.stringify({ ...fedPush, 源库直算: fedPushBase }));
+  // 源库直算的命中行数，必须等于下推后拉回的行数，也等于最终结果行数
+  const pulled = Number((fedPush.sourceRows[0] || '').replace(/[^0-9]/g, ''));
+  console.log('[DEMO] 联邦下推:',
+    /已下推 1 个条件/.test(fedPush.badge)
+      && fedPush.pushMarks.length === 1
+      && pulled === fedPushBase && pulled < 120
+      && fedPush.resultRows === fedPushBase
+        ? 'PASS'
+        : `FAIL(badge=${fedPush.badge} pulled=${pulled} base=${fedPushBase} rows=${fedPush.resultRows})`);
+  await shot('shot-31-federated-pushdown.png');
+
+  await shot('shot-29-federated.png');
+
+  // SQL 后悔药：在真实应用里演一遍「漏写 WHERE 的 UPDATE → 回滚中心 → 还原」。
+  // 这是 M3 的门面场景，截图只能证明画得出来，比对才能证明数据真的回去了。
+  const undoBaseline = await ej(`(async () => {
+    const r = await window.api.db.query(${JSON.stringify(saved.id)}, {
+      db: 'main', sql: 'SELECT id, city FROM customers ORDER BY id',
+      maxRows: 100, requestId: 'demo-undo-baseline',
+    });
+    return r[0].rows.map((row) => [String(row[0]), row[1]]);
+  })()`);
+  void ej(`window.__test.runQuery(${id}, 'main', "UPDATE customers SET city = '误操作'")`);
+  await wait(700);
+  // 没有 WHERE 的 UPDATE 会先弹「影响范围确认」——预检正是为此存在的。
+  // 演示要走完整条链路，这里替用户按下确认，顺手截一张预检的图。
+  const impactShown = await ej(`(() => {
+    const modal = document.querySelector('.modal');
+    const text = modal ? modal.textContent : '';
+    const ok = modal && [...modal.querySelectorAll('.modal-foot .btn')].find((b) => b.textContent.includes('确认执行'));
+    if (ok) ok.click();
+    return { shown: !!modal, warned: /整表，没有 WHERE 条件/.test(text) };
+  })()`);
+  console.log('[DEMO] 漏写 WHERE 的预检:', JSON.stringify(impactShown),
+    impactShown.shown && impactShown.warned ? 'PASS' : 'FAIL');
+  await wait(1500);
+  const undoNote = await ej(`(() => {
+    const pane = document.querySelector('.tabpane.active');
+    const saved = pane && pane.querySelector('.msg-item.undo-saved');
+    const skipped = pane && pane.querySelector('.msg-item.undo-skipped');
+    return {
+      text: saved ? saved.textContent.trim() : null,
+      skipped: skipped ? skipped.textContent.trim() : null,
+    };
+  })()`);
+  console.log('[DEMO] 后悔药提示:', JSON.stringify(undoNote));
+  const undoProbe = await ej(`(async () => {
+    const tab = await window.__test.openUndo();
+    await new Promise((r) => setTimeout(r, 500));
+    const pane = tab.pane;
+    const items = [...pane.querySelectorAll('.undo-item')];
+    if (!items.length) return { items: 0 };
+    items[0].click();
+    await new Promise((r) => setTimeout(r, 700));
+    return {
+      items: items.length,
+      kind: (pane.querySelector('.undo-kind') || {}).textContent || '',
+      title: (pane.querySelector('.undo-detail-title') || {}).textContent || '',
+      conflictBadge: (pane.querySelector('.undo-ok-badge') || {}).textContent || '',
+      sqlRows: pane.querySelectorAll('.undo-sql-item').length,
+      firstSql: (pane.querySelector('.undo-sql-item code') || {}).textContent || '',
+      rollbackLabel: (pane.querySelector('.pane-toolbar .pbtn.danger') || {}).textContent || '',
+      usage: (pane.querySelector('.undo-usage') || {}).textContent || '',
+    };
+  })()`);
+  console.log('[DEMO] 回滚中心:', JSON.stringify(undoProbe));
+  await shot('shot-30-undo.png');
+
+  // 多库广播：在两个真实连接上各跑一遍同一条 SQL，结果纵向合并并带来源列。
+  // 演示环境里能真连上的只有 SQLite，两个连接足以走通整条链路。
+  const bcProbe = await ej(`(async () => {
+    const tab = await window.__test.openBroadcast();
+    await tab._setSelectors([{ conn: '演示连接 SQLite', db: 'main' }, { conn: '会员库', db: 'main' }]);
+    await new Promise((r) => setTimeout(r, 400));
+    const targets = tab._targets();
+    tab._setSql("SELECT 'x' AS 标记, COUNT(*) AS 行数 FROM sqlite_master WHERE type = 'table'");
+    await tab._run();
+    await new Promise((r) => setTimeout(r, 300));
+    const pane = tab.pane;
+    const head = [...pane.querySelectorAll('.result-body thead th')].map((n) => n.textContent.trim());
+    const rows = [...pane.querySelectorAll('.result-body tbody tr[data-dr]')]
+      .map((tr) => [...tr.querySelectorAll('td')].slice(1).map((td) => td.textContent.trim()));
+    return {
+      targets: targets.map((t) => t.connName + '/' + t.db),
+      cells: [...pane.querySelectorAll('.bc-cell')].map((n) => n.className.includes('fail') ? 'fail' : 'ok'),
+      head, rows,
+      atomic: (pane.querySelector('.bc-atomic') || {}).textContent || '',
+    };
+  })()`);
+  console.log('[DEMO] 多库广播:', JSON.stringify(bcProbe));
+  console.log('[DEMO] 多库广播:',
+    bcProbe.targets.length === 2
+      && bcProbe.cells.length === 2 && bcProbe.cells.every((c) => c === 'ok')
+      && bcProbe.head.slice(0, 3).join(',') === '#,来源连接,来源库'
+      && bcProbe.rows.length === 2
+      && bcProbe.rows.map((r) => r[0]).sort().join(',') === '会员库,演示连接 SQLite'
+      && /非原子操作/.test(bcProbe.atomic)
+        ? 'PASS'
+        : `FAIL(${JSON.stringify(bcProbe.head)} rows=${bcProbe.rows.length})`);
+
+  // 单库失败：故意查一张只有其中一个库才有的表，另一个库必然报错
+  const bcPartial = await ej(`(async () => {
+    const tab = await window.__test.openBroadcast();
+    await tab._setSelectors([{ conn: '演示连接 SQLite', db: 'main' }, { conn: '会员库', db: 'main' }]);
+    await new Promise((r) => setTimeout(r, 400));
+    tab._setSql('SELECT COUNT(*) AS 客户数 FROM customers');
+    await tab._run();
+    await new Promise((r) => setTimeout(r, 300));
+    const pane = tab.pane;
+    const result = tab._result();
+    return {
+      ok: result.matrix.filter((m) => m.ok).length,
+      bad: result.matrix.filter((m) => !m.ok).map((m) => m.connName),
+      badText: (pane.querySelector('.bc-cell.fail .bc-cell-err') || {}).textContent || '',
+      retryEnabled: ![...pane.querySelectorAll('.pane-toolbar .pbtn')]
+        .find((b) => b.textContent.includes('重试失败项')).disabled,
+      merged: pane.querySelectorAll('.result-body tbody tr[data-dr]').length,
+    };
+  })()`);
+  console.log('[DEMO] 广播单库失败:', JSON.stringify(bcPartial));
+  console.log('[DEMO] 广播单库失败:',
+    bcPartial.ok === 1 && bcPartial.bad.length === 1 && bcPartial.bad[0] === '会员库'
+      && /customers/.test(bcPartial.badText) && bcPartial.retryEnabled
+      && bcPartial.merged === 1
+        ? 'PASS'
+        : `FAIL(${JSON.stringify(bcPartial)})`);
+  await shot('shot-32-broadcast.png');
+  // 真的回滚，然后逐行比对
+  const undoResult = await ej(`(async () => {
+    const list = await window.api.undo.list();
+    const entry = list.entries[0];
+    const applied = await window.api.undo.rollback(entry.id, { connId: entry.connId });
+    const r = await window.api.db.query(${JSON.stringify(saved.id)}, {
+      db: 'main', sql: 'SELECT id, city FROM customers ORDER BY id',
+      maxRows: 100, requestId: 'demo-undo-after',
+    });
+    return { applied: applied.applied, rows: r[0].rows.map((row) => [String(row[0]), row[1]]) };
+  })()`);
+  const undoRestored = JSON.stringify(undoResult.rows) === JSON.stringify(undoBaseline);
+  console.log('[DEMO] 后悔药回滚:', JSON.stringify({
+    applied: undoResult.applied, restored: undoRestored, sample: undoResult.rows[0],
+  }));
+  console.log('[DEMO] 后悔药:',
+    /已存后悔药/.test(undoNote.text || '') && undoProbe.items >= 1
+      && undoProbe.kind === 'UPDATE' && /customers/.test(undoProbe.title)
+      && undoProbe.sqlRows === 20 && /^UPDATE /.test(undoProbe.firstSql)
+      && /无冲突/.test(undoProbe.conflictBadge)
+      && undoResult.applied === 20 && undoRestored
+        ? 'PASS'
+        : `FAIL(applied=${undoResult.applied} restored=${undoRestored})`);
+
   await ej(`window.__test.openDesigner(${id}, 'main', null, 'orders')`);
   await wait(1000);
   // 切到“外键”子标签
@@ -321,7 +589,7 @@ async function runDemo(createWindow) {
   })()`);
   console.log('[DEMO] 选项对话框:', JSON.stringify(settingsOk));
   console.log('[DEMO] 选项对话框:',
-    settingsOk.groups === 5 && settingsOk.selects === 7 ? 'PASS' : 'FAIL(应=5组/7个下拉)');
+    settingsOk.groups === 6 && settingsOk.selects === 11 ? 'PASS' : 'FAIL(应=6组/11个下拉)');
   await shot('shot-23-settings.png');
   await ej('window.__test.closeMenus()');
   await wait(200);
@@ -469,7 +737,7 @@ async function runDemo(createWindow) {
   }))()`);
   console.log('[DEMO] 连接安全体检:', JSON.stringify(secDemo));
   console.log('[DEMO] 连接安全体检:',
-    secDemo.cards === 6 && secDemo.readOnlyBadge === 1 && secDemo.warns >= 1 ? 'PASS' : 'FAIL');
+    secDemo.cards === 7 && secDemo.readOnlyBadge === 1 && secDemo.warns >= 1 ? 'PASS' : 'FAIL');
   await shot('shot-28-security.png');
   await ej(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
   await wait(300);

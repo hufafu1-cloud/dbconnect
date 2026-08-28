@@ -1118,4 +1118,5 @@ module.exports = {
   splitSql, splitSqlRanges, statementAt, sanitizeValue, sanitizeRows, formatDate, excerpt, csvCell, synthesizeDDL,
   limitQueryRows, statementKind, transactionControlKind, unsafeSessionMutationKind,
   hasClickHouseFormatClause, hasSQLiteExternalFileClause, simpleEditableSelect,
+  parseSimpleTableReference, structuralTokens,
 };

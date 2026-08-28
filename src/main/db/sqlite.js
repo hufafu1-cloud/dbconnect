@@ -175,6 +175,39 @@ class SQLiteAdapter extends BaseAdapter {
 
   qualify(_db, _schema, table) { return this.quoteIdent(table); }
 
+  /**
+   * 批量灌入本地表（跨库联邦查询把各源表的行落到本地引擎时用）。
+   *
+   * 不走导入器那条「拼多行 VALUES 字面量」的路：联邦查询单表可达十万行，
+   * 把每个值转成字面量再让 SQLite 反解析一遍，既慢又要把 BLOB 拍成十六进制文本
+   * 再解回来。原生模式下用预编译语句 + 一个事务，值按原样绑定。
+   *
+   * WASM 回退模式没有等价的绑定接口，退回字面量批插——那条路本来就是
+   * 原生模块不可用时的降级，慢一些可以接受，但结果必须一致。
+   */
+  bulkInsert(table, columns, rows) {
+    if (!Array.isArray(rows) || !rows.length) return 0;
+    const T = this.quoteIdent(table);
+    const cols = columns.map((c) => this.quoteIdent(typeof c === 'string' ? c : c.name)).join(', ');
+    if (this.mode === 'native') {
+      const placeholders = columns.map(() => '?').join(', ');
+      const stmt = this.db.prepare(`INSERT INTO ${T} (${cols}) VALUES (${placeholders})`);
+      const insertAll = this.db.transaction((batch) => {
+        for (const row of batch) stmt.run(row);
+      });
+      insertAll(rows);
+      return rows.length;
+    }
+    const { valueLiteral } = require('./valueLiteral');
+    const types = columns.map((c) => (typeof c === 'string' ? '' : c.type || ''));
+    const values = rows
+      .map((row) => '(' + row.map((v, i) => valueLiteral(this, v, types[i])).join(', ') + ')')
+      .join(', ');
+    this._execRaw(`INSERT INTO ${T} (${cols}) VALUES ${values}`);
+    return rows.length;
+  }
+
+
   truncateSql(T) { return `DELETE FROM ${T}`; }
 
   async listDatabases() { return ['main']; }

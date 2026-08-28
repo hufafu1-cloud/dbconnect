@@ -18,6 +18,12 @@ const workspaceStore = require('./workspaceStore');
 const settings = require('./settings');
 const auditLog = require('./auditLog');
 const impact = require('./impact');
+const federated = require('./federated');
+const broadcast = require('./broadcast');
+const multiExec = require('./multiExec');
+const broadcastGroups = require('./broadcastGroups');
+const undo = require('./undo');
+const localStore = require('./localStore');
 const { parseNcxBuffer, targetLabel, MAX_FILE_BYTES } = require('./navicatNcx');
 const connectionLocks = new Map();
 const navicatImportSessions = new Map();
@@ -37,23 +43,27 @@ function rendererRequestId(event, requestId) {
   return `wc-${event.sender.id}:${id}`;
 }
 
-const transactionOwners = new WeakMap();
+const rendererOwners = new WeakMap();
 
 /**
  * Transactions belong to the renderer document that opened them. Navigation,
  * reload, crash, or destruction must retire that owner's sessions; otherwise
  * a pooled connection can remain indefinitely inside an uncommitted transaction.
+ *
+ * 联邦查询会话同理，而且更硬：它持有的是一份拉到本地内存的数据副本，
+ * 窗口没了还留着就是纯粹的内存泄漏。两者共用这一处生命周期绑定。
  */
-function bindTransactionOwner(event) {
+function bindRendererOwner(event) {
   const sender = event && event.sender;
   if (!sender) throw new Error('事务调用缺少渲染进程上下文');
-  let state = transactionOwners.get(sender);
+  let state = rendererOwners.get(sender);
   if (state) return state;
   const ownerId = sender.id;
   state = { cleanup: Promise.resolve() };
   const cleanup = () => {
     state.cleanup = state.cleanup.catch(() => {})
       .then(() => dbm.closeTransactionsByOwner(ownerId))
+      .then(() => federated.closeSessionsByOwner(ownerId))
       .catch(() => {});
     return state.cleanup;
   };
@@ -69,12 +79,12 @@ function bindTransactionOwner(event) {
   sender.on('did-start-navigation', onNavigation);
   sender.on('render-process-gone', onProcessGone);
   sender.once('destroyed', onDestroyed);
-  transactionOwners.set(sender, state);
+  rendererOwners.set(sender, state);
   return state;
 }
 
-async function transactionOwnerReady(event) {
-  const state = bindTransactionOwner(event);
+async function rendererOwnerReady(event) {
+  const state = bindRendererOwner(event);
   await state.cleanup;
   if (event.sender.isDestroyed && event.sender.isDestroyed()) throw new Error('渲染进程已关闭');
 }
@@ -439,18 +449,138 @@ function register(getWin) {
     safety.assertWhereFragment(a.where);
     return dbm.get(a.connId).tableData(a.db, a);
   });
+  // ---- SQL 后悔药 / 回滚中心 ----
+  //
+  // 快照的入口就挂在 db:query 上（见下），这里是回滚中心自己的读写通道。
+  // 全部走 h()，因此天然进审计——「谁在什么时候回滚了什么」和「谁改了数据」
+  // 一样重要，路线图也明确要求回滚本身要进审计。
+  const undoQuota = () => ({ keep: settings.get('undoKeep') });
+  const undoSelect = (adapter, db) => (sql) => {
+    // 快照读取本身也过一遍只读闸门：WHERE 里可能藏着有副作用的函数
+    safety.assertNotReadOnly('db.query', { connId: null, sql });
+    return adapter.exec(db, sql);
+  };
+
+  h('undo:list', () => {
+    if (!localStore.available()) return { available: false, entries: [], usage: null };
+    return {
+      available: true,
+      entries: localStore.list(undo.BUCKET).map((item) => ({
+        id: item.id, kind: item.kind, createdAt: item.createdAt,
+        connId: item.connId, connName: item.connName,
+        db: item.db, schema: item.schema, table: item.table,
+        affected: item.affected, bytes: item.bytes, sql: item.sql,
+      })),
+      usage: localStore.usage(undo.BUCKET),
+    };
+  });
+
+  // 预览：反向 SQL + 逐行冲突标记。连接必须已打开——冲突检测要回源库读当前值。
+  h('undo:preview', async (a) => {
+    const snapshot = localStore.read(undo.BUCKET, a.id);
+    const adapter = dbm.get(snapshot.connId);
+    const conflicts = await undo.detectConflicts(
+      adapter, snapshot, snapshot.rows, undoSelect(adapter, snapshot.db),
+    );
+    const sqls = undo.reverseSql(adapter, snapshot, snapshot.rows);
+    return {
+      id: snapshot.id, kind: snapshot.kind, table: snapshot.table,
+      db: snapshot.db, schema: snapshot.schema, connId: snapshot.connId,
+      connName: snapshot.connName, createdAt: snapshot.createdAt,
+      sql: snapshot.sql, pk: snapshot.pk,
+      columns: snapshot.columns.map((c) => c.name),
+      rows: snapshot.rows.map((item, index) => ({
+        key: item.key,
+        conflict: conflicts[index].conflict,
+        reason: conflicts[index].reason,
+        sql: sqls[index] || '',
+      })),
+      conflicts: conflicts.filter((c) => c.conflict).length,
+    };
+  });
+
+  // 回滚：默认只回没有冲突的行；keys 为空表示"全部（不含冲突行）"。
+  // 走 db.applyEdits 的审批口径——它同样是"按主键逐行改写数据"。
+  h('undo:rollback', async (a) => {
+    const snapshot = localStore.read(undo.BUCKET, a.id);
+    // 审批令牌是按 payload 指纹签发的，而 payload 里的 connId 由渲染进程给出。
+    // 必须核对它与快照记录的连接一致，否则「在测试库上通过的审批」可以被
+    // 拿去回滚生产库——审批就形同虚设了。
+    if (String(a.connId || '') !== String(snapshot.connId || '')) {
+      throw new Error('回滚请求的连接与快照记录的连接不一致，已拒绝');
+    }
+    const adapter = dbm.get(snapshot.connId);
+    const conflicts = await undo.detectConflicts(
+      adapter, snapshot, snapshot.rows, undoSelect(adapter, snapshot.db),
+    );
+    const wanted = Array.isArray(a.keys) && a.keys.length ? new Set(a.keys) : null;
+    const includeConflicts = a.includeConflicts === true;
+    const picked = [];
+    const skipped = [];
+    snapshot.rows.forEach((item, index) => {
+      if (wanted && !wanted.has(item.key)) return;
+      if (conflicts[index].conflict && !includeConflicts) {
+        skipped.push({ key: item.key, reason: conflicts[index].reason });
+        return;
+      }
+      picked.push(item);
+    });
+    if (!picked.length) {
+      return { applied: 0, skipped, message: '没有可回滚的行（全部被跳过）' };
+    }
+    const sqls = undo.reverseSql(adapter, snapshot, picked);
+    // 一个事务里做完：回滚做到一半留下的半新半旧数据比不回滚更难收拾
+    await adapter.execTxn(snapshot.db, sqls);
+    return { applied: sqls.length, skipped, message: '' };
+  }, 'db.applyEdits');
+
+  h('undo:remove', (a) => localStore.remove(undo.BUCKET, a.id));
+  h('undo:clear', () => localStore.clear(undo.BUCKET));
+
   h('db:query', async (event, a) => {
     const t0 = Date.now();
     let connName = '';
     try { connName = store.getById(a.connId).name; } catch (e) { /* ignore */ }
     try {
-      await transactionOwnerReady(event);
+      await rendererOwnerReady(event);
       const adapter = dbm.get(a.connId);
       const runOptions = {
         maxRows: a.maxRows,
         requestId: rendererRequestId(event, a.requestId),
         schema: a.schema,
       };
+      // ---- 后悔药：执行前把将被改动的行的原值快照下来 ----
+      // **显式事务里不做**：那种场景用户手上已经有 ROLLBACK，才是真正原子的撤销，
+      // 而且未提交的改动做快照，事务一旦回滚快照就成了无中生有的垃圾。
+      //
+      // 注意判断的是「事务有没有真的开着」，不是「有没有传 transactionId」——
+      // 查询标签页给每个标签固定分配一个 transactionId 当会话标识，
+      // 自动提交模式下也照传。拿它当开关会把所有查询页的执行全挡在门外。
+      let undoPlan = null;
+      let undoBefore = null;
+      let undoNote = null;
+      const inExplicitTxn = !!a.transactionId
+        && ['active', 'failed'].includes((adapter.transactionStatus(
+          rendererTransactionId(event, a.transactionId)) || {}).state);
+      if (!inExplicitTxn && settings.get('undoSnapshot') === 'on' && localStore.available()) {
+        try {
+          undoPlan = await undo.planFor(adapter, {
+            db: a.db, schema: a.schema, sql: a.sql, maxRows: settings.get('undoMaxRows'),
+          });
+          if (undoPlan.supported) {
+            undoBefore = await undo.captureBefore(adapter, undoPlan, undoSelect(adapter, a.db));
+          } else {
+            undoNote = { saved: false, reason: undoPlan.reason };
+            undoPlan = null;
+          }
+        } catch (error) {
+          // 快照失败绝不能挡住用户执行 SQL：如实记下原因，照常往下走
+          undoNote = { saved: false, reason: (error && error.message) || String(error) };
+          undoPlan = null;
+          undoBefore = null;
+        }
+      }
+
       let results;
       if (a.transactionId) {
         results = await adapter.runQuerySessionScript(
@@ -460,6 +590,25 @@ function register(getWin) {
         results = await adapter.runScript(a.db, a.sql, runOptions);
       }
       const firstErr = results.find((r) => r.error);
+
+      // 执行成功才落快照：语句报错时什么都没改，存下来只会让回滚中心多一条噪音
+      if (undoPlan && undoBefore && !firstErr) {
+        try {
+          const keys = undo.keyLiteralsOf(adapter, undoPlan, undoBefore);
+          const after = await undo.captureAfter(adapter, undoPlan, keys, undoSelect(adapter, a.db));
+          const saved = undo.record({
+            connId: a.connId, connName, dialect: adapter.dialect, quota: undoQuota(),
+          }, undoPlan, undoBefore, after);
+          undoNote = {
+            saved: true, id: saved.id, rows: undoPlan.kind === 'insert' ? after.length : undoBefore.length,
+            kind: undoPlan.kind, table: undoPlan.target.table,
+          };
+        } catch (error) {
+          undoNote = { saved: false, reason: `快照保存失败：${(error && error.message) || error}` };
+        }
+      }
+      // 挂在第一个结果上带回渲染层，查询页据此显示「已存后悔药 / 未做快照（原因）」
+      if (undoNote && results.length) results[0].undo = undoNote;
       history.add({
         connId: a.connId, connName, db: a.db || '', sql: a.sql,
         ms: Date.now() - t0, ok: !firstErr, error: firstErr && firstErr.error,
@@ -484,7 +633,7 @@ function register(getWin) {
       safety.assertNotReadOnly('db.query', { connId: a.connId, sql: countSql });
       const options = { maxRows: 1, schema: a.schema };
       if (a.transactionId) {
-        await transactionOwnerReady(event);
+        await rendererOwnerReady(event);
         return adapter.runQuerySessionScript(
           rendererTransactionId(event, a.transactionId), a.db, countSql, options,
         );
@@ -497,21 +646,21 @@ function register(getWin) {
   // ---- 取消查询 / 列补全 / 外键 / BLOB ----
   h('db:cancel', (event, a) => dbm.get(a.connId).cancel(rendererRequestId(event, a.requestId)), null, true);
   h('db:transactionStatus', async (event, a) => {
-    await transactionOwnerReady(event);
+    await rendererOwnerReady(event);
     return dbm.get(a.connId).transactionStatus(rendererTransactionId(event, a.transactionId));
   }, null, true);
   h('db:transactionBegin', async (event, a) => {
-    await transactionOwnerReady(event);
+    await rendererOwnerReady(event);
     return dbm.get(a.connId).beginTransaction(
       rendererTransactionId(event, a.transactionId), a.db, { schema: a.schema },
     );
   }, null, true);
   h('db:transactionCommit', async (event, a) => {
-    await transactionOwnerReady(event);
+    await rendererOwnerReady(event);
     return dbm.get(a.connId).commitTransaction(rendererTransactionId(event, a.transactionId));
   }, null, true);
   h('db:transactionRollback', async (event, a) => {
-    await transactionOwnerReady(event);
+    await rendererOwnerReady(event);
     return dbm.get(a.connId).rollbackTransaction(rendererTransactionId(event, a.transactionId));
   }, null, true);
   h('db:allColumns', (a) => dbm.get(a.connId).listAllColumns(a.db, a.schema));
@@ -686,6 +835,69 @@ function register(getWin) {
   h('dba:cancelSqlFile', (event, a) =>
     dbm.get(a.connId).cancelOperation(rendererRequestId(event, a.taskId)), null, true);
 
+  // ---- 多库广播执行 ----
+  //
+  // 目标展开只在**已经打开的连接**和它已知的库清单里做：不替用户开连接，
+  // 也不去探测没打开的库有哪些库——那会让「预览一下选中了什么」变成
+  // 静默发起 N 个连接。
+  const broadcastDeps = {
+    connections: () => store.listPublic(),
+    isOpen: (connId) => dbm.isOpen(connId),
+    adapter: (connId) => dbm.get(connId),
+  };
+  // 库清单由渲染进程给出：树上展开过的连接它手上就有，不必再查一次，
+  // 也避免了「预览选中了什么」这个动作去连一堆库。
+  h('bc:expand', (a) => broadcast.expandTargets(a && a.selectors, {
+    ...broadcastDeps,
+    databases: (connId) => ((a && a.databases) || {})[connId] || [],
+  }));
+  h('bc:groups', () => broadcastGroups.list());
+  h('bc:saveGroup', (a) => broadcastGroups.save(a && a.name, a && a.selectors));
+  h('bc:deleteGroup', (a) => broadcastGroups.remove(a && a.name));
+  h('bc:cancel', (event, a) => multiExec.cancelRun(
+    rendererRequestId(event, a && a.token), '用户取消了广播',
+  ), null, true);
+  // 审批走 db.broadcast：整批目标 + SQL 绑定一个令牌，一次确认覆盖全部生产成员
+  h('bc:run', async (event, a) => {
+    await rendererOwnerReady(event);
+    const token = a && a.token ? rendererRequestId(event, a.token) : null;
+    return broadcast.run({ ...a, token }, broadcastDeps, {
+      // 每个目标一个独立的请求 ID：取消要能穿透到各自的服务端会话
+      requestIdFor: (target) => rendererRequestId(
+        event, `${a.token}-${target.connId}-${target.db || ''}`.replace(/[^A-Za-z0-9._:-]/g, '_'),
+      ),
+      onProgress: (p) => {
+        try { event.sender.send('bc:progress', { ...p, token: a && a.token }); }
+        catch (e) { /* 窗口可能已经关掉 */ }
+      },
+    });
+  }, 'db.broadcast', true);
+
+  // ---- 跨库联邦查询 ----
+  // 会话持有一份拉到本地内存的数据副本，因此生命周期必须绑到发起它的渲染窗口上：
+  // rendererOwnerReady 一并负责窗口导航/崩溃/关闭时把会话释放掉。
+  h('fed:open', async (event) => {
+    await rendererOwnerReady(event);
+    return federated.openSession(event.sender.id);
+  }, null, true);
+  h('fed:close', (event, a) => federated.closeSession(a && a.sessionId, event.sender.id), null, true);
+  h('fed:describe', (event, a) => federated.describeSession(a || {}, event.sender.id), null, true);
+  h('fed:cancel', (event, a) => federated.cancelQuery({
+    token: rendererRequestId(event, a && a.token),
+  }), null, true);
+  // 读源库的动作全部经过这里，因此审计天然覆盖：h() 就是审计埋点所在。
+  h('fed:run', async (event, a) => {
+    await rendererOwnerReady(event);
+    const token = a && a.token ? rendererRequestId(event, a.token) : null;
+    return federated.runQuery({ ...a, token }, event.sender.id, {
+      onProgress: (p) => {
+        try { event.sender.send('fed:progress', { ...p, token: a && a.token }); }
+        catch (e) { /* 窗口可能已经关掉 */ }
+      },
+    });
+  }, null, true);
+  h('fed:saveResult', (event, a) => federated.saveResult(a || {}, event.sender.id), null, true);
+
   // ---- 备份 / 还原 ----
   // 备份目录由主进程决定（userData/backups），渲染进程不能指定路径，
   // 否则等于开了一个「让主进程往任意位置写文件」的口子。
@@ -771,7 +983,7 @@ function register(getWin) {
   h('db:applyEdits', async (event, a) => {
     const adapter = dbm.get(a.connId);
     if (!a.transactionId) return adapter.applyEdits(a.db, a);
-    await transactionOwnerReady(event);
+    await rendererOwnerReady(event);
     return adapter.applyQueryEdits(rendererTransactionId(event, a.transactionId), a.db, a);
   }, 'db.applyEdits', true);
   h('db:action', (a) => dbm.get(a.connId).action(a.db, a), 'db.action');

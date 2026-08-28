@@ -398,9 +398,9 @@ async function promoteTemp(temp, file) {
 }
 
 /**
- * 非 SQL 数据源的整表导出。
+ * 非 SQL 数据源的整表分页读取。
  *
- * 下面的 exportTable 是拼 `SELECT … FROM …` 再交给 pageSql/exec 的，
+ * 下面的 readTableBySql 是拼 `SELECT … FROM …` 再交给 pageSql/exec 的，
  * 对 Redis / MongoDB / Elasticsearch 这类没有 SQL 的数据源根本走不通。
  * 与其给每种都伪造一段假 SQL 让 exec 去解析（脆弱且难排错），
  * 不如开一个显式的扩展点：适配器实现 fetchTablePage 就走这条路。
@@ -414,137 +414,177 @@ async function promoteTemp(temp, file) {
  * search_after、MongoDB 的游标都是续传式的。若按 offset 翻页，每页都得从头重扫，
  * 复杂度 O(n²)——真机验证时 25000 个键的导出就是这么暴露出来的。
  */
-async function exportTableByPages(adapter, a) {
-  const pageSize = 5000;
-  const ctx = {
-    dialect: adapter.dialect,
-    quoteIdent: (n) => adapter.quoteIdent(n),
-    literal: (v) => adapter.literal(v),
-    blobLiteral: (v) => adapter.blobLiteral(v),
-    tableRef: a.sqlTableName ? a.sqlTableName : adapter.qualify(a.db, a.schema, a.table),
-  };
-  const temp = tempPath(a.file);
-  let written = 0;
-  let headerDone = false;
-  let w;
-  try {
-    w = await createWriter(a.format || 'csv', temp, ctx);
-    let next;
-    for (;;) {
-      const page = await adapter.fetchTablePage({
-        db: a.db, schema: a.schema, table: a.table, limit: pageSize, next,
-      });
-      if (!page || !Array.isArray(page.rows) || !Array.isArray(page.columns)) {
-        throw new Error('导出读取未返回结果集');
-      }
-      if (!headerDone) { await w.header(page.columns); headerDone = true; }
-      for (const row of page.rows) await w.row(row);
-      written += page.rows.length;
-      next = page.next;
-      if (next === null || next === undefined) break;
+async function readTableByToken(adapter, a, onPage) {
+  const pageSize = Number(a.pageSize) || 5000;
+  let columns = null;
+  let read = 0;
+  let next;
+  for (;;) {
+    const page = await adapter.fetchTablePage({
+      db: a.db, schema: a.schema, table: a.table, limit: pageSize, next,
+    });
+    if (!page || !Array.isArray(page.rows) || !Array.isArray(page.columns)) {
+      throw new Error('分页读取未返回结果集');
     }
-    const writerMeta = await w.finish();
-    await promoteTemp(temp, a.file);
-    return {
-      rows: written, file: a.file, truncated: false, orderedBy: [],
-      pagination: 'token',
-      // 非 SQL 数据源按续传令牌翻页（Redis SCAN 等），导出期间若有写入可能重复或
-      // 遗漏行，与关系库的游标分页一样不提供跨页一致性快照，这里如实标注。
-      snapshotConsistent: false,
-      ...(writerMeta || {}),
-    };
-  } catch (err) {
-    if (w && w.abort) await w.abort().catch(() => {});
-    await fs.promises.rm(temp, { force: true }).catch(() => {});
-    throw err;
+    if (!columns) columns = page.columns;
+    read += page.rows.length;
+    const proceed = await onPage(columns, page.rows);
+    if (proceed === false) {
+      return {
+        columns: columns || [], rows: read, orderedBy: [],
+        pagination: 'token', snapshotConsistent: false, stopped: true,
+      };
+    }
+    next = page.next;
+    if (next === null || next === undefined) break;
   }
+  return {
+    columns: columns || [], rows: read, orderedBy: [],
+    // 非 SQL 数据源按续传令牌翻页（Redis SCAN 等），读取期间若有写入可能重复或
+    // 遗漏行，与关系库的游标分页一样不提供跨页一致性快照，这里如实标注。
+    pagination: 'token', snapshotConsistent: false, stopped: false,
+  };
 }
 
-/** 整表导出（分页拉取） */
-async function exportTable(adapter, a) {
-  // 非 SQL 数据源走各自的分页读取，不拼 SELECT
-  if (typeof adapter.fetchTablePage === 'function') return exportTableByPages(adapter, a);
-  const ctx = {
-    dialect: adapter.dialect,
-    quoteIdent: (n) => adapter.quoteIdent(n),
-    literal: (v) => adapter.literal(v),
-    blobLiteral: (v) => adapter.blobLiteral(v),
-    tableRef: a.sqlTableName ? a.sqlTableName : adapter.qualify(a.db, a.schema, a.table),
-  };
-  const pageSize = 5000;
+/**
+ * SQL 数据源的整表分页读取（主键游标翻页）。
+ *
+ * 有主键就按主键 keyset 翻页；没有主键则**只允许单次查询取完**，
+ * 超过一页立刻报错而不是退回 OFFSET——无稳定唯一序的 OFFSET 分页会重复行、漏行，
+ * 而它产出的文件/结果看起来完全正常，属于最难发现的一类错误。
+ */
+async function readTableBySql(adapter, a, onPage) {
+  const pageSize = Number(a.pageSize) || 5000;
   const info = await adapter.tableInfo(a.db, a.schema, a.table);
-  const columns = Array.isArray(info.columns) ? info.columns : [];
-  const columnNames = new Set(columns.map((c) => c.name));
+  const infoColumns = Array.isArray(info.columns) ? info.columns : [];
+  const columnNames = new Set(infoColumns.map((c) => c.name));
   const declaredPk = (Array.isArray(info.pk) ? info.pk : []).filter((name) => columnNames.has(name));
   // ClickHouse exposes its sorting key as a "primary key", but it is not unique;
   // using it as a keyset cursor would skip equal-key rows at page boundaries.
   const pk = adapter.dialect === 'clickhouse' ? [] : declaredPk;
   const qtable = adapter.qualify(a.db, a.schema, a.table);
-  const projection = tableProjection(adapter, columns);
+  // 列裁剪（联邦查询用）：只取用得上的列，但**主键必须留着**——
+  // keyset 翻页要靠它做游标，裁掉了就只能退回不可靠的 OFFSET 分页。
+  const wanted = Array.isArray(a.columns) && a.columns.length
+    ? new Set(a.columns.map((name) => String(name).toLowerCase()))
+    : null;
+  const selected = wanted
+    ? infoColumns.filter((c) => wanted.has(String(c.name).toLowerCase()) || pk.includes(c.name))
+    : infoColumns;
+  const projection = (wanted && selected.length && selected.length < infoColumns.length)
+    ? (adapter.dialect === 'mssql' || adapter.dialect === 'oracle'
+      ? tableProjection(adapter, selected)
+      : selected.map((c) => adapter.quoteIdent(c.name)).join(', '))
+    : tableProjection(adapter, infoColumns);
+  const projectedColumns = (wanted && selected.length) ? selected : infoColumns;
   const where = String(a.where || '').trim();
   const orderClause = pk.length
     ? ` ORDER BY ${pk.map((name) => adapter.quoteIdent(name)).join(', ')}`
     : '';
-  let written = 0;
-  let headerDone = false;
+  let columns = null;
+  let read = 0;
   let lastKey = null;
   let pages = 0;
+  for (;;) {
+    const filters = [];
+    if (where) filters.push(`(${where})`);
+    if (lastKey) filters.push(keysetWhere(adapter, pk, lastKey));
+    const select = `SELECT ${projection} FROM ${qtable}${filters.length ? ' WHERE ' + filters.join(' AND ') : ''}`;
+    // A table without a real unique key is safe only when one statement returns
+    // the whole result. Probe one extra row and refuse unreliable OFFSET paging.
+    const fetchSize = pk.length ? pageSize : pageSize + 1;
+    const sql = adapter.pageSql(select, orderClause, fetchSize, 0);
+    const r = await adapter.exec(a.db, sql);
+    if (!r || !Array.isArray(r.rows) || !Array.isArray(r.columns)) {
+      throw new Error('分页读取未返回结果集');
+    }
+    if (!columns) columns = projectedColumns.length ? projectedColumns : r.columns;
+    if (!pk.length && r.rows.length > pageSize) {
+      throw new Error(`表 ${a.table} 没有可用于无损游标分页的唯一主键，超过 ${pageSize.toLocaleString()} 行时无法保证无重复、无遗漏；请先建立合适的主键，或改用带明确唯一排序的查询结果`);
+    }
+    // OceanBase Oracle 的 ROWNUM 分页会在结果尾部附加 RN__；只返回表的真实列。
+    const width = columns.length || r.columns.length;
+    const rows = r.rows.map((row) => (row.length > width ? row.slice(0, width) : row));
+    read += rows.length;
+    pages++;
+    const proceed = await onPage(columns, rows);
+    if (proceed === false) {
+      return {
+        columns: columns || [], rows: read, orderedBy: pk,
+        pagination: pages > 1 ? 'keyset' : 'single-query',
+        snapshotConsistent: pages <= 1, stopped: true,
+      };
+    }
+    if (r.rows.length < pageSize) break;
+    if (!pk.length) break;
+    const exactIndex = new Map(r.columns.map((col, i) => [String(col.name), i]));
+    const foldedIndex = new Map();
+    r.columns.forEach((col, i) => {
+      const folded = String(col.name).toLowerCase();
+      const list = foldedIndex.get(folded) || [];
+      list.push(i);
+      foldedIndex.set(folded, list);
+    });
+    const lastRow = r.rows[r.rows.length - 1];
+    lastKey = pk.map((name) => {
+      let at = exactIndex.get(String(name));
+      if (at === undefined) {
+        const folded = foldedIndex.get(String(name).toLowerCase()) || [];
+        if (folded.length === 1) [at] = folded;
+      }
+      if (at === undefined) throw new Error(`结果缺少主键列 ${name}，无法继续稳定分页`);
+      return lastRow[at];
+    });
+  }
+  return {
+    columns: columns || [], rows: read, orderedBy: pk,
+    pagination: pages > 1 ? 'keyset' : 'single-query',
+    snapshotConsistent: pages <= 1, stopped: false,
+  };
+}
+
+/**
+ * 整表分页读取的统一入口——导出与跨库联邦查询共用同一份分页实现。
+ *
+ * 两者要的东西完全一样：稳定、无重复、无遗漏地取走一张表；差别只在拿到行之后
+ * 是写文件还是灌进本地引擎。分页本身的坑（keyset 与 OFFSET 之争、无主键表必须拒绝、
+ * Oracle 的 RN__ 辅助列、ClickHouse 的伪主键、非 SQL 源的续传令牌）只应该有一份实现。
+ *
+ * onPage(columns, rows) 返回 false 即提前停止：联邦查询靠它在超过行数上限时立刻收手，
+ * 不必把整张表读完再拒绝。
+ */
+async function readTablePages(adapter, a, onPage) {
+  return typeof adapter.fetchTablePage === 'function'
+    ? readTableByToken(adapter, a, onPage)
+    : readTableBySql(adapter, a, onPage);
+}
+
+/** 整表导出（分页拉取） */
+async function exportTable(adapter, a) {
+  const ctx = {
+    dialect: adapter.dialect,
+    quoteIdent: (n) => adapter.quoteIdent(n),
+    literal: (v) => adapter.literal(v),
+    blobLiteral: (v) => adapter.blobLiteral(v),
+    tableRef: a.sqlTableName ? a.sqlTableName : adapter.qualify(a.db, a.schema, a.table),
+  };
   const temp = tempPath(a.file);
+  let headerDone = false;
   let w;
   try {
     w = await createWriter(a.format || 'csv', temp, ctx);
-    for (;;) {
-      const filters = [];
-      if (where) filters.push(`(${where})`);
-      if (lastKey) filters.push(keysetWhere(adapter, pk, lastKey));
-      const select = `SELECT ${projection} FROM ${qtable}${filters.length ? ' WHERE ' + filters.join(' AND ') : ''}`;
-      // A table without a real unique key is safe only when one statement returns
-      // the whole result. Probe one extra row and refuse unreliable OFFSET paging.
-      const fetchSize = pk.length ? pageSize : pageSize + 1;
-      const sql = adapter.pageSql(select, orderClause, fetchSize, 0);
-      const r = await adapter.exec(a.db, sql);
-      if (!r || !Array.isArray(r.rows) || !Array.isArray(r.columns)) {
-        throw new Error('导出查询未返回结果集');
-      }
-      if (!headerDone) {
-        await w.header(columns.length ? columns : r.columns);
-        headerDone = true;
-      }
-      if (!pk.length && r.rows.length > pageSize) {
-        throw new Error(`表 ${a.table} 没有可用于无损游标分页的唯一主键，超过 ${pageSize.toLocaleString()} 行时无法保证无重复、无遗漏；请先建立合适的主键，或在查询页使用明确的唯一排序后导出结果集`);
-      }
-      // OceanBase Oracle 的 ROWNUM 分页会在结果尾部附加 RN__；只写表的真实列。
-      const width = columns.length || r.columns.length;
-      for (const row of r.rows) await w.row(row.length > width ? row.slice(0, width) : row);
-      written += r.rows.length;
-      pages++;
-      if (r.rows.length < pageSize) break;
-      if (!pk.length) break;
-      const exactIndex = new Map(r.columns.map((col, i) => [String(col.name), i]));
-      const foldedIndex = new Map();
-      r.columns.forEach((col, i) => {
-        const folded = String(col.name).toLowerCase();
-        const list = foldedIndex.get(folded) || [];
-        list.push(i);
-        foldedIndex.set(folded, list);
-      });
-      const lastRow = r.rows[r.rows.length - 1];
-      lastKey = pk.map((name) => {
-        let at = exactIndex.get(String(name));
-        if (at === undefined) {
-          const folded = foldedIndex.get(String(name).toLowerCase()) || [];
-          if (folded.length === 1) [at] = folded;
-        }
-        if (at === undefined) throw new Error(`导出结果缺少主键列 ${name}，无法继续稳定分页`);
-        return lastRow[at];
-      });
-    }
+    const meta = await readTablePages(adapter, a, async (columns, rows) => {
+      if (!headerDone) { await w.header(columns); headerDone = true; }
+      for (const row of rows) await w.row(row);
+      return true;
+    });
     const writerMeta = await w.finish();
     await promoteTemp(temp, a.file);
     return {
-      rows: written, file: a.file, truncated: false, orderedBy: pk,
-      pagination: pages > 1 ? 'keyset' : 'single-query',
-      snapshotConsistent: pages <= 1,
+      rows: meta.rows, file: a.file, truncated: false,
+      orderedBy: meta.orderedBy,
+      pagination: meta.pagination,
+      snapshotConsistent: meta.snapshotConsistent,
       ...(writerMeta || {}),
     };
   } catch (err) {
@@ -579,4 +619,4 @@ async function exportRows(adapter, a) {
   }
 }
 
-module.exports = { exportTable, exportRows, tableProjection, FORMATS };
+module.exports = { exportTable, exportRows, readTablePages, tableProjection, FORMATS };

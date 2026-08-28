@@ -86,6 +86,43 @@ contextBridge.exposeInMainWorld('api', {
       return () => ipcRenderer.removeListener('dba:progress', listener);
     },
   },
+  bc: {
+    expand: (selectors, databases) => inv('bc:expand', { selectors, databases }),
+    run: (t) => inv('bc:run', t),
+    cancel: (token) => inv('bc:cancel', { token }),
+    groups: () => inv('bc:groups'),
+    saveGroup: (name, selectors) => inv('bc:saveGroup', { name, selectors }),
+    deleteGroup: (name) => inv('bc:deleteGroup', { name }),
+    onProgress: (cb, token) => {
+      const listener = (_e, x) => {
+        if (!token || !x || x.token === token) cb(x);
+      };
+      ipcRenderer.on('bc:progress', listener);
+      return () => ipcRenderer.removeListener('bc:progress', listener);
+    },
+  },
+  fed: {
+    open: () => inv('fed:open'),
+    close: (sessionId) => inv('fed:close', { sessionId }),
+    describe: (sessionId) => inv('fed:describe', { sessionId }),
+    run: (t) => inv('fed:run', t),
+    cancel: (token) => inv('fed:cancel', { token }),
+    saveResult: (sessionId, name) => inv('fed:saveResult', { sessionId, name }),
+    onProgress: (cb, token) => {
+      const listener = (_e, p) => {
+        if (!token || !p || p.token === token) cb(p);
+      };
+      ipcRenderer.on('fed:progress', listener);
+      return () => ipcRenderer.removeListener('fed:progress', listener);
+    },
+  },
+  undo: {
+    list: () => inv('undo:list'),
+    preview: (id) => inv('undo:preview', { id }),
+    rollback: (id, opts) => inv('undo:rollback', { id, ...(opts || {}) }),
+    remove: (id) => inv('undo:remove', { id }),
+    clear: () => inv('undo:clear'),
+  },
   queries: {
     list: (connId) => inv('queries:list', { connId }),
     save: (q) => inv('queries:save', q),

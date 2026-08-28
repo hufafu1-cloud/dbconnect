@@ -89,11 +89,33 @@ export function openSettingsDialog() {
       row(t('结果行数上限'),
         select('queryMaxRows', [[200, '200'], [2000, '2000'], [10000, '10000']], current.queryMaxRows),
         t('新建查询标签页的默认值；已打开的标签页保持当前设置不变。')),
+      row(t('联邦查询单源行数上限'),
+        select('federatedMaxRows', [
+          [10000, '10000'], [50000, '50000'], [100000, '100000'],
+          [500000, '500000'], [1000000, '1000000'],
+        ], current.federatedMaxRows),
+        t('能安全下推的筛选条件会先交给源库执行，只有剩下的行才拉到本地；'
+          + '超过该行数会明确拒绝而不是截断。调高会显著增加内存占用。')),
       row(t('影响范围预检'),
         select('impactPreview', [
           ['risky', t('仅高风险时提示')], ['always', t('每次写操作都提示')], ['off', t('关闭')],
         ], current.impactPreview),
         t('执行 UPDATE / DELETE 前先用同样的 WHERE 统计受影响行数。高风险指：没有 WHERE、影响超过 1000 行、或无法安全预估。'))),
+
+    group(t('SQL 后悔药'),
+      row(t('执行前保存原值'),
+        select('undoSnapshot', [['on', t('开启')], ['off', t('关闭')]], current.undoSnapshot),
+        t('执行 UPDATE / DELETE / INSERT 前，把将被改动的行的原值加密保存到本机，'
+          + '事后可在「回滚中心」预览反向 SQL 并选择性撤销。只对单条语句生效；'
+          + '无主键表、多语句脚本、显式事务内不做快照，并会在执行结果里说明原因。')),
+      row(t('单次快照行数上限'),
+        select('undoMaxRows', [
+          [1000, '1000'], [10000, '10000'], [50000, '50000'], [200000, '200000'],
+        ], current.undoMaxRows),
+        t('超过该行数直接不做快照并提示改用备份，而不是存一份不完整的快照。')),
+      row(t('保留份数'),
+        select('undoKeep', [[10, '10'], [50, '50'], [100, '100'], [200, '200']], current.undoKeep),
+        t('超出份数或超过 14 天的快照自动清理；占用大小与「全部清空」在回滚中心里。'))),
 
     group(t('数据网格'),
       row(t('每页行数'),

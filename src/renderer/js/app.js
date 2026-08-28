@@ -564,7 +564,18 @@ function registerAppCommands() {
       },
     },
     {
-      id: 'transfer', label: '数据传输…', menu: '工具', sepBefore: true, enabled: hasOpenConnection,
+      id: 'broadcast-exec', label: '多库广播执行…', menu: '工具', accel: 'Ctrl+Shift+B', sepBefore: true,
+      run: async () => (await import('./broadcastTab.js')).openBroadcastTab(),
+    },
+    {
+      id: 'federated-query', label: '跨库联邦查询…', menu: '工具', accel: 'Ctrl+Shift+J',
+      run: async () => {
+        const { openFederatedTab } = await import('./federatedTab.js');
+        openFederatedTab();
+      },
+    },
+    {
+      id: 'transfer', label: '数据传输…', menu: '工具', enabled: hasOpenConnection,
       run: async ({ target, needConn }) => { if (needConn()) (await import('./dbaTools.js')).openTransferDialog(target); },
     },
     {
@@ -580,6 +591,10 @@ function registerAppCommands() {
       run: async () => (await import('./commandPalette.js')).openCommandPalette('command'),
     },
     { id: 'history', label: '查询历史', menu: '工具', sepBefore: true, run: () => openHistory() },
+    {
+      id: 'undo-center', label: '回滚中心…', menu: '工具', accel: 'Ctrl+Shift+Z',
+      run: async () => (await import('./undoTab.js')).openUndoTab(),
+    },
     {
       id: 'task-center', label: '任务中心…', menu: '工具',
       run: async () => (await import('./taskTab.js')).openTaskTab(),
@@ -751,6 +766,12 @@ function setupTestHooks() {
       return true;
     },
     openConnDialog: (type) => { openConnDialog(null, type); return true; },
+    openUndo: async () => (await import('./undoTab.js')).openUndoTab(),
+    openBroadcast: async () => (await import('./broadcastTab.js')).openBroadcastTab(),
+    openFederated: async () => {
+      const { openFederatedTab } = await import('./federatedTab.js');
+      return openFederatedTab();
+    },
     openTransfer: async (connId, db) => {
       const { openTransferDialog } = await import('./dbaTools.js');
       await openTransferDialog({ connId, db });
@@ -940,7 +961,20 @@ async function boot() {
       if (!state.open.has(s.target.connId)) return null;
       return openTableTab(s.target, { restoreId: entry.id, restoreState: s });
     }
+    if (entry.type === 'broadcast') {
+      // 广播标签只需要恢复 SQL 与选择规则：目标是按当下的连接现场展开的，
+      // 存死了目标列表反而会漏掉新增的分库。
+      const { openBroadcastTab } = await import('./broadcastTab.js');
+      return openBroadcastTab({ restoreId: entry.id, restoreState: s });
+    }
+    if (entry.type === 'federated') {
+      // 联邦标签只需要恢复 SQL 文本：会话里的源表快照是内存副本，
+      // 本来就随窗口关闭一起消失，重新执行一次即可，不必也不该持久化。
+      const { openFederatedTab } = await import('./federatedTab.js');
+      return openFederatedTab({ restoreId: entry.id, restoreState: s });
+    }
     if (entry.type === 'history') return openHistory();
+    if (entry.type === 'undo') return (await import('./undoTab.js')).openUndoTab();
     if (entry.type === 'design') {
       if (!s.target) return false;
       if (!knownIds.has(s.target.connId)) {
