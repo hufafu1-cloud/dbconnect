@@ -123,6 +123,14 @@ export function openSettingsDialog() {
         select('undoKeep', [[10, '10'], [50, '50'], [100, '100'], [200, '200']], current.undoKeep),
         t('超出份数或超过 14 天的快照自动清理；占用大小与「全部清空」在回滚中心里。'))),
 
+    group(t('列画像'),
+      row(t('全表统计的行数上限'),
+        select('profileSampleThreshold', [
+          [50000, '5 万'], [200000, '20 万'], [1000000, '100 万'], [5000000, '500 万'],
+        ], current.profileSampleThreshold),
+        t('超过这个行数时只统计前若干行，并在结果里标注「非随机」。'
+          + '调高会更准，但一次全表扫描的代价也更大；画像面板里随时可以改为全表统计。'))),
+
     group(t('数据网格'),
       row(t('每页行数'),
         select('tablePageSize', [[100, '100'], [500, '500'], [1000, '1000']], current.tablePageSize),

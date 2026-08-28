@@ -19,6 +19,7 @@ const settings = require('./settings');
 const auditLog = require('./auditLog');
 const impact = require('./impact');
 const federated = require('./federated');
+const profile = require('./profile');
 const broadcast = require('./broadcast');
 const multiExec = require('./multiExec');
 const broadcastGroups = require('./broadcastGroups');
@@ -997,6 +998,15 @@ function register(getWin) {
   }, 'dba.runSqlFile', 'dba:runSqlFile'));
   h('dba:cancelSqlFile', (event, a) =>
     dbm.get(a.connId).cancelOperation(rendererRequestId(event, a.taskId)), null, true);
+
+  // ---- 列画像 ----
+  // 按需触发，绝不挂在打开表的路径上：它要做一次全表扫描，
+  // 而「打开表看看数据」是最高频的动作，不能让它变慢。
+  h('db:profile', (a) => profile.profileTable(dbm.get(a.connId), {
+    db: a.db, schema: a.schema, table: a.table,
+    scope: a.scope === 'full' ? 'full' : 'auto',
+    sampleThreshold: settings.get('profileSampleThreshold'),
+  }));
 
   // ---- 多库广播执行 ----
   //

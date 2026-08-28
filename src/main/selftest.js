@@ -4155,6 +4155,117 @@ async function runSelfTest() {
     fs.rmSync(shFile, { force: true });
   } catch (eSchema) { fail++; console.log('  ✗ 时光机块异常:', eSchema && eSchema.stack || eSchema); }
 
+  // ---- 列画像（v2.8.0） ----
+  try {
+    const profile = require('./profile');
+
+    // 每列该怎么画，由类型决定
+    const planKind = (type) => profile.planFor({ name: 'x', type }, 'mysql').kind;
+    check('画像 按类型决定统计口径',
+      planKind('int') === 'numeric' && planKind('decimal(10,2)') === 'numeric'
+      && planKind('varchar(50)') === 'simple' && planKind('text') === 'simple'
+      && planKind('blob') === 'opaque' && planKind('json') === 'opaque',
+      [planKind('int'), planKind('varchar(50)'), planKind('blob')]);
+
+    const pfFile = path.join(os.tmpdir(), `dbpanda-profile-${process.pid}.db`);
+    fs.rmSync(pfFile, { force: true });
+    const pa = new SQLiteAdapter({ id: 'pf', type: 'sqlite', file: pfFile });
+    await pa.connect();
+    await pa.exec('main', `CREATE TABLE t (
+      id INTEGER PRIMARY KEY, status TEXT, amount REAL, note TEXT, blob_col BLOB)`);
+    // 1000 行：status 只有 3 种取值（枚举），note 九成为空，amount 0..999
+    const rows = [];
+    const statuses = ['已完成', '待付款', '已取消'];
+    for (let i = 1; i <= 1000; i++) {
+      const st = statuses[i % 3 === 0 ? 0 : (i % 3 === 1 ? 1 : 2)];
+      rows.push(`(${i}, '${st}', ${i - 1}, ${i % 10 === 0 ? `'n${i}'` : 'NULL'}, NULL)`);
+    }
+    for (let i = 0; i < rows.length; i += 200) {
+      await pa.exec('main', `INSERT INTO t VALUES ${rows.slice(i, i + 200).join(',')}`);
+    }
+
+    const pf = await profile.profileTable(pa, { db: 'main', table: 't' });
+    const byName = new Map(pf.columns.map((c) => [c.name, c]));
+    check('画像 全表统计时如实标注「基于全表」',
+      pf.scope.sampled === false && pf.scope.label === '基于全表'
+      && pf.totalRows === 1000 && pf.scanned === 1000, pf.scope);
+    check('画像 空值率算得对',
+      Math.abs(byName.get('note').nullRate - 0.9) < 0.001
+      && byName.get('note').nulls === 900
+      && byName.get('status').nullRate === 0, {
+        note: byName.get('note').nullRate, status: byName.get('status').nullRate,
+      });
+    check('画像 去重数与「唯一」判定',
+      byName.get('status').distinct === 3 && !byName.get('status').unique
+      && byName.get('id').distinct === 1000 && byName.get('id').unique === true,
+      { status: byName.get('status').distinct, id: byName.get('id').unique });
+    check('画像 枚举列给出 Top N 分布且比例正确', (() => {
+      const top = byName.get('status').top;
+      if (!top || top.length !== 3) return false;
+      const total = top.reduce((sum, item) => sum + item.count, 0);
+      return total === 1000 && Math.abs(top[0].rate - top[0].count / 1000) < 1e-9
+        && top[0].count >= top[1].count;
+    })(), byName.get('status').top);
+    check('画像 数值列给出最值与平均',
+      byName.get('amount').min === 0 && byName.get('amount').max === 999
+      && Math.abs(byName.get('amount').avg - 499.5) < 0.001,
+      { min: byName.get('amount').min, max: byName.get('amount').max, avg: byName.get('amount').avg });
+    check('画像 数值列的直方图分桶数与总数都对', (() => {
+      const h = byName.get('amount').histogram;
+      return Array.isArray(h) && h.length === profile.HISTOGRAM_BUCKETS
+        && h.reduce((sum, n) => sum + n, 0) === 1000;
+    })(), byName.get('amount').histogram);
+    check('画像 二进制列只统计空值率，不算去重也不取分布',
+      byName.get('blob_col').kind === 'opaque'
+      && byName.get('blob_col').distinct === null
+      && byName.get('blob_col').top === null
+      && byName.get('blob_col').nullRate === 1, byName.get('blob_col'));
+    check('画像 唯一列不取分布（那是标识不是枚举）',
+      byName.get('id').top === null && /每行取值都不同/.test(byName.get('id').note),
+      byName.get('id').note);
+
+    // ---- 采样：必须如实说明是「前 N 行」而不是含糊的「采样」 ----
+    const sampled = await profile.profileTable(pa, { db: 'main', table: 't', sampleThreshold: 100 });
+    check('画像 超过阈值时改用前 N 行并标注清楚',
+      sampled.scope.sampled === true
+      && /基于前 100 行（非随机）/.test(sampled.scope.label)
+      && /不是随机样本/.test(sampled.scope.note)
+      && sampled.scanned === 100, sampled.scope);
+    check('画像 采样结果确实只统计了那 N 行',
+      sampled.columns.find((c) => c.name === 'id').distinct === 100,
+      sampled.columns.find((c) => c.name === 'id').distinct);
+    const forced = await profile.profileTable(pa, {
+      db: 'main', table: 't', sampleThreshold: 100, scope: 'full',
+    });
+    check('画像 可以强制改回全表统计',
+      forced.scope.sampled === false && forced.scanned === 1000, forced.scope);
+
+    // 「后加的列」正是前 N 行会给出错误结论的场景——所以标注必须精确
+    await pa.exec('main', 'ALTER TABLE t ADD COLUMN added_later TEXT');
+    await pa.exec('main', "UPDATE t SET added_later = 'x' WHERE id > 500");
+    const biased = await profile.profileTable(pa, { db: 'main', table: 't', sampleThreshold: 100 });
+    const full2 = await profile.profileTable(pa, { db: 'main', table: 't', scope: 'full' });
+    check('画像 前 N 行对后加的列确实会偏（因此标注不能含糊）',
+      biased.columns.find((c) => c.name === 'added_later').nullRate === 1
+      && Math.abs(full2.columns.find((c) => c.name === 'added_later').nullRate - 0.5) < 0.001,
+      {
+        sampled: biased.columns.find((c) => c.name === 'added_later').nullRate,
+        full: full2.columns.find((c) => c.name === 'added_later').nullRate,
+      });
+
+    // 非 SQL 数据源明确拒绝，而不是给一套语义不同的数字
+    let nonSql = '';
+    try {
+      await profile.profileTable({
+        dialect: 'redis', fetchTablePage: async () => ({ columns: [], rows: [] }),
+      }, { db: '0', table: 'k' });
+    } catch (e) { nonSql = e.message; }
+    check('画像 非 SQL 数据源明确不支持', /不支持列画像/.test(nonSql) && /统计口径/.test(nonSql), nonSql);
+
+    await pa.close();
+    fs.rmSync(pfFile, { force: true });
+  } catch (ePf) { fail++; console.log('  ✗ 列画像块异常:', ePf && ePf.stack || ePf); }
+
   // ---- 多库广播执行（v2.7.0 M2） ----
   try {
     const broadcast = require('./broadcast');

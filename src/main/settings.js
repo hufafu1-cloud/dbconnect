@@ -62,6 +62,9 @@ const SCHEMA = {
   // 与后悔药同理，默认开着——要用它的人正是没提前想到要打开它的人；
   // 代价是每次打开表结构多算一次哈希，只有真的变了才写盘。
   schemaHistory: { def: 'on', parse: stringIn('on', 'off') },
+  // 列画像：超过这么多行就只统计前 N 行（并在界面上如实标注非随机）。
+  // 默认值须与 profile.js 的 DEFAULT_SAMPLE_THRESHOLD 一致。
+  profileSampleThreshold: { def: 200000, parse: numberIn(50000, 200000, 1000000, 5000000) },
   tablePageSize: { def: 500, parse: numberIn(100, 500, 1000) },
 };
 

@@ -676,6 +676,79 @@ async function runDemo(createWindow) {
         ? 'PASS' : 'FAIL(行高应为单行)');
   await shot('shot-33-schema-timeline.png');
 
+  // 列画像：在真实的表上点一遍，验证数字对得上、范围标注说得清。
+  await ej(`window.__test.openTable(${JSON.stringify(saved.id)}, 'main', null, 'orders')`);
+  await wait(700);
+  const profileProbe = await ej(`(async () => {
+    const { getActiveTab } = await import('./js/tabs.js');
+    const tab = getActiveTab().handle;
+    const data = await tab._runProfile();
+    await new Promise((r) => setTimeout(r, 250));
+    const pane = tab.pane;
+    const byName = Object.fromEntries(data.columns.map((c) => [c.name, c]));
+    return {
+      scopeLabel: data.scope.label,
+      sampled: data.scope.sampled,
+      totalRows: data.totalRows,
+      idUnique: byName.id.unique,
+      statusDistinct: byName.status.distinct,
+      statusTop: (byName.status.top || []).length,
+      amountHist: (byName.amount.histogram || []).length,
+      remarkNullRate: Math.round(byName.remark.nullRate * 100),
+      scopeBar: (pane.querySelector('.profile-scope') || {}).textContent || '',
+      cols: pane.querySelectorAll('.profile-col').length,
+      bars: pane.querySelectorAll('.profile-bar-fill').length,
+    };
+  })()`);
+  console.log('[DEMO] 列画像:', JSON.stringify(profileProbe));
+  console.log('[DEMO] 列画像:',
+    profileProbe.scopeLabel === '基于全表' && profileProbe.sampled === false
+      && profileProbe.totalRows === 120 && profileProbe.idUnique === true
+      && profileProbe.statusDistinct === 4 && profileProbe.statusTop === 4
+      && profileProbe.amountHist === 10 && profileProbe.remarkNullRate > 0
+      && profileProbe.cols >= 6 && profileProbe.bars > 0
+      && /基于全表/.test(profileProbe.scopeBar)
+        ? 'PASS' : 'FAIL');
+  await shot('shot-34-profile.png');
+  // 复现「宽表点列画像没反应」：造一张 30 列的宽表，量面板实际可见宽度。
+  const wideProbe = await ej(`(async () => {
+    const cols = Array.from({ length: 30 }, (_, i) => 'c' + i + ' TEXT').join(', ');
+    await window.api.db.query(${JSON.stringify(saved.id)}, {
+      db: 'main', sql: 'CREATE TABLE IF NOT EXISTS wide_t (id INTEGER PRIMARY KEY, ' + cols + ')',
+      maxRows: 1, requestId: 'demo-wide-ddl',
+    });
+    await window.api.db.query(${JSON.stringify(saved.id)}, {
+      db: 'main',
+      sql: "INSERT INTO wide_t (id, c0, c1) VALUES (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbb')",
+      maxRows: 1, requestId: 'demo-wide-ins',
+    });
+    const { getActiveTab } = await import('./js/tabs.js');
+    window.__test.openTable(${JSON.stringify(saved.id)}, 'main', null, 'wide_t');
+    await new Promise((r) => setTimeout(r, 800));
+    const tab = getActiveTab().handle;
+    await tab._toggleProfile();
+    await new Promise((r) => setTimeout(r, 250));
+    const pane = tab.pane;
+    const panel = pane.querySelector('.profile-panel');
+    const work = pane.querySelector('.table-work');
+    const grid = pane.querySelector('.grid-wrap');
+    const rect = panel.getBoundingClientRect();
+    const workRect = work.getBoundingClientRect();
+    return {
+      display: panel.style.display,
+      panelWidth: Math.round(rect.width),
+      panelLeft: Math.round(rect.left),
+      workRight: Math.round(workRect.right),
+      offScreen: rect.left >= workRect.right - 1,
+      gridScrollWidth: grid ? grid.scrollWidth : null,
+      gridClientWidth: grid ? grid.clientWidth : null,
+    };
+  })()`);
+  console.log('[DEMO] 列画像 宽表:', JSON.stringify(wideProbe));
+  console.log('[DEMO] 列画像 宽表:',
+    wideProbe.panelWidth >= 260 && !wideProbe.offScreen ? 'PASS' : 'FAIL(面板被挤出可视区)');
+
+
   // 外部改动：模拟「在别的客户端（DBeaver）里加了一列」——绕开本工具直接改库。
   // 时光机不主动扫是看不到的；扫一下就能收进来。这是「观察即记录」的补丁，
   // 也是这个功能最容易被误解成 bug 的地方。
@@ -800,7 +873,7 @@ async function runDemo(createWindow) {
   })()`);
   console.log('[DEMO] 选项对话框:', JSON.stringify(settingsOk));
   console.log('[DEMO] 选项对话框:',
-    settingsOk.groups === 7 && settingsOk.selects === 12 ? 'PASS' : 'FAIL(应=7组/12个下拉)');
+    settingsOk.groups === 8 && settingsOk.selects === 13 ? 'PASS' : 'FAIL(应=8组/13个下拉)');
   await shot('shot-23-settings.png');
   await ej('window.__test.closeMenus()');
   await wait(200);

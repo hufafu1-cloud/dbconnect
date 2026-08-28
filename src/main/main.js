@@ -1089,6 +1089,34 @@ app.whenReady().then(async () => {
           && /张表/.test(schemaUi.usage)
           && /无效的快照 ID/.test(schemaUi.traversal)
           && schemaUi.scanDbEnabled && schemaUi.scanTableDisabled;
+        // 列画像：冒烟里没有真能连上的库，跑不了统计。这里守的是
+        // 「按需触发」这条设计——打开表时面板不该存在，点了才出现且不自动开算。
+        const profileUi = await win.webContents.executeJavaScript(`(async () => {
+          const out = {};
+          const { getActiveTab } = await import('./js/tabs.js');
+          window.__test.openTable('smoke-none', 'main', null, 't');
+          await new Promise((r) => setTimeout(r, 200));
+          const tab = getActiveTab().handle;
+          const pane = tab.pane;
+          out.buttonExists = [...pane.querySelectorAll('.pane-toolbar .pbtn')]
+            .some((b) => b.textContent.includes('列画像'));
+          out.panelHiddenBefore = !pane.querySelector('.profile-panel')
+            || pane.querySelector('.profile-panel').style.display === 'none';
+          await tab._toggleProfile();
+          await new Promise((r) => setTimeout(r, 150));
+          out.panelShown = pane.querySelector('.profile-panel').style.display !== 'none';
+          out.idle = (pane.querySelector('.profile-idle') || {}).textContent || '';
+          // 点开只建面板，绝不自动开算——它要扫一遍表
+          out.notAutoRun = tab._profileData() === null;
+          await tab._toggleProfile();
+          out.panelHiddenAfter = pane.querySelector('.profile-panel').style.display === 'none';
+          await tab.close(true);
+          return out;
+        })()`);
+        const profileOk = profileUi.buttonExists && profileUi.panelHiddenBefore
+          && profileUi.panelShown && profileUi.notAutoRun && profileUi.panelHiddenAfter
+          && /不会自动开始/.test(profileUi.idle);
+        console.log('[SMOKE][profile]', JSON.stringify(profileUi));
         console.log('[SMOKE][schema]', JSON.stringify(schemaUi));
         console.log('[SMOKE][broadcast]', JSON.stringify(broadcastUi));
         console.log('[SMOKE][federated]', JSON.stringify(federated));
@@ -1147,11 +1175,11 @@ app.whenReady().then(async () => {
           && !noAutoConnect.loading && noAutoConnect.connections >= 1;
         console.log('[SMOKE][noAutoConnect]',
           JSON.stringify({ ...noAutoConnect, ready: rebootReady, ms: Date.now() - rebootAt }));
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} federated=${federatedOk} broadcast=${broadcastOk} schema=${schemaOk} undo=${undoOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} noAutoConnect=${noAutoConnectOk} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} federated=${federatedOk} broadcast=${broadcastOk} schema=${schemaOk} profile=${profileOk} undo=${undoOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} noAutoConnect=${noAutoConnectOk} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk && experimentalOk
-          && workspaceOk && treeStateOk && federatedOk && broadcastOk && schemaOk && undoOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt && noAutoConnectOk
+          && workspaceOk && treeStateOk && federatedOk && profileOk && broadcastOk && schemaOk && undoOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt && noAutoConnectOk
           && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);

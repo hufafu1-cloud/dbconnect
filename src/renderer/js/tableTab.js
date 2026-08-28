@@ -109,6 +109,8 @@ export function openTableTab(target, openOpts) {
   const btnAdd = mkBtn('plus', '添加行', () => { if (canEdit()) grid.addNewRow(); });
   const btnDel = mkBtn('minus', '删除行', () => { if (canEdit()) { grid.deleteSelected(); updateDirty(); } });
   const btnView = mkBtn('objects', '表单视图', () => toggleView());
+  const btnProfile = mkBtn('explain', '列画像', () => toggleProfile());
+  btnProfile.title = '统计整表每列的空值率、去重数、取值分布与数值分布（按需触发，要扫一遍表）';
   // 列头筛选行：条件会下推成 SQL WHERE，不是只过滤当前页
   const btnFilterRow = mkBtn('filter', '筛选行', () => {
     const on = grid.toggleFilterRow();
@@ -130,6 +132,7 @@ export function openTableTab(target, openOpts) {
     btnAdd, btnDel, btnApply, btnDiscard,
     el('span', { class: 'sep' }),
     btnView,
+    btnProfile,
     mkBtn('importIcon', '导入', async () => {
       const { openImportWizard } = await import('./importWizard.js');
       openImportWizard(target);
@@ -281,6 +284,24 @@ export function openTableTab(target, openOpts) {
 
   const gridHost = grid.host;
   gridHost.style.cssText = 'flex:1;min-height:0;display:flex;flex-direction:column;';
+  // 列画像宿主：右侧抽屉。默认不创建面板实例，点开才建——
+  // 它一建就要扫表，而打开表看数据是最高频的动作。
+  const profileHost = el('div', { class: 'profile-panel', style: { display: 'none' } });
+  let profilePanel = null;
+  async function toggleProfile() {
+    if (profileHost.style.display !== 'none') {
+      profileHost.style.display = 'none';
+      btnProfile.classList.remove('active');
+      return;
+    }
+    profileHost.style.display = '';
+    btnProfile.classList.add('active');
+    if (!profilePanel) {
+      const { createProfilePanel } = await import('./profilePanel.js');
+      profilePanel = createProfilePanel(profileHost, target);
+    }
+  }
+
   // 表单视图宿主
   const formHost = el('div', { style: { flex: '1', minHeight: '0', overflow: 'auto', display: 'none' } });
   let formView = null;
@@ -382,7 +403,15 @@ export function openTableTab(target, openOpts) {
     if (e.key === 'Enter') { where = whereInput.value.trim(); page = 1; load(); }
   });
 
-  tab.pane.append(toolbar, builderPanel, gridHost, formHost, pager);
+  const workArea = el('div', { class: 'table-work' }, gridHost, formHost, profileHost);
+  tab.pane.append(toolbar, builderPanel, workArea, pager);
+  tab._toggleProfile = toggleProfile;
+  tab._profileData = () => (profilePanel ? profilePanel.data : null);
+  tab._runProfile = async (scope) => {
+    await toggleProfile();
+    await profilePanel.run(scope);
+    return profilePanel.data;
+  };
   tab.setRecovery('table', () => (grid.isDirty() ? null : {
     target: { ...target },
     where,

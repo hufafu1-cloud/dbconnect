@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('api', {
     explain: (connId, db, sql, schema) => inv('db:explain', { connId, db, sql, schema }),
     cellBlob: (connId, t) => inv('db:cellBlob', { connId, ...t }),
     search: (connId, t) => inv('db:search', { connId, ...t }),
+    profile: (connId, t) => inv('db:profile', { connId, ...t }),
     onSearchProgress: (cb) => {
       const listener = (_e, p) => cb(p);
       ipcRenderer.on('search:progress', listener);
