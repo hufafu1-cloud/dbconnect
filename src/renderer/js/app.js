@@ -564,7 +564,13 @@ function registerAppCommands() {
       },
     },
     {
-      id: 'broadcast-exec', label: '多库广播执行…', menu: '工具', accel: 'Ctrl+Shift+B', sepBefore: true,
+      id: 'schema-timeline', label: '结构时光机…', menu: '工具', accel: 'Ctrl+Shift+H', sepBefore: true,
+      run: async ({ target }) => (await import('./schemaTimelineTab.js')).openSchemaTimelineTab(
+        target && target.table ? target : null,
+      ),
+    },
+    {
+      id: 'broadcast-exec', label: '多库广播执行…', menu: '工具', accel: 'Ctrl+Shift+B',
       run: async () => (await import('./broadcastTab.js')).openBroadcastTab(),
     },
     {
@@ -768,6 +774,8 @@ function setupTestHooks() {
     openConnDialog: (type) => { openConnDialog(null, type); return true; },
     openUndo: async () => (await import('./undoTab.js')).openUndoTab(),
     openBroadcast: async () => (await import('./broadcastTab.js')).openBroadcastTab(),
+    openSchemaTimeline: async (preset) =>
+      (await import('./schemaTimelineTab.js')).openSchemaTimelineTab(preset || null),
     openFederated: async () => {
       const { openFederatedTab } = await import('./federatedTab.js');
       return openFederatedTab();
@@ -960,6 +968,9 @@ async function boot() {
       if (!s.target || !knownIds.has(s.target.connId)) return false;
       if (!state.open.has(s.target.connId)) return null;
       return openTableTab(s.target, { restoreId: entry.id, restoreState: s });
+    }
+    if (entry.type === 'schema-timeline') {
+      return (await import('./schemaTimelineTab.js')).openSchemaTimelineTab();
     }
     if (entry.type === 'broadcast') {
       // 广播标签只需要恢复 SQL 与选择规则：目标是按当下的连接现场展开的，

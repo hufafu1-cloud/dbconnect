@@ -3987,6 +3987,174 @@ async function runSelfTest() {
     check('multiExec 取消后令牌失效', multiExec.cancelRun('selftest-cancel') === false);
   } catch (eMulti) { fail++; console.log('  ✗ multiExec 块异常:', eMulti && eMulti.stack || eMulti); }
 
+  // ---- Schema 版本时光机（v2.8.0） ----
+  try {
+    const schemaHistory = require('./schemaHistory');
+    const localStore = require('./localStore');
+    localStore.clear(schemaHistory.BUCKET);
+
+    const shFile = path.join(os.tmpdir(), `dbpanda-schema-${process.pid}.db`);
+    fs.rmSync(shFile, { force: true });
+    const sh = new SQLiteAdapter({ id: 'sh', type: 'sqlite', file: shFile });
+    await sh.connect();
+    const ctx = { connId: 'sh', connName: '时光机自检', db: 'main', schema: null, table: 'evolve', dialect: 'sqlite' };
+    const modelNow = async () => {
+      const info = await sh.tableInfo('main', null, 'evolve');
+      return ddl.infoToModel(info, 'evolve', sh.dialect);
+    };
+
+    // ---- 验收场景：加列 → 改类型 → 删列 ----
+    await sh.exec('main', 'CREATE TABLE evolve (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');
+    const v0 = schemaHistory.observe(ctx, await modelNow());
+    check('时光机 首次观察即记一版', v0.tracked && v0.changed && v0.first && v0.versions === 1, v0);
+    const again = schemaHistory.observe(ctx, await modelNow());
+    check('时光机 结构没变时不重复记版', again.tracked && !again.changed && again.versions === 1, again);
+
+    await sh.exec('main', 'ALTER TABLE evolve ADD COLUMN score REAL');           // 加列
+    schemaHistory.observe(ctx, await modelNow());
+    await sh.exec('main', 'ALTER TABLE evolve RENAME TO evolve_tmp');            // 改类型（SQLite 靠重建）
+    await sh.exec('main', 'CREATE TABLE evolve (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score TEXT)');
+    await sh.exec('main', 'INSERT INTO evolve SELECT id, name, CAST(score AS TEXT) FROM evolve_tmp');
+    await sh.exec('main', 'DROP TABLE evolve_tmp');
+    schemaHistory.observe(ctx, await modelNow());
+    await sh.exec('main', 'ALTER TABLE evolve DROP COLUMN score');               // 删列
+    const v3 = schemaHistory.observe(ctx, await modelNow());
+    check('时光机 三次变更记成四版', v3.versions === 4, v3.versions);
+
+    const tracked = schemaHistory.listTracked({ connId: 'sh' });
+    check('时光机 表清单只解头信息就能列出',
+      tracked.length === 1 && tracked[0].table === 'evolve' && tracked[0].versions === 4
+      && tracked[0].connName === '时光机自检', tracked[0]);
+    const line = schemaHistory.timeline(tracked[0].id);
+    check('时光机 时间线按序给出每一版的摘要',
+      line.versions.length === 4
+      && line.versions.map((v) => v.summary.columns).join(',') === '2,3,3,2'
+      && line.versions.every((v, i) => i === 0 || v.at >= line.versions[i - 1].at),
+      line.versions.map((v) => v.summary && v.summary.columns));
+
+    // 变更清单说人话
+    const c01 = schemaHistory.compare(sh, tracked[0].id, 0, 1);
+    check('时光机 变更清单是人话不是 SQL',
+      c01.changes.length === 1 && c01.changes[0].kind === 'add' && /新增栏位 score/.test(c01.changes[0].text),
+      c01.changes);
+    const c12 = schemaHistory.compare(sh, tracked[0].id, 1, 2);
+    check('时光机 认得出类型变化',
+      c12.changes.some((x) => x.kind === 'type' && /score/.test(x.text) && /REAL/i.test(x.text)),
+      c12.changes);
+    const c23 = schemaHistory.compare(sh, tracked[0].id, 2, 3);
+    check('时光机 认得出删列',
+      c23.changes.length === 1 && c23.changes[0].kind === 'remove' && /score/.test(c23.changes[0].text),
+      c23.changes);
+
+    // ---- 验收核心：回放出任意中间版本，并且生成的 DDL 真的能跑出目标结构 ----
+    // 只比对 SQL 文本不算数——必须把生成的语句真执行一遍，再比结构指纹。
+    const replay = async (fromIndex, toIndex) => {
+      const result = schemaHistory.compare(sh, tracked[0].id, fromIndex, toIndex);
+      if (result.migrationError) return { error: result.migrationError };
+      const versions = schemaHistory.timeline(tracked[0].id).versions;
+      // 造一张与 from 版结构相同的临时表，把迁移脚本套上去，再看是否等于 to 版
+      const probe = new SQLiteAdapter({ id: 'shp', type: 'sqlite', file: ':memory:' });
+      await probe.connect();
+      const fromModel = JSON.parse(JSON.stringify(
+        localStore.read(schemaHistory.BUCKET, tracked[0].id).rows[fromIndex].model));
+      const toModel = localStore.read(schemaHistory.BUCKET, tracked[0].id).rows[toIndex].model;
+      const created = ddl.buildCreateTable(probe, 'main', null, fromModel);
+      for (const sql of created.sqls) await probe.exec('main', sql);
+      for (const sql of result.migration) await probe.exec('main', sql);
+      const after = ddl.infoToModel(await probe.tableInfo('main', null, 'evolve'), 'evolve', 'sqlite');
+      const same = schemaHistory.fingerprint(after) === schemaHistory.fingerprint(toModel);
+      await probe.close();
+      return { same, sqls: result.migration.length, versions: versions.length };
+    };
+    const r02 = await replay(0, 2);
+    check('时光机 【验收】跨两次变更回放：迁移脚本执行后结构与目标版完全一致',
+      r02.same === true, r02);
+    const r03 = await replay(0, 3);
+    check('时光机 【验收】跨三次变更回放同样一致', r03.same === true, r03);
+
+    // 回滚方向：把两个模型对调再生成一遍，而不是把 SQL 倒着写
+    const rollbackWorks = await (async () => {
+      const result = schemaHistory.compare(sh, tracked[0].id, 0, 2);
+      if (result.rollbackError) return { error: result.rollbackError };
+      const probe = new SQLiteAdapter({ id: 'shr', type: 'sqlite', file: ':memory:' });
+      await probe.connect();
+      const rows = localStore.read(schemaHistory.BUCKET, tracked[0].id).rows;
+      const created = ddl.buildCreateTable(probe, 'main', null, JSON.parse(JSON.stringify(rows[2].model)));
+      for (const sql of created.sqls) await probe.exec('main', sql);
+      for (const sql of result.rollback) await probe.exec('main', sql);
+      const after = ddl.infoToModel(await probe.tableInfo('main', null, 'evolve'), 'evolve', 'sqlite');
+      const same = schemaHistory.fingerprint(after) === schemaHistory.fingerprint(rows[0].model);
+      await probe.close();
+      return { same, sqls: result.rollback.length };
+    })();
+    check('时光机 【验收】回滚脚本执行后结构退回起始版', rollbackWorks.same === true, rollbackWorks);
+
+    // 某一刻的整库结构
+    const rows = localStore.read(schemaHistory.BUCKET, tracked[0].id).rows;
+    const stateMid = schemaHistory.schemaAt({ connId: 'sh' }, rows[1].at);
+    check('时光机 能取出某一刻的整库结构',
+      stateMid.length === 1 && stateMid[0].table === 'evolve'
+      && stateMid[0].model.columns.length === 3, stateMid.map((x) => x.table));
+    const stateBefore = schemaHistory.schemaAt({ connId: 'sh' }, rows[0].at - 1000);
+    check('时光机 那之前还没观察到时返回空', stateBefore.length === 0);
+
+    // 删表：记墓碑，并从「当时的整库结构」里消失
+    schemaHistory.markDropped(ctx);
+    const afterDrop = schemaHistory.listTracked({ connId: 'sh' })[0];
+    check('时光机 删表记墓碑', afterDrop.dropped === true && afterDrop.versions === 5, afterDrop);
+    check('时光机 已删的表不出现在当前结构里',
+      schemaHistory.schemaAt({ connId: 'sh' }, Date.now()).length === 0);
+
+    // 导出
+    const exportable = schemaHistory.compare(sh, tracked[0].id, 0, 2);
+    const flyway = schemaHistory.exportScript(exportable, 'flyway', 'migration');
+    check('时光机 Flyway 导出的文件名带版本号与描述',
+      /^V\d{14}__evolve_migrate\.sql$/.test(flyway.fileName)
+      && /新增栏位 score/.test(flyway.text) && /;\s*$/.test(flyway.text.trim()), flyway.fileName);
+    const liquibase = schemaHistory.exportScript(exportable, 'liquibase', 'migration');
+    check('时光机 Liquibase 导出带 changeSet 与 rollback',
+      /^\d{14}-evolve_migrate\.xml$/.test(liquibase.fileName)
+      && /<changeSet id="\d{14}" author="dbpanda">/.test(liquibase.text)
+      && /<rollback>/.test(liquibase.text)
+      && !/[<>&](?![a-z]+;)/.test(liquibase.text.split('<!--')[1].split('-->')[0] || ''),
+      liquibase.fileName);
+    const rollbackFile = schemaHistory.exportScript(exportable, 'flyway', 'rollback');
+    check('时光机 回滚方向单独导出', /_rollback\.sql$/.test(rollbackFile.fileName)
+      && /回滚/.test(rollbackFile.text), rollbackFile.fileName);
+
+    // 从自由 SQL 里认出被动过结构的表——查询编辑器里跑 DDL 是最常见的改结构方式，
+    // 光靠「打开设计表才记录」会漏掉它，而且时间戳还会错
+    const targets = (sql) => schemaHistory.ddlTargets(sql).join(',');
+    check('时光机 认得出 ALTER / CREATE / DROP TABLE',
+      targets('ALTER TABLE products ADD COLUMN sku TEXT') === 'products'
+      && targets('CREATE TABLE IF NOT EXISTS shop.t1 (id int)') === 'shop.t1'
+      && targets('DROP TABLE IF EXISTS old_t;') === 'old_t');
+    check('时光机 索引变化也认到所属表',
+      targets('CREATE INDEX idx_a ON orders (uid)') === 'orders');
+    check('时光机 改名时新旧名字都看一眼',
+      targets('ALTER TABLE a RENAME TO b') === 'a,b');
+    check('时光机 字符串与注释里的 DDL 不算数',
+      targets("SELECT * FROM t WHERE note = 'create table fake'") === ''
+      && targets('-- alter table commented' + String.fromCharCode(10) + 'SELECT 1') === ''
+      && targets('UPDATE t SET a = 1') === '');
+
+    // 指纹只认结构上有意义的东西
+    const base = { table: 't', columns: [{ name: 'a', type: 'int', notNull: true }], indexes: [], constraints: [], foreignKeys: [] };
+    const noise = JSON.parse(JSON.stringify(base));
+    noise.rows = 12345;
+    noise.autoIncrement = 99;
+    check('时光机 行数等噪音不产生新版本',
+      schemaHistory.fingerprint(base) === schemaHistory.fingerprint(noise));
+    const real = JSON.parse(JSON.stringify(base));
+    real.columns[0].notNull = false;
+    check('时光机 可空性变化会产生新版本',
+      schemaHistory.fingerprint(base) !== schemaHistory.fingerprint(real));
+
+    localStore.clear(schemaHistory.BUCKET);
+    await sh.close();
+    fs.rmSync(shFile, { force: true });
+  } catch (eSchema) { fail++; console.log('  ✗ 时光机块异常:', eSchema && eSchema.stack || eSchema); }
+
   // ---- 多库广播执行（v2.7.0 M2） ----
   try {
     const broadcast = require('./broadcast');

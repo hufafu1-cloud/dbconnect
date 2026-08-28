@@ -24,7 +24,13 @@ const multiExec = require('./multiExec');
 const broadcastGroups = require('./broadcastGroups');
 const undo = require('./undo');
 const localStore = require('./localStore');
+const schemaHistory = require('./schemaHistory');
 const { parseNcxBuffer, targetLabel, MAX_FILE_BYTES } = require('./navicatNcx');
+const { parseSimpleTableReference } = require('./db/sqlutil');
+
+// 一次扫描的表数上限。读几百张表的元数据在真实的库上不便宜，
+// 与其让用户点一下卡住几分钟，不如明确拒绝并给出更小的做法。
+const MAX_RESCAN_TABLES = 500;
 const connectionLocks = new Map();
 const navicatImportSessions = new Map();
 const NAVICAT_SESSION_TTL = 10 * 60 * 1000;
@@ -443,7 +449,157 @@ function register(getWin) {
   h('db:databases', (connId) => dbm.get(connId).listDatabases());
   h('db:schemas', (a) => dbm.get(a.connId).listSchemas(a.db));
   h('db:objects', (a) => dbm.get(a.connId).listObjects(a.db, a.schema));
-  h('db:tableInfo', (a) => dbm.get(a.connId).tableInfo(a.db, a.schema, a.table));
+  /**
+   * 观察即记录：每次读到表结构就交给 Schema 版本时光机比一次，变了就记一版。
+   *
+   * 改结构的入口有一大把（设计器、树上的对象操作、结构同步、自由 SQL 的 DDL、
+   * 运行 SQL 文件、从备份还原），逐个挂钩子既啰嗦又必然漏。而它们改完之后
+   * 界面都要重新读一次结构，所以挂在**读**这一侧反而全覆盖，
+   * 还能顺带记下别的客户端做的改动。
+   *
+   * 但「读结构」本身也不止一个入口：查看视图定义与导入向导走 db:tableInfo，
+   * 而表的「设计表」走 design:model（它自己调 adapter.tableInfo，不经过这里）——
+   * 那恰恰是用户看表结构最常走的一条路。所以两处都要挂。
+   *
+   * 记录失败绝不能影响读结构本身：时光机是附加价值，不是必经之路。
+   */
+  const observeSchema = (a, adapter, model) => {
+    if (settings.get('schemaHistory') !== 'on') return;
+    try {
+      let connName = '';
+      try { connName = store.getById(a.connId).name; } catch (e) { /* 连接可能已删 */ }
+      schemaHistory.observe({
+        connId: a.connId, connName, db: a.db, schema: a.schema, table: a.table,
+        dialect: adapter.dialect,
+      }, model);
+    } catch (error) { /* 记录失败不影响读结构 */ }
+  };
+
+  h('db:tableInfo', async (a) => {
+    const adapter = dbm.get(a.connId);
+    const info = await adapter.tableInfo(a.db, a.schema, a.table);
+    observeSchema(a, adapter, ddl.infoToModel(info, a.table, adapter.dialect));
+    return info;
+  });
+
+  /**
+   * 自由 SQL 跑完 DDL 之后补一次观察。
+   *
+   * 规则很简单也很难出错：**把认出来的表挨个读一遍——读得到就记一版，
+   * 读不到就记一块墓碑**。删表和改名都会让旧名字读不到，两种情况的处置本来就一样。
+   * 整个过程失败一律吞掉：时光机是附加价值，绝不能让它影响用户执行 SQL。
+   */
+  async function observeDdlTargets(a, adapter) {
+    let refs = [];
+    try { refs = schemaHistory.ddlTargets(a.sql); } catch (e) { return; }
+    if (!refs.length) return;
+    let connName = '';
+    try { connName = store.getById(a.connId).name; } catch (e) { /* 连接可能已删 */ }
+    for (const ref of refs.slice(0, 20)) {
+      try {
+        const parsed = parseSimpleTableReference(ref);
+        if (!parsed || parsed.alias) continue;
+        const target = adapter._resolveEditableTable(a.db, a.schema, parsed.parts);
+        if (!target || !target.table) continue;
+        const context = {
+          connId: a.connId, connName, db: target.db, schema: target.schema || null,
+          table: target.table, dialect: adapter.dialect,
+        };
+        let info = null;
+        try { info = await adapter.tableInfo(target.db, target.schema, target.table); }
+        catch (e) { info = null; }
+        if (info) schemaHistory.observe(context, ddl.infoToModel(info, target.table, adapter.dialect));
+        else schemaHistory.markDropped(context);
+      } catch (e) { /* 单张表认不出来不影响其它表 */ }
+    }
+  }
+
+  // ---- Schema 版本时光机 ----
+  h('schema:list', (a) => ({
+    available: localStore.available(),
+    enabled: settings.get('schemaHistory') === 'on',
+    entries: localStore.available() ? schemaHistory.listTracked(a || {}) : [],
+    usage: localStore.available() ? schemaHistory.usage() : null,
+  }));
+  h('schema:timeline', (a) => schemaHistory.timeline(a.id));
+  // 对比需要一个适配器来按方言生成 DDL。连接开着就用它自己的方言；
+  // 没开着也要能看历史——退回到快照里记着的方言，用一个不连库的临时适配器生成。
+  h('schema:compare', (a) => {
+    const entry = schemaHistory.timeline(a.id);
+    const adapter = dbm.isOpen(entry.connId)
+      ? dbm.get(entry.connId)
+      : dbm.createAdapter({ type: entry.dialect === 'oracle' ? 'oracle' : (entry.dialect || 'mysql') });
+    return schemaHistory.compare(adapter, a.id, Number(a.from), Number(a.to));
+  });
+  h('schema:export', (a) => {
+    const entry = schemaHistory.timeline(a.id);
+    const adapter = dbm.isOpen(entry.connId)
+      ? dbm.get(entry.connId)
+      : dbm.createAdapter({ type: entry.dialect === 'oracle' ? 'oracle' : (entry.dialect || 'mysql') });
+    const result = schemaHistory.compare(adapter, a.id, Number(a.from), Number(a.to));
+    return schemaHistory.exportScript(result, a.format, a.direction);
+  });
+  /**
+   * 主动扫描：把库里当前的表结构读一遍，与已记录的比对，变了就记一版。
+   *
+   * 「观察即记录」有个现实缺口：**别的客户端（DBeaver / 命令行 / 别人的机器）
+   * 改的结构，本工具不看就不知道**。而这个功能的用途恰恰是抓结构漂移——
+   * 要用户自己想着去逐张表点一遍才发现漂移，等于没用。
+   *
+   * 所以给一个显式的扫描动作。刻意做成**用户主动触发**而不是后台定时轮询：
+   * 读几百张表的元数据在真实的库上不便宜，什么时候值得付这个代价只有用户知道。
+   *
+   * scope='table' 只扫一张（已跟踪的那条记录）；scope='db' 扫整个库并顺带发现新表。
+   */
+  h('schema:rescan', async (event, a) => {
+    if (settings.get('schemaHistory') !== 'on') {
+      throw new Error('结构历史记录已关闭，请先在「选项 → 结构历史」里打开');
+    }
+    const adapter = dbm.get(a.connId);
+    let connName = '';
+    try { connName = store.getById(a.connId).name; } catch (e) { /* 连接可能已删 */ }
+    let tables;
+    if (a.table) tables = [{ name: a.table, schema: a.schema || null }];
+    else {
+      const objects = await adapter.listObjects(a.db, a.schema);
+      tables = [
+        ...((objects && objects.tables) || []),
+        ...((objects && objects.views) || []),
+      ].map((item) => ({ name: item.name, schema: item.schema || a.schema || null }));
+    }
+    const total = tables.length;
+    if (total > MAX_RESCAN_TABLES) {
+      throw new Error(`这个库有 ${total} 张表，超过一次扫描 ${MAX_RESCAN_TABLES} 张的上限。`
+        + '请改为在时光机里逐张表点「重新扫描」，或先缩小到具体的模式。');
+    }
+    let changed = 0;
+    let added = 0;
+    let scanned = 0;
+    const failures = [];
+    for (const item of tables) {
+      scanned++;
+      try {
+        const info = await adapter.tableInfo(a.db, item.schema, item.name);
+        const result = schemaHistory.observe({
+          connId: a.connId, connName, db: a.db, schema: item.schema || null,
+          table: item.name, dialect: adapter.dialect,
+        }, ddl.infoToModel(info, item.name, adapter.dialect));
+        if (result.changed) { changed++; if (result.first) added++; }
+      } catch (error) {
+        // 读不动的表（权限不足、正被锁）不该让整次扫描失败
+        failures.push({ table: item.name, error: (error && error.message) || String(error) });
+      }
+      try {
+        event.sender.send('schema:progress', {
+          token: a.token, done: scanned, total, table: item.name,
+        });
+      } catch (e) { /* 窗口可能已经关掉 */ }
+    }
+    return { scanned, changed, added, failures };
+  }, null, true);
+
+  h('schema:remove', (a) => schemaHistory.remove(a.id));
+  h('schema:clear', () => schemaHistory.clear());
   h('db:generateTableSql', (a) => generateTableSql(dbm.get(a.connId), a));
   h('db:tableData', (a) => {
     safety.assertWhereFragment(a.where);
@@ -609,6 +765,13 @@ function register(getWin) {
       }
       // 挂在第一个结果上带回渲染层，查询页据此显示「已存后悔药 / 未做快照（原因）」
       if (undoNote && results.length) results[0].undo = undoNote;
+
+      // 在查询编辑器里直接跑 DDL 是最常见的改结构方式，但跑完界面并不会去读表结构。
+      // 光靠「观察即记录」要等到下次打开设计表才补记，时间戳还会错。所以这里补一次。
+      // 显式事务里不做：未提交的 DDL 在另一个会话里读不到，甚至可能被锁住。
+      if (!firstErr && !inExplicitTxn && settings.get('schemaHistory') === 'on') {
+        await observeDdlTargets(a, adapter);
+      }
       history.add({
         connId: a.connId, connName, db: a.db || '', sql: a.sql,
         ms: Date.now() - t0, ok: !firstErr, error: firstErr && firstErr.error,
@@ -1000,7 +1163,10 @@ function register(getWin) {
   });
   h('design:model', async (a) => {
     const ad = dbm.get(a.connId);
-    return readDesignModel(ad, a);
+    const model = await readDesignModel(ad, a);
+    // 打开「设计表」是用户看表结构最常走的一条路，时光机的记录主要来自这里
+    observeSchema(a, ad, model);
+    return model;
   });
   h('design:ddl', (a) => {
     const ad = dbm.get(a.connId);

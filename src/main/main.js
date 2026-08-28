@@ -1054,6 +1054,42 @@ app.whenReady().then(async () => {
           && broadcastUi.group && broadcastUi.group.selectors[0].db === 'shop_*'
           && broadcastUi.afterDelete === false
           && /名称不能为空/.test(broadcastUi.badName);
+        // 结构时光机：冒烟环境没有真能连上的库，记不出历史，
+        // 这里守的是「界面能开、空状态说得清、开关生效、ID 挡得住路径穿越」。
+        // 加列→改类型→删列的回放由 selftest 覆盖，真实连接由 demo 覆盖。
+        const schemaUi = await win.webContents.executeJavaScript(`(async () => {
+          const out = {};
+          const listed = await window.api.schema.list({});
+          out.available = listed.available;
+          out.enabled = listed.enabled;
+          out.entries = (listed.entries || []).length;
+          const tab = await window.__test.openSchemaTimeline();
+          await new Promise((r) => setTimeout(r, 250));
+          const pane = tab.pane;
+          out.empty = (pane.querySelector('.undo-empty') || {}).textContent || '';
+          out.buttons = [...pane.querySelectorAll('.pane-toolbar .pbtn')].map((b) => b.textContent.trim());
+          out.usage = (pane.querySelector('.undo-usage') || {}).textContent || '';
+          // 空列表时「扫描整个库」必须可点——一张表都没记录过的时候正是最需要它的时候。
+          // 第一版把它的目标来源写成了从历史记录里取，结果空列表与空列表互相锁死。
+          const btn = (label) => [...pane.querySelectorAll('.pane-toolbar .pbtn')]
+            .find((b) => b.textContent.includes(label));
+          out.scanDbEnabled = !!btn('扫描整个库') && !btn('扫描整个库').disabled;
+          out.scanTableDisabled = !!btn('重新扫描此表') && btn('重新扫描此表').disabled;
+          let traversal = '';
+          try { await window.api.schema.timeline('../../key'); } catch (e) { traversal = e.message; }
+          out.traversal = traversal;
+          await tab.close(true);
+          return out;
+        })()`);
+        const schemaOk = schemaUi.available === true && schemaUi.enabled === true
+          && schemaUi.entries === 0
+          && /还没有记录到任何表结构/.test(schemaUi.empty)
+          && /查询编辑器里执行 DDL/.test(schemaUi.empty) && /设计表/.test(schemaUi.empty)
+          && schemaUi.buttons.some((b) => b.includes('全部清空'))
+          && /张表/.test(schemaUi.usage)
+          && /无效的快照 ID/.test(schemaUi.traversal)
+          && schemaUi.scanDbEnabled && schemaUi.scanTableDisabled;
+        console.log('[SMOKE][schema]', JSON.stringify(schemaUi));
         console.log('[SMOKE][broadcast]', JSON.stringify(broadcastUi));
         console.log('[SMOKE][federated]', JSON.stringify(federated));
         console.log('[SMOKE][treeState]', JSON.stringify(treeState));
@@ -1111,11 +1147,11 @@ app.whenReady().then(async () => {
           && !noAutoConnect.loading && noAutoConnect.connections >= 1;
         console.log('[SMOKE][noAutoConnect]',
           JSON.stringify({ ...noAutoConnect, ready: rebootReady, ms: Date.now() - rebootAt }));
-        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} federated=${federatedOk} broadcast=${broadcastOk} undo=${undoOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} noAutoConnect=${noAutoConnectOk} errors=${errors.length}`);
+        console.log(`[SMOKE] dom=${domOk} codemirror=${cmOk} title=${titleOk} menus=${menuOk} databaseIcons=${menuLayout.databaseIconsOk} form=${menuLayout.formBalanced} formMargins=${menuLayout.formLeft}/${menuLayout.formRight} passwordOption=${menuLayout.passwordOptionOk} experimental=${experimentalOk} workspace=${workspaceOk} grid=${gridOk} palette=${paletteOk} appearance=${appearanceOk} keymap=${keymapOk} audit=${auditOk} security=${securityOk} tasks=${taskOk} tabs=${tabsOk} extras=${extrasOk} treeState=${treeStateOk} federated=${federatedOk} broadcast=${broadcastOk} schema=${schemaOk} undo=${undoOk} whereLit=${whereLitOk} desShim=${desShimOk} passwordPrompt=${passwordPromptOk} failedSessionRetry=${failedSessionRetryPrompt} noAutoConnect=${noAutoConnectOk} errors=${errors.length}`);
         errors.forEach((m) => console.log('[SMOKE][console.error]', m));
         app.exit(domOk && cmOk && titleOk && menuOk && menuLayout.databaseIconsOk
           && menuLayout.formBalanced && menuLayout.passwordOptionOk && experimentalOk
-          && workspaceOk && treeStateOk && federatedOk && broadcastOk && undoOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt && noAutoConnectOk
+          && workspaceOk && treeStateOk && federatedOk && broadcastOk && schemaOk && undoOk && whereLitOk && desShimOk && passwordPromptOk && failedSessionRetryPrompt && noAutoConnectOk
           && errors.length === 0 ? 0 : 1);
       } catch (err) {
         console.error('[SMOKE] 失败:', err);

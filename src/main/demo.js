@@ -511,6 +511,217 @@ async function runDemo(createWindow) {
         ? 'PASS'
         : `FAIL(${JSON.stringify(bcPartial)})`);
   await shot('shot-32-broadcast.png');
+
+  // Schema 版本时光机：在真实连接上演一遍「加列 → 改类型 → 删列」，
+  // 然后看时光机能不能回放出中间版本的迁移与回滚脚本。
+  // 结构记录是「观察即记录」的，所以每改一次都要读一次结构才会记版。
+  // 第一次走完整的界面路径：打开「设计表」，确认这条路确实会触发记录。
+  // 之后各次直接调它背后的 design:model——设计器标签是按表复用的，
+  // 重复打开不会重新读结构，而这里要的是「每改一次就再看一眼」。
+  await ej(`window.__test.openDesigner(${JSON.stringify(saved.id)}, 'main', null, 'products')`);
+  await wait(600);
+  const schemaFromUi = await ej(`(async () => {
+    const r = await window.api.schema.list({});
+    return (r.entries || []).filter((x) => x.table === 'products').length;
+  })()`);
+  console.log('[DEMO] 结构时光机 界面路径触发记录:', schemaFromUi === 1 ? 'PASS' : `FAIL(${schemaFromUi})`);
+  // 不再手动"去看一眼"：DDL 执行成功后主进程会自己补一次观察。
+  // 这样这段演示验的就是「在查询编辑器里跑 DDL 会不会当场记一版」。
+  const runDdl = async (sql) => ej(`window.api.db.query(${JSON.stringify(saved.id)}, {
+    db: 'main', sql: ${JSON.stringify('')} + ${JSON.stringify(sql)},
+    maxRows: 10, requestId: 'demo-schema-${Math.random().toString(36).slice(2, 8)}',
+  })`);
+  await runDdl('ALTER TABLE products ADD COLUMN sku TEXT');             // 加列 → 当场记 v2
+  await runDdl('ALTER TABLE products RENAME TO products_tmp');
+  await runDdl('CREATE TABLE products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, price REAL, stock INTEGER, sku INTEGER)');
+  await runDdl('INSERT INTO products SELECT id, name, price, stock, NULL FROM products_tmp');
+  await runDdl('DROP TABLE products_tmp');                              // v3（sku 改成 INTEGER）
+  await runDdl('ALTER TABLE products DROP COLUMN sku');                 // 删列 → v4
+  await wait(300);
+
+  const schemaProbe = await ej(`(async () => {
+    const tab = await window.__test.openSchemaTimeline({
+      connId: ${JSON.stringify(saved.id)}, db: 'main', schema: null, table: 'products',
+    });
+    await new Promise((r) => setTimeout(r, 600));
+    const pane = tab.pane;
+    const nodes = [...pane.querySelectorAll('.schema-node')];
+    // 选 v1 → v3：跨「加列 + 改类型」两次变更，是真正要回放的场景。
+    // （v1 → v4 的净差异为零——sku 加了又删——那正好说明回放的是结构差异
+    //   而不是操作流水，但截图上是空的，不适合当门面。）
+    if (nodes.length) nodes[0].click();
+    await new Promise((r) => setTimeout(r, 400));
+    if (nodes[2]) nodes[2].dispatchEvent(new MouseEvent('click', { shiftKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 600));
+    const scripts = [...pane.querySelectorAll('.schema-script')];
+    return {
+      tables: pane.querySelectorAll('.schema-item').length,
+      versions: nodes.length,
+      changes: [...pane.querySelectorAll('.schema-change')].map((n) => n.textContent.trim()),
+      scriptTitles: scripts.map((s) => (s.querySelector('.schema-script-head b') || {}).textContent || ''),
+      migration: (scripts[0] && scripts[0].querySelector('.schema-script-body') || {}).textContent || '',
+      rollback: (scripts[1] && scripts[1].querySelector('.schema-script-body') || {}).textContent || '',
+      hint: (pane.querySelector('.schema-hint') || {}).textContent || '',
+    };
+  })()`);
+  console.log('[DEMO] 结构时光机:', JSON.stringify({
+    tables: schemaProbe.tables, versions: schemaProbe.versions,
+    changes: schemaProbe.changes, titles: schemaProbe.scriptTitles,
+    hint: schemaProbe.hint.slice(0, 24),
+  }));
+  console.log('[DEMO] 结构时光机 迁移:', JSON.stringify(schemaProbe.migration.slice(0, 160)));
+  console.log('[DEMO] 结构时光机 回滚:', JSON.stringify(schemaProbe.rollback.slice(0, 160)));
+  // v1 → v4：sku 加了又删，净效果为零，所以两个脚本都该是空的；
+  // 这恰好也验证了「回放的是结构差异，不是操作流水」
+  console.log('[DEMO] 结构时光机:',
+    schemaProbe.tables >= 1 && schemaProbe.versions === 4
+      && schemaProbe.scriptTitles.length === 2
+      && /迁移脚本（1 → 3）/.test(schemaProbe.scriptTitles[0])
+      && /回滚脚本（3 → 1）/.test(schemaProbe.scriptTitles[1])
+      && schemaProbe.changes.some((x) => /新增栏位 sku/.test(x))
+      && /ALTER TABLE/.test(schemaProbe.migration)
+      && /sku/.test(schemaProbe.rollback)
+      && /观察时间/.test(schemaProbe.hint)
+        ? 'PASS'
+        : `FAIL(${JSON.stringify(schemaProbe.scriptTitles)} changes=${JSON.stringify(schemaProbe.changes)})`);
+  // 探针跑完之后别的标签可能又被激活过，截图前把时光机重新拉到前台
+  const activeBeforeShot = await ej(`(async () => {
+    await window.__test.openSchemaTimeline();
+    await new Promise((r) => setTimeout(r, 250));
+    const pane = document.querySelector('.tabpane.active');
+    return {
+      tab: (document.querySelector('.tab.active .tab-title') || {}).textContent || null,
+      groups: pane ? pane.querySelectorAll('.schema-group').length : 0,
+      items: pane ? pane.querySelectorAll('.schema-item').length : 0,
+      firstGroup: pane && pane.querySelector('.schema-group')
+        ? pane.querySelector('.schema-group').textContent.trim() : '',
+      firstItem: pane && pane.querySelector('.schema-item')
+        ? pane.querySelector('.schema-item').textContent.trim() : '',
+      itemLines: pane && pane.querySelector('.schema-item')
+        ? Math.round(pane.querySelector('.schema-item').getBoundingClientRect().height) : 0,
+    };
+  })()`);
+  console.log('[DEMO] 时光机 列表布局:', JSON.stringify(activeBeforeShot));
+  // 多个连接都有记录时，默认范围必须收在「当前所在的连接」上，
+  // 而不是把别的库的表也列出来——那是最容易被当成 bug 的表现。
+  const scopeProbe = await ej(`(async () => {
+    await window.api.design.model(${JSON.stringify(memberConn.id)}, { db: 'main', schema: null, table: 'members' });
+    const { setActiveTarget } = await import('./js/state.js');
+    setActiveTarget({ connId: ${JSON.stringify(saved.id)}, db: 'main' }, 'demo-scope');
+    const tab = await window.__test.openSchemaTimeline();
+    tab._resetScope();
+    await tab._reload();
+    await new Promise((r) => setTimeout(r, 250));
+    const pane = tab.pane;
+    const sel = pane.querySelector('.schema-scope');
+    const names = () => [...pane.querySelectorAll('.schema-item-table')].map((n) => n.textContent);
+    const scoped = names();
+    const scopedLabel = sel.options[sel.selectedIndex].textContent;
+    sel.value = '';
+    sel.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 120));
+    const all = names();
+    const search = pane.querySelector('.schema-search');
+    search.value = 'members';
+    search.dispatchEvent(new Event('input'));
+    await new Promise((r) => setTimeout(r, 120));
+    const searched = names();
+    search.value = '';
+    search.dispatchEvent(new Event('input'));
+    return {
+      scopedLabel, scoped, all, searched,
+    };
+  })()`);
+  console.log('[DEMO] 时光机 范围过滤:', JSON.stringify(scopeProbe));
+  // 你在一个还没有任何记录的连接里打开时光机：它必须出现在范围下拉里、默认选中，
+  // 并且给一句能照着做的空状态——而不是把别的库的表摊开给你看。
+  const freshProbe = await ej(`(async () => {
+    // 只清掉会员库的记录，制造「当前连接 0 条、别的连接有记录」的局面
+    const list = await window.api.schema.list({});
+    for (const row of (list.entries || []).filter((x) => x.connId === ${JSON.stringify(memberConn.id)})) {
+      await window.api.schema.remove(row.id);
+    }
+    const { setActiveTarget } = await import('./js/state.js');
+    setActiveTarget({ connId: ${JSON.stringify(memberConn.id)}, db: 'main' }, 'demo-fresh');
+    const tab = await window.__test.openSchemaTimeline();
+    tab._resetScope();
+    await tab._reload();
+    await new Promise((r) => setTimeout(r, 250));
+    const pane = tab.pane;
+    const sel = pane.querySelector('.schema-scope');
+    return {
+      selected: sel.options[sel.selectedIndex].textContent,
+      hasOption: [...sel.options].some((o) => /会员库/.test(o.textContent)),
+      empty: (pane.querySelector('.undo-empty') || {}).textContent || '',
+      items: pane.querySelectorAll('.schema-item').length,
+    };
+  })()`);
+  console.log('[DEMO] 时光机 空连接:', JSON.stringify(freshProbe));
+  console.log('[DEMO] 时光机 空连接:',
+    /会员库（0）/.test(freshProbe.selected) && freshProbe.hasOption
+      && freshProbe.items === 0
+      && /会员库.*还没有记录过/.test(freshProbe.empty)
+      && /扫描整个库/.test(freshProbe.empty)
+        ? 'PASS' : 'FAIL(空连接应默认选中并给出可操作提示)');
+
+  console.log('[DEMO] 时光机 范围过滤:',
+    /演示连接/.test(scopeProbe.scopedLabel) && !scopeProbe.scoped.includes('members')
+      && scopeProbe.all.includes('members')
+      && scopeProbe.all.length > scopeProbe.scoped.length
+      && scopeProbe.searched.join(',') === 'members'
+        ? 'PASS' : 'FAIL(默认范围应只含当前连接)');
+  console.log('[DEMO] 时光机 列表布局:',
+    /结构时光机/.test(activeBeforeShot.tab || '') && activeBeforeShot.groups >= 1
+      && activeBeforeShot.items >= 1 && activeBeforeShot.itemLines <= 30
+        ? 'PASS' : 'FAIL(行高应为单行)');
+  await shot('shot-33-schema-timeline.png');
+
+  // 外部改动：模拟「在别的客户端（DBeaver）里加了一列」——绕开本工具直接改库。
+  // 时光机不主动扫是看不到的；扫一下就能收进来。这是「观察即记录」的补丁，
+  // 也是这个功能最容易被误解成 bug 的地方。
+  const sideAdapter = new SQLiteAdapter({ id: 'side', type: 'sqlite', file: dbFile });
+  await sideAdapter.connect();
+  await sideAdapter.exec('main', 'ALTER TABLE products ADD COLUMN outside_col TEXT');
+  await sideAdapter.close();
+  const externalProbe = await ej(`(async () => {
+    const before = await window.api.schema.list({});
+    const row = (before.entries || []).find((x) => x.table === 'products');
+    const versionsBefore = row.versions;
+    const scanned = await window.api.schema.rescan({
+      connId: row.connId, db: row.db, schema: row.schema, table: row.table,
+    });
+    const after = await window.api.schema.list({});
+    const now = (after.entries || []).find((x) => x.table === 'products');
+    const line = await window.api.schema.timeline(now.id);
+    const cmp = await window.api.schema.compare(now.id, line.versions.length - 2, line.versions.length - 1);
+    return {
+      versionsBefore, versionsAfter: now.versions, changed: scanned.changed,
+      changes: cmp.changes.map((c) => c.text), migration: cmp.migration.join(' '),
+    };
+  })()`);
+  console.log('[DEMO] 时光机 外部改动:', JSON.stringify(externalProbe));
+  console.log('[DEMO] 时光机 外部改动:',
+    externalProbe.versionsAfter === externalProbe.versionsBefore + 1
+      && externalProbe.changed === 1
+      && externalProbe.changes.some((x) => /outside_col/.test(x))
+      && /outside_col/.test(externalProbe.migration) ? 'PASS' : 'FAIL');
+
+  // 空列表自举：清空之后直接「扫描整个库」必须能把表发现回来。
+  // 第一版把它的目标来源写成从历史记录里取，空列表时会提示「先选中一张表」——
+  // 而那恰恰是最需要它的时候。
+  const bootstrapProbe = await ej(`(async () => {
+    const before = await window.api.schema.list({});
+    const row = (before.entries || []).find((x) => x.table === 'products');
+    const ctx = { connId: row.connId, db: row.db, schema: row.schema };
+    await window.api.schema.clear();
+    const emptied = (await window.api.schema.list({})).entries.length;
+    const scanned = await window.api.schema.rescan(ctx);
+    const after = (await window.api.schema.list({})).entries.length;
+    return { emptied, scanned: scanned.scanned, added: scanned.added, after };
+  })()`);
+  console.log('[DEMO] 时光机 空列表自举:', JSON.stringify(bootstrapProbe),
+    bootstrapProbe.emptied === 0 && bootstrapProbe.after >= 3
+      && bootstrapProbe.added === bootstrapProbe.after ? 'PASS' : 'FAIL');
   // 真的回滚，然后逐行比对
   const undoResult = await ej(`(async () => {
     const list = await window.api.undo.list();
@@ -589,7 +800,7 @@ async function runDemo(createWindow) {
   })()`);
   console.log('[DEMO] 选项对话框:', JSON.stringify(settingsOk));
   console.log('[DEMO] 选项对话框:',
-    settingsOk.groups === 6 && settingsOk.selects === 11 ? 'PASS' : 'FAIL(应=6组/11个下拉)');
+    settingsOk.groups === 7 && settingsOk.selects === 12 ? 'PASS' : 'FAIL(应=7组/12个下拉)');
   await shot('shot-23-settings.png');
   await ej('window.__test.closeMenus()');
   await wait(200);

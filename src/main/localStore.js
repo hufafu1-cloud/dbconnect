@@ -167,6 +167,37 @@ function put(bucket, meta, rows, quota) {
   return { id, bytes };
 }
 
+/**
+ * 按调用方指定的 id 写入（可覆盖）。
+ *
+ * put() 每次生成新 id，适合「一次操作存一份」的快照（后悔药）。
+ * 结构历史不一样：它是「每张表一条、不断往里追加版本」的，需要就地更新，
+ * 否则同一张表会散成几百个文件，光是列个时间线就要解上几百次密。
+ */
+function putAt(bucket, id, meta, rows, quota) {
+  assertAvailable();
+  assertId(id);
+  dataKey();
+  const dir = bucketDir(bucket);
+  fs.mkdirSync(dir, { recursive: true });
+  const rowsBuf = seal({ rows: rows || [] });
+  const metaBuf = seal({
+    ...(meta || {}),
+    id,
+    createdAt: Date.now(),
+    rowCount: Array.isArray(rows) ? rows.length : 0,
+  });
+  fs.writeFileSync(rowsPath(bucket, id), rowsBuf, { mode: 0o600 });
+  fs.writeFileSync(metaPath(bucket, id), metaBuf, { mode: 0o600 });
+  if (quota) prune(bucket, quota);
+  return { id, bytes: rowsBuf.length + metaBuf.length };
+}
+
+/** 某个 id 是否已存在 */
+function has(bucket, id) {
+  try { assertId(id); return fs.existsSync(metaPath(bucket, id)); } catch (e) { return false; }
+}
+
 /** 列出快照头（按时间倒序）。解不开的条目直接跳过并顺手删掉，不让它卡住整个列表。 */
 function list(bucket) {
   const dir = bucketDir(bucket);
@@ -250,6 +281,6 @@ function _resetForTests() {
 }
 
 module.exports = {
-  available, put, list, read, remove, clear, usage, prune,
+  available, put, putAt, has, list, read, remove, clear, usage, prune,
   rootDir, DEFAULT_QUOTA, _resetForTests,
 };

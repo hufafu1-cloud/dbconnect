@@ -102,6 +102,12 @@ export function openSettingsDialog() {
         ], current.impactPreview),
         t('执行 UPDATE / DELETE 前先用同样的 WHERE 统计受影响行数。高风险指：没有 WHERE、影响超过 1000 行、或无法安全预估。'))),
 
+    group(t('结构历史'),
+      row(t('记录表结构变化'),
+        select('schemaHistory', [['on', t('开启')], ['off', t('关闭')]], current.schemaHistory),
+        t('每次读到表结构就与上一版比对，不同就加密记一版，供「结构时光机」回放与生成迁移 / 回滚脚本。'
+          + '记的是本工具观察到的历史：改完又在下次查看前改回去的话，中间那一版不会有记录。'))),
+
     group(t('SQL 后悔药'),
       row(t('执行前保存原值'),
         select('undoSnapshot', [['on', t('开启')], ['off', t('关闭')]], current.undoSnapshot),

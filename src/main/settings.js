@@ -58,6 +58,10 @@ const SCHEMA = {
   undoMaxRows: { def: 50000, parse: numberIn(1000, 10000, 50000, 200000) },
   // 回滚中心保留份数，超出的自动清理
   undoKeep: { def: 50, parse: intRange(1, 200) },
+  // Schema 版本时光机：每次读到表结构就与上一版比对，不同就记一版。
+  // 与后悔药同理，默认开着——要用它的人正是没提前想到要打开它的人；
+  // 代价是每次打开表结构多算一次哈希，只有真的变了才写盘。
+  schemaHistory: { def: 'on', parse: stringIn('on', 'off') },
   tablePageSize: { def: 500, parse: numberIn(100, 500, 1000) },
 };
 

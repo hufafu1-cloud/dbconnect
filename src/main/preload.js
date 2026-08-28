@@ -86,6 +86,23 @@ contextBridge.exposeInMainWorld('api', {
       return () => ipcRenderer.removeListener('dba:progress', listener);
     },
   },
+  schema: {
+    list: (filter) => inv('schema:list', filter || {}),
+    timeline: (id) => inv('schema:timeline', { id }),
+    compare: (id, from, to) => inv('schema:compare', { id, from, to }),
+    exportScript: (id, from, to, format, direction) =>
+      inv('schema:export', { id, from, to, format, direction }),
+    rescan: (t) => inv('schema:rescan', t),
+    onProgress: (cb, token) => {
+      const listener = (_e, x) => {
+        if (!token || !x || x.token === token) cb(x);
+      };
+      ipcRenderer.on('schema:progress', listener);
+      return () => ipcRenderer.removeListener('schema:progress', listener);
+    },
+    remove: (id) => inv('schema:remove', { id }),
+    clear: () => inv('schema:clear'),
+  },
   bc: {
     expand: (selectors, databases) => inv('bc:expand', { selectors, databases }),
     run: (t) => inv('bc:run', t),
