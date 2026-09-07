@@ -362,6 +362,17 @@ function applyPaneLayout() {
   }
 }
 
+/** Keep keyboard/programmatic tab activation usable when the tab strip overflows. */
+function revealTab(tabEl) {
+  if (!tabEl || typeof tabEl.scrollIntoView !== 'function') return;
+  const reveal = () => tabEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(reveal);
+  } else {
+    reveal();
+  }
+}
+
 export function getSecondaryTabId() { return secondaryId; }
 
 /** 把某个标签页固定到右半边；传同一个 id 或 null 表示取消分屏 */
@@ -386,9 +397,43 @@ export function activate(id) {
   if (secondaryId === id) secondaryId = null;
   activeId = id;
   applyPaneLayout();
+  revealTab(t.tabEl);
   if (t.onShow) t.onShow();
   scheduleWorkspacePersist();
 }
+
+function setupTabbarNavigation() {
+  const bar = $('#tabbar');
+  const left = $('#tab-scroll-left');
+  const right = $('#tab-scroll-right');
+  const list = $('#tab-list');
+  if (!bar || !left || !right || !list) return;
+
+  const scroll = (direction) => {
+    const amount = Math.max(160, Math.round(bar.clientWidth * 0.6));
+    if (typeof bar.scrollBy === 'function') bar.scrollBy({ left: direction * amount, behavior: 'smooth' });
+    else bar.scrollLeft += direction * amount;
+  };
+  left.addEventListener('click', () => scroll(-1));
+  right.addEventListener('click', () => scroll(1));
+  bar.addEventListener('wheel', (e) => {
+    if (bar.scrollWidth <= bar.clientWidth || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    bar.scrollLeft += e.deltaY;
+  }, { passive: false });
+  list.addEventListener('click', () => {
+    const rect = list.getBoundingClientRect();
+    showMenu(rect.right, rect.bottom, orderedTabIds().map((id) => {
+      const tab = tabs.get(id);
+      return {
+        label: `${id === activeId ? '✓ ' : ''}${tab && tab.tabEl.classList.contains('dirty') ? '● ' : ''}${tab ? tab.title : id}`,
+        onClick: () => activate(id),
+      };
+    }));
+  });
+}
+
+setupTabbarNavigation();
 
 export async function closeTab(id, force) {
   const t = tabs.get(id);

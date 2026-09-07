@@ -83,6 +83,7 @@ export function openTableTab(target, openOpts) {
 
   const grid = new DataGrid(el('div'), {
     editable: true,
+    cellPreview: true,
     onSort: (list) => { sortList = list; page = 1; load(); },
     onLayoutChange: (layout) => { colLayout = layout; tab.touchRecovery(); },
     onFilter: (filters) => { colFilters = filters; page = 1; load(); },
@@ -109,6 +110,11 @@ export function openTableTab(target, openOpts) {
   const btnAdd = mkBtn('plus', '添加行', () => { if (canEdit()) grid.addNewRow(); });
   const btnDel = mkBtn('minus', '删除行', () => { if (canEdit()) { grid.deleteSelected(); updateDirty(); } });
   const btnView = mkBtn('objects', '表单视图', () => toggleView());
+  const btnCellPreview = mkBtn('info', '单元格查看器', () => {
+    const visible = grid.setCellPreviewVisible(!grid.isCellPreviewVisible());
+    btnCellPreview.classList.toggle('active', visible);
+  });
+  btnCellPreview.title = '显示或隐藏选中单元格的完整内容';
   const btnProfile = mkBtn('explain', '列画像', () => toggleProfile());
   btnProfile.title = '统计整表每列的空值率、去重数、取值分布与数值分布（按需触发，要扫一遍表）';
   // 列头筛选行：条件会下推成 SQL WHERE，不是只过滤当前页
@@ -132,6 +138,7 @@ export function openTableTab(target, openOpts) {
     btnAdd, btnDel, btnApply, btnDiscard,
     el('span', { class: 'sep' }),
     btnView,
+    btnCellPreview,
     btnProfile,
     mkBtn('importIcon', '导入', async () => {
       const { openImportWizard } = await import('./importWizard.js');

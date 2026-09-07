@@ -22,7 +22,14 @@
       </div>
       <div id="splitter-v" title="拖动调整宽度"></div>
       <div id="content">
-        <div id="tabbar"></div>
+        <div id="tabbar-wrap">
+          <div id="tabbar"></div>
+          <div id="tabbar-nav" aria-label="标签页导航">
+            <button id="tab-scroll-left" type="button" title="向左滚动标签页" aria-label="向左滚动标签页">‹</button>
+            <button id="tab-scroll-right" type="button" title="向右滚动标签页" aria-label="向右滚动标签页">›</button>
+            <button id="tab-list" type="button" title="全部标签页" aria-label="全部标签页">⋯</button>
+          </div>
+        </div>
         <div id="tabpanes"></div>
       </div>
     </div>

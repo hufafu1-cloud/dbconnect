@@ -12,6 +12,8 @@ const ipc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ipc.js'),
 const util = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'util.js'), 'utf8');
 const queryTab = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'queryTab.js'), 'utf8');
 const dbaTools = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'dbaTools.js'), 'utf8');
+const tabs = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'tabs.js'), 'utf8');
+const indexHtml = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
 
 function rule(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -19,6 +21,19 @@ function rule(selector) {
   assert.ok(match, `Missing CSS rule: ${selector}`);
   return match[1].replace(/\s+/g, ' ');
 }
+
+// An overflowing tab strip must scroll inside the content pane instead of
+// participating in flex shrink and collapsing the connection sidebar.
+assert.match(rule('#main'), /min-width:\s*0/);
+assert.match(rule('#sidebar'), /flex:\s*0\s+0\s+auto/);
+assert.match(rule('#content'), /flex:\s*1\s+1\s+0/);
+assert.match(rule('#tabbar'), /min-width:\s*0/);
+assert.match(rule('#tabbar'), /overflow-x:\s*auto/);
+assert.match(indexHtml, /id="tab-scroll-left"/);
+assert.match(indexHtml, /id="tab-scroll-right"/);
+assert.match(indexHtml, /id="tab-list"/);
+assert.match(tabs, /scrollIntoView\(\{ block:\s*'nearest', inline:\s*'nearest' \}\)/);
+assert.match(tabs, /setupTabbarNavigation\(\)/);
 
 const buttons = rule('.modal-foot .btn');
 assert.match(buttons, /flex-shrink:\s*0/);

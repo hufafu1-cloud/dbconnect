@@ -29,7 +29,7 @@ export function refreshAllGrids() {
   }
 }
 
-/** 多格式复制文本构建：tsv / tsvHeader / csv / markdown / insert */
+/** 多格式复制文本构建：tsv / tsvHeader / csv / markdown / insert / update */
 function buildCopyText(format, names, rows, ctx) {
   const plain = (v) => (v === null || v === undefined) ? ''
     : (typeof v === 'object' && v.__blob) ? '0x' + v.hex : String(v);
@@ -53,7 +53,6 @@ function buildCopyText(format, names, rows, ctx) {
       ...rows.map((r) => '| ' + r.map(cell).join(' | ') + ' |'),
     ].join('\r\n');
   }
-  // insert
   const qi = quoteIdentOf(ctx.connType);
   const quoteText = quoteLiteralOf(ctx.connType);
   const lit = (v) => {
@@ -64,6 +63,21 @@ function buildCopyText(format, names, rows, ctx) {
     return quoteText(v);
   };
   const T = qi(ctx.table || 'table_name');
+  if (format === 'update') {
+    const keyNames = (Array.isArray(ctx.pk) && ctx.pk.length ? ctx.pk : names)
+      .filter((name) => names.includes(name));
+    return rows.map((r) => {
+      const set = names.map((name, i) => `${qi(name)} = ${lit(r[i])}`).join(', ');
+      const where = keyNames.map((name) => {
+        const value = r[names.indexOf(name)];
+        return value === null || value === undefined
+          ? `${qi(name)} IS NULL`
+          : `${qi(name)} = ${lit(value)}`;
+      }).join(' AND ');
+      return `UPDATE ${T} SET ${set} WHERE ${where};`;
+    }).join('\r\n');
+  }
+  // insert
   return rows.map((r) =>
     `INSERT INTO ${T} (${names.map(qi).join(', ')}) VALUES (${r.map(lit).join(', ')});`).join('\r\n');
 }
@@ -100,6 +114,7 @@ export class DataGrid {
     this._bottomSpacer = null;
     this.wrap = el('div', { class: 'grid-wrap', tabindex: '0' });
     host.append(this.wrap);
+    if (opts.cellPreview) this._createCellPreview();
     this.wrap.addEventListener('scroll', () => {
       // 编辑器滚动或文本选择过程中不能误关闭浮动 textarea。
       if (!(this._editor && document.activeElement === this._editor.ta)) {
@@ -150,6 +165,7 @@ export class DataGrid {
     this.clearPending();
     this.selection.clear();
     this.focus = null;
+    this._refreshCellPreview();
     this.render();
   }
 
@@ -514,6 +530,7 @@ export class DataGrid {
     const old = this.tbody.querySelector('td.cell-focus');
     if (old) old.classList.remove('cell-focus');
     this.focus = { dr, c };
+    this._refreshCellPreview();
     // 目标行可能在渲染窗口之外（键盘导航翻到远处），先把它滚进来再取 DOM
     if (scroll) this._scrollRowIntoView(dr);
     else this._renderWindow();
@@ -524,6 +541,127 @@ export class DataGrid {
     }
     // 键盘导航时选中行跟随焦点（Navicat 行为）；鼠标多选场景由调用方跳过
     if (select && dr < this.rows.length) this._selectRow(dr, false, null);
+  }
+
+  _createCellPreview() {
+    this._previewMode = 'text';
+    this._previewTabs = new Map();
+    const tabs = el('div', { class: 'cell-preview-tabs' });
+    for (const [mode, label] of [['text', '文本'], ['hex', '十六进制'], ['image', '图像'], ['web', '网页']]) {
+      const button = el('button', { type: 'button', onClick: () => {
+        this._previewMode = mode;
+        this._refreshCellPreview();
+      } }, label);
+      this._previewTabs.set(mode, button);
+      tabs.append(button);
+    }
+    this._previewBody = el('div', { class: 'cell-preview-body' });
+    this._preview = el('div', { class: 'cell-preview', hidden: true }, tabs, this._previewBody);
+    this._previewSplitter = el('div', { class: 'cell-preview-splitter', title: '拖动调整值查看器高度', hidden: true });
+    this.host.append(this._previewSplitter, this._preview);
+    this._refreshCellPreview();
+
+    this._previewSplitter.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startHeight = this._preview.getBoundingClientRect().height;
+      const move = (ev) => {
+        const hostHeight = this.host.getBoundingClientRect().height;
+        const height = Math.min(Math.max(90, startHeight + startY - ev.clientY), Math.max(90, hostHeight - 90));
+        this._preview.style.flexBasis = `${height}px`;
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+  }
+
+  setCellPreviewVisible(visible) {
+    if (!this._preview || !this._previewSplitter) return false;
+    const show = !!visible;
+    this._preview.hidden = !show;
+    this._previewSplitter.hidden = !show;
+    if (show) this._refreshCellPreview();
+    this._renderWindow({ force: true });
+    return show;
+  }
+
+  isCellPreviewVisible() {
+    return !!this._preview && !this._preview.hidden;
+  }
+
+  _previewBytes(value) {
+    if (value && typeof value === 'object' && value.__blob && value.hex) {
+      const hex = String(value.hex).replace(/[^0-9a-f]/gi, '');
+      const bytes = new Uint8Array(Math.floor(hex.length / 2));
+      for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      return bytes;
+    }
+    return new TextEncoder().encode(value === null || value === undefined ? '' : String(value));
+  }
+
+  _refreshCellPreview() {
+    if (!this._previewBody) return;
+    if (this._previewObjectUrl) {
+      URL.revokeObjectURL(this._previewObjectUrl);
+      this._previewObjectUrl = null;
+    }
+    for (const [mode, button] of this._previewTabs) button.classList.toggle('active', mode === this._previewMode);
+    if (!this.focus) {
+      this._previewBody.replaceChildren(el('div', { class: 'cell-preview-empty' }, '选择单元格以查看完整内容'));
+      return;
+    }
+    const { r, isNew } = this._fromDisplay(this.focus.dr);
+    const raw = this._currentVal(r, this.focus.c, isNew);
+    const value = raw === undefined ? null : raw;
+    const text = value === null ? '(Null)' : cellText(value);
+    const column = this.columns[this.focus.c];
+    this._previewBody.replaceChildren();
+    if (this._previewMode === 'text') {
+      this._previewBody.append(el('pre', { class: 'cell-preview-text' }, text));
+      return;
+    }
+    if (this._previewMode === 'hex') {
+      const bytes = this._previewBytes(value);
+      const shown = bytes.subarray(0, 64 * 1024);
+      const lines = [];
+      for (let off = 0; off < shown.length; off += 16) {
+        const slice = shown.subarray(off, Math.min(off + 16, shown.length));
+        const hex = [...slice].map((x) => x.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ');
+        const ascii = [...slice].map((x) => x >= 32 && x < 127 ? String.fromCharCode(x) : '.').join('');
+        lines.push(`${off.toString(16).padStart(8, '0')}  ${hex}  ${ascii}`);
+      }
+      if (bytes.length > shown.length) lines.push(`… 共 ${bytes.length} 字节，仅显示前 ${shown.length} 字节`);
+      this._previewBody.append(el('pre', { class: 'cell-preview-hex' }, lines.join('\n')));
+      return;
+    }
+    if (this._previewMode === 'image') {
+      let source = typeof value === 'string' && /^data:image\//i.test(value) ? value : null;
+      if (!source && value && typeof value === 'object' && value.__blob) {
+        const bytes = this._previewBytes(value);
+        const mime = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 ? 'image/png'
+          : bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? 'image/jpeg'
+            : bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 ? 'image/gif'
+              : bytes[0] === 0x42 && bytes[1] === 0x4d ? 'image/bmp' : null;
+        if (mime) {
+          this._previewObjectUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+          source = this._previewObjectUrl;
+        }
+      }
+      this._previewBody.append(source
+        ? el('img', { class: 'cell-preview-image', src: source, alt: column ? column.name : '单元格图片' })
+        : el('div', { class: 'cell-preview-empty' }, '当前单元格不是可预览的图片数据'));
+      return;
+    }
+    const safeHtml = typeof value === 'string'
+      ? `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:">${value}`
+      : '';
+    this._previewBody.append(typeof value === 'string'
+      ? el('iframe', { class: 'cell-preview-web', sandbox: '', title: column ? `${column.name} 网页预览` : '网页预览', srcdoc: safeHtml })
+      : el('div', { class: 'cell-preview-empty' }, '当前单元格不是可预览的网页内容'));
   }
 
   _editFocused() {
@@ -646,7 +784,10 @@ export class DataGrid {
       e.preventDefault();
       const td = e.target.closest('td');
       if (!td || td.classList.contains('rownum')) return;
-      const ci = [...td.parentNode.children].indexOf(td) - 1;
+      // 右键未选中的行时按 Navicat 习惯把它切为当前行；右键已选中的行则
+      // 保留多选结果，让“复制为”作用于整个选区。
+      if (!isNew && !this.selection.has(r)) this._selectRow(r, false, null);
+      const ci = Number(td.dataset.c);
       this._cellMenu(e, r, ci, isNew);
     });
     return tr;
@@ -684,14 +825,9 @@ export class DataGrid {
       this._rangeAnchor = { dr, vi };
       this.clearRange();
       this._selectRow(r, isNew, e);
-      // Navicat 式操作：普通单击选中后立即进入编辑，用户可以直接输入；
-      // Ctrl/Shift 多选时只调整选择，不弹出编辑器。
+      // Navicat 式操作：普通单击只选中并预览；双击、F2 或直接输入才编辑。
       this._setFocus(isNew ? this.rows.length + r : r, i, { scroll: false, select: false });
-      if (!e.ctrlKey && !e.metaKey && !e.shiftKey && (this.editable || isNew)) {
-        this._beginEdit(td, r, i, isNew);
-      } else {
-        this.wrap.focus();
-      }
+      this.wrap.focus();
     });
     return td;
   }
@@ -830,6 +966,7 @@ export class DataGrid {
       const edited = isNew ? cur !== undefined : (this.cellEdits.get(r) && this.cellEdits.get(r).has(i));
       td.classList.toggle('cell-modified', !!edited);
     }
+    this._refreshCellPreview();
     if (this.opts.onChange) this.opts.onChange();
   }
 
@@ -865,11 +1002,19 @@ export class DataGrid {
         icon: 'link',
         onClick: () => this.opts.onJumpFk(fk, v),
       },
-      { label: '复制单元格', icon: 'copy', onClick: () => { navigator.clipboard.writeText(cellText(v)); } },
+      { label: '复制', icon: 'copy', onClick: () => this._copyRows('tsv', r) },
+      { label: '复制字段名称', icon: 'copy', onClick: () => this._copyColumnNames() },
+      {
+        label: '复制为', icon: 'copy', submenu: [
+          { label: 'Insert 语句', onClick: () => this._copyRows('insert', r) },
+          { label: 'Update 语句', onClick: () => this._copyRows('update', r) },
+          { sep: true },
+          { label: '制表符分隔值（数据）', onClick: () => this._copyRows('tsv', r) },
+          { label: '制表符分隔值（字段名称）', onClick: () => this._copyColumnNames() },
+          { label: '制表符分隔值（字段名称和数据）', onClick: () => this._copyRows('tsvHeader', r) },
+        ],
+      },
       { sep: true },
-      { label: '复制行（Tab 分隔）', icon: 'copy', onClick: () => this._copyRows('tsv', r) },
-      { label: '复制行（带表头，贴 Excel）', icon: 'copy', onClick: () => this._copyRows('tsvHeader', r) },
-      { label: '复制为 INSERT 语句', icon: 'copy', onClick: () => this._copyRows('insert', r) },
       { label: '复制为 CSV', icon: 'copy', onClick: () => this._copyRows('csv', r) },
       { label: '复制为 Markdown', icon: 'copy', onClick: () => this._copyRows('markdown', r) },
       { sep: true },
@@ -904,6 +1049,12 @@ export class DataGrid {
   }
 
   // ---------- 多格式复制 ----------
+  _copyColumnNames() {
+    const names = this.columns.map((c) => c.name);
+    navigator.clipboard.writeText(names.join('\t'));
+    toast.success(`已复制 ${names.length} 个字段名称`);
+  }
+
   _copyRows(format, fallbackRow) {
     const idxs = this.selection.size
       ? [...this.selection].sort((a, b) => a - b)
@@ -914,7 +1065,10 @@ export class DataGrid {
       const v = this._currentVal(r, i, false);
       return v === undefined ? null : v;
     }));
-    const text = buildCopyText(format, names, rows, this.opts.copyContext || {});
+    const text = buildCopyText(format, names, rows, {
+      ...(this.opts.copyContext || {}),
+      pk: this.pk,
+    });
     navigator.clipboard.writeText(text);
     toast.success(`已复制 ${rows.length} 行`);
   }
