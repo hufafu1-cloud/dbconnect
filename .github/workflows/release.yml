@@ -57,7 +57,7 @@ jobs:
           node scripts/install-app-deps.js
       - name: Linux desktop libraries
         if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 libsecret-1-0 libfuse2 xvfb
+        run: sudo apt-get update && sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 libsecret-1-0 libfuse2 xvfb dbus-x11 gnome-keyring
       - name: Native ARM64 deb packaging tool
         if: matrix.arch == 'arm64'
         run: |
@@ -76,9 +76,7 @@ jobs:
         timeout-minutes: 5
         run: |
           ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/test-release-runtime.js
-          # GitHub runner 没有 Secret Service；basic 仅用于 CI 临时用户目录，生产仍强制系统安全存储。
-          xvfb-run -a npm run selftest -- --password-store=basic
-          xvfb-run -a npm run smoke -- --password-store=basic
+          dbus-run-session -- bash -lc 'eval "$(gnome-keyring-daemon --start --components=secrets)"; xvfb-run -a npm run selftest; xvfb-run -a npm run smoke'
       - name: Build installers and update manifests
         run: |
           if [[ '${{ matrix.platform }}' == win ]]; then
