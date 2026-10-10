@@ -76,8 +76,9 @@ jobs:
         timeout-minutes: 5
         run: |
           ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/test-release-runtime.js
-          xvfb-run -a npm run selftest
-          xvfb-run -a npm run smoke
+          # GitHub runner 没有 Secret Service；basic 仅用于 CI 临时用户目录，生产仍强制系统安全存储。
+          xvfb-run -a npm run selftest -- --password-store=basic
+          xvfb-run -a npm run smoke -- --password-store=basic
       - name: Build installers and update manifests
         run: |
           if [[ '${{ matrix.platform }}' == win ]]; then
