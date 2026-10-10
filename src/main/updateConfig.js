@@ -19,7 +19,9 @@ function validateUpdateInfo(info, pkg = require('../../package.json'), platform 
   const allowed = platform === 'win32' && arch === 'x64'
     ? [getUpdateChannel(pkg) === 'win7' ? 'DBPanda-Win7-x64-Setup.exe' : 'DBPanda-Setup.exe']
     : platform === 'linux' && ['x64', 'arm64'].includes(arch)
-      ? [`DBPanda-Linux-${arch}.AppImage`, `DBPanda-Linux-${arch}.deb`] : [];
+      ? (arch === 'x64'
+        ? ['DBPanda-Linux-x86_64.AppImage', 'DBPanda-Linux-amd64.deb']
+        : ['DBPanda-Linux-arm64.AppImage', 'DBPanda-Linux-arm64.deb']) : [];
   const files = info && info.files;
   if (!allowed.length || !Array.isArray(files) || !files.length || files.some(f => !allowed.includes(f.url))) {
     throw new Error('更新清单与当前平台/发行版不匹配，已阻止下载，请检查更新源');

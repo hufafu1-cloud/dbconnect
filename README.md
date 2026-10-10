@@ -39,7 +39,7 @@ Greenplum、Oracle、达梦 DM、OceanBase（MySQL 模式 / Oracle 模式·实�
 |---|---|---|
 | Windows 10/11 x64 | [标准版 EXE](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip) |
 | Windows 7 SP1 / 8.1 x64（遗留兼容版） | [兼容版 EXE](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.exe) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.zip) |
-| Linux x64（包括部分 UOS/麒麟） | [DEB](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-x64.deb) | [AppImage](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-x64.AppImage) |
+| Linux x64（包括部分 UOS/麒麟） | [DEB](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-amd64.deb) | [AppImage](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-x86_64.AppImage) |
 | Linux ARM64（包括部分 UOS/麒麟） | [DEB](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.deb) | [AppImage](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.AppImage) |
 
 Win7 版使用已停止安全维护的 Electron 22，不建议用于联网敏感环境。Linux 包按 CPU 架构区分，**不等于信创认证或所有发行版兼容**，不支持龙芯 LoongArch/MIPS；非 Debian 系统优先试 AppImage。首次上线前仍需目标系统实机验收。

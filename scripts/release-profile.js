@@ -5,7 +5,7 @@ const root = path.join(__dirname, '..');
 const profiles = {
   'windows-x64': { platform: 'win32', arch: 'x64', channel: 'latest', files: ['DBPanda-Setup.exe', 'DBPanda-Setup.zip', 'DBPanda-Setup.exe.blockmap', 'latest.yml'] },
   'win7-x64': { platform: 'win32', arch: 'x64', channel: 'win7', files: ['DBPanda-Win7-x64-Setup.exe', 'DBPanda-Win7-x64-Setup.zip', 'DBPanda-Win7-x64-Setup.exe.blockmap', 'win7.yml'] },
-  'linux-x64': { platform: 'linux', arch: 'x64', channel: 'latest', files: ['DBPanda-Linux-x64.AppImage', 'DBPanda-Linux-x64.deb', 'latest-linux.yml'] },
+  'linux-x64': { platform: 'linux', arch: 'x64', channel: 'latest', files: ['DBPanda-Linux-x86_64.AppImage', 'DBPanda-Linux-amd64.deb', 'latest-linux.yml'] },
   'linux-arm64': { platform: 'linux', arch: 'arm64', channel: 'latest', files: ['DBPanda-Linux-arm64.AppImage', 'DBPanda-Linux-arm64.deb', 'latest-linux-arm64.yml'] },
 };
 function prepare(id, version) {

@@ -134,8 +134,8 @@ jobs:
             release/DBPanda-Win7-x64-Setup.exe
             release/DBPanda-Win7-x64-Setup.zip
             release/DBPanda-Win7-x64-Setup.exe.blockmap
-            release/DBPanda-Linux-x64.AppImage
-            release/DBPanda-Linux-x64.deb
+            release/DBPanda-Linux-x86_64.AppImage
+            release/DBPanda-Linux-amd64.deb
             release/DBPanda-Linux-arm64.AppImage
             release/DBPanda-Linux-arm64.deb
             release/latest.yml
