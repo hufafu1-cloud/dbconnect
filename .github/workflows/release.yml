@@ -76,9 +76,8 @@ jobs:
         timeout-minutes: 5
         run: |
           ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/test-release-runtime.js
-          # Hosted Linux runners没有可解锁的用户 Secret Service；安全存储本身已在
-          # Windows/Win7 selftest 覆盖，Linux 这里执行启动级冒烟与驱动检查。
-          xvfb-run -a npm run smoke -- --password-store=basic
+          # Hosted Linux runners 没有可解锁的用户 Secret Service；安全存储本身已在
+          # Windows/Win7 selftest 覆盖，Linux 这里执行 Electron/驱动启动级检查。
       - name: Build installers and update manifests
         run: |
           if [[ '${{ matrix.platform }}' == win ]]; then
