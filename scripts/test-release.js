@@ -54,6 +54,8 @@ try {
   assert.deepEqual(lock.packages[''].dependencies, legacy.dependencies);
   assert.deepEqual(lock.packages[''].devDependencies, legacy.devDependencies);
   assert.equal(legacy.devDependencies.electron, '22.3.27');
+  assert.equal(legacy.dependencies['call-bind-apply-helpers'], '1.0.2');
+  assert(lock.packages['node_modules/call-bind-apply-helpers'], 'Legacy lock must contain call-bind-apply-helpers');
   for (const [name, dep] of Object.entries(lock.packages)) {
     assert(!dep.link, `Unexpected local dependency: ${name}`);
     if (name && !dep.dev && dep.engines && dep.engines.node) {
