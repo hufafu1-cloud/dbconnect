@@ -11,7 +11,8 @@ const isDemo = process.argv.includes('--demo');
 
 // 测试/演示模式使用临时用户数据目录，避免污染真实配置
 if (isSmoke || isSelfTest || isDemo) {
-  app.setPath('userData', path.join(os.tmpdir(), 'dbpanda-test-' + process.pid));
+  // PID 会被系统复用；多运行时回归不能读到上次测试留下的备份/配置。
+  app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'dbpanda-test-')));
 } else {
   // 将 Datavia / DBConnect 的本地配置一次性迁移到 DBPanda，避免已存连接“丢失”
   migrateOldData();

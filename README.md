@@ -33,16 +33,21 @@ Greenplum、Oracle、达梦 DM、OceanBase（MySQL 模式 / Oracle 模式·实�
 
 ## 下载
 
-下载链接是固定的，不随版本变化，永远指向最新发布版：
+以下为固定下载入口；新增的 Win7/Linux 文件在首次多平台版本发布后生效，当前是否可用以 [Releases 附件](https://github.com/hufafu1-cloud/dbconnect/releases/latest)为准。
 
-| | 直连 GitHub | 国内加速（gh-proxy） |
+| 运行环境 | 安装包 | 便携包 |
 |---|---|---|
-| 安装包（推荐） | https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe | https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe |
-| 免安装 ZIP | https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip | https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip |
+| Windows 10/11 x64 | [标准版 EXE](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip) |
+| Windows 7 SP1 / 8.1 x64（遗留兼容版） | [兼容版 EXE](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.exe) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.zip) |
+| Linux x64（包括部分 UOS/麒麟） | [DEB](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-x64.deb) | [AppImage](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-x64.AppImage) |
+| Linux ARM64（包括部分 UOS/麒麟） | [DEB](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.deb) | [AppImage](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.AppImage) |
 
-发布产物的文件名不带版本号，因此这两个链接发新版后**无需修改**。
-具体版本看 [Releases 页面](https://github.com/hufafu1-cloud/dbconnect/releases/latest)
-的 tag，或安装包属性里的文件版本号。应用内的「检查更新」走的是同一套地址。
+Win7 版使用已停止安全维护的 Electron 22，不建议用于联网敏感环境。Linux 包按 CPU 架构区分，**不等于信创认证或所有发行版兼容**，不支持龙芯 LoongArch/MIPS；非 Debian 系统优先试 AppImage。首次上线前仍需目标系统实机验收。
+
+应用内检查更新自动区分标准版、Win7 版、Linux x64/ARM64，不跨通道升级。
+Windows ZIP 升级会启动安装程序，需纯便携使用时请手动替换 ZIP；AppImage 需有自身文件及目录写权限，DEB 安装更新需系统授权。
+不再默认依赖第三方 gh-proxy。国内/内网部署可配置自有 HTTPS 镜像，参见[多平台发布与更新说明](docs/releasing.md)。
+每次发布还提供 `downloads.json` 下载索引和 `SHA256SUMS.txt` 校验文件。
 
 ## 功能特性
 

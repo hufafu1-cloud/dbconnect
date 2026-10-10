@@ -1,12 +1,13 @@
 const { app } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { CancellationToken } = require('builder-util-runtime');
-const { getFeedOptions, isConfigured } = require('./updateConfig');
+const { getFeedOptions, isConfigured, validateUpdateInfo } = require('./updateConfig');
 
 let targetWindow = null;
 let configured = false;
 let downloadToken = null;
 let downloadedReady = false;
+let compatibleUpdate = false;
 
 function updateInfo(info) {
   if (!info) return null;
@@ -55,7 +56,11 @@ function setup(win) {
   autoUpdater.removeAllListeners('update-cancelled');
   autoUpdater.removeAllListeners('error');
   autoUpdater.on('checking-for-update', () => send('checking'));
-  autoUpdater.on('update-available', (info) => send('available', { info: updateInfo(info) }));
+  autoUpdater.on('update-available', (info) => {
+    validateUpdateInfo(info);
+    compatibleUpdate = true;
+    send('available', { info: updateInfo(info) });
+  });
   autoUpdater.on('update-not-available', (info) => send('not-available', { info: updateInfo(info) }));
   autoUpdater.on('download-progress', (progress) => send('progress', {
     percent: Number(progress.percent || 0),
@@ -74,13 +79,16 @@ function setup(win) {
 
 async function check() {
   if (!configured) return { configured: false, updateAvailable: false };
+  compatibleUpdate = false;
   const result = await autoUpdater.checkForUpdates();
   const info = result && result.updateInfo;
-  return { configured: true, updateAvailable: !!info && info.version !== app.getVersion(), info: updateInfo(info) };
+  // 不把回滚版本误报为更新；以 updater 的 semver 判定为准。
+  return { configured: true, updateAvailable: !!(result && result.isUpdateAvailable), info: updateInfo(info) };
 }
 
 async function download() {
   if (!configured) return { configured: false };
+  if (!compatibleUpdate) throw new Error('请先检查并确认与当前平台匹配的更新');
   if (downloadToken) return { configured: true, downloading: true };
   downloadedReady = false;
   downloadToken = new CancellationToken();

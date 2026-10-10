@@ -1,108 +1,150 @@
 name: Release
-
 on:
   push:
-    tags:
-      - "v*"
-
+    tags: ['v*']
+  workflow_dispatch:
 permissions:
-  contents: write
-
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  release:
-    name: Build Windows and publish GitHub Release
-    runs-on: windows-latest
-    timeout-minutes: 45
-    env:
-      # CI 无代码签名证书时跳过自动发现，避免 electron-builder 卡在签名步骤
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Resolve version from tag
-        id: version
+  build:
+    name: Build ${{ matrix.profile }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
         shell: bash
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Tag must look like v1.2.3 (got: $TAG)"
-            exit 1
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if [[ "$VERSION" == *-* ]]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { profile: windows-x64, runner: windows-2022, platform: win, arch: x64 }
+          - { profile: win7-x64, runner: windows-2022, platform: win, arch: x64 }
+          - { profile: linux-x64, runner: ubuntu-22.04, platform: linux, arch: x64 }
+          - { profile: linux-arm64, runner: ubuntu-22.04-arm, platform: linux, arch: arm64 }
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+      ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+      npm_config_electron_mirror: https://github.com/electron/electron/releases/download/
+      npm_config_electron_builder_binaries_mirror: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22.17.0
           cache: npm
-
-      - name: Use locked npm version
+          cache-dependency-path: |
+            package-lock.json
+            build/win7/package-lock.json
+      - name: Use locked npm
         run: npm install --global npm@9.6.5
-
-      - name: Sync package.json version with tag
+      - name: Prepare isolated profile
         shell: bash
         run: |
-          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Rebuild native Electron dependencies
-        run: npx --no-install electron-builder install-app-deps
-
-      - name: Build Windows installer and portable zip
-        run: npm run dist
-
-      - name: Verify release artifacts
-        run: npm run release:verify
-
-      - name: Collect release notes
-        id: notes
-        shell: pwsh
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then VERSION="${GITHUB_REF_NAME#v}"; fi
+          node scripts/release-profile.js '${{ matrix.profile }}' "$VERSION"
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
+      - name: Validate release configuration
+        run: npm run release:test
+      - name: Install Electron and rebuild native modules
         run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $tag = "${{ steps.version.outputs.tag }}"
-          $body = "DBPanda $tag"
-          $path = "release-notes.md"
-          if (Test-Path -LiteralPath $path) {
-            $raw = Get-Content -Raw -LiteralPath $path
-            $pattern = "(?ms)^##\s+v$([regex]::Escape($version))\s*[^\r\n]*\r?\n(.*?)(?=^##\s+v|\z)"
-            $match = [regex]::Match($raw, $pattern)
-            if ($match.Success -and -not [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) {
-              $body = $match.Groups[1].Value.Trim()
-            }
-          }
-          $delimiter = "RELEASE_NOTES_" + [guid]::NewGuid().ToString("N")
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "body<<$delimiter"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value $body
-          Add-Content -Path $env:GITHUB_OUTPUT -Value $delimiter
-
-      - name: Upload GitHub Release
-        uses: softprops/action-gh-release@v2
+          node node_modules/electron/install.js
+          node scripts/install-app-deps.js
+      - name: Linux desktop libraries
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 libsecret-1-0 libfuse2 xvfb
+      - name: Native ARM64 deb packaging tool
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get install -y ruby ruby-dev build-essential
+          sudo gem install fpm -v 1.15.1 --no-document
+          echo 'USE_SYSTEM_FPM=true' >> "$GITHUB_ENV"
+      - name: Verify runtime on Windows runner
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        run: |
+          ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/test-release-runtime.js
+          npm run selftest
+          npm run smoke
+      - name: Verify runtime on Linux runner
+        if: matrix.platform == 'linux'
+        timeout-minutes: 5
+        run: |
+          ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/test-release-runtime.js
+          xvfb-run -a npm run selftest
+          xvfb-run -a npm run smoke
+      - name: Build installers and update manifests
+        run: |
+          if [[ '${{ matrix.platform }}' == win ]]; then
+            npx --no-install electron-builder --config build/electron-builder.cjs --win nsis zip --x64 --publish never
+          else
+            npx --no-install electron-builder --config build/electron-builder.cjs --linux --${{ matrix.arch }} --publish never
+          fi
+      - name: Validate hashes and stage distributable assets
+        run: node scripts/release-assets.js stage ${{ matrix.profile }}
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: DBPanda ${{ steps.version.outputs.tag }}
-          body: ${{ steps.notes.outputs.body }}
-          draft: false
-          prerelease: ${{ steps.version.outputs.prerelease }}
-          # exe/zip 已由 verify 保证；blockmap / latest.yml 有则上传，没有不失败
-          fail_on_unmatched_files: false
-          # 产物名不带版本号，对外只需要一个固定链接：
-          #   https://github.com/<owner>/<repo>/releases/latest/download/DBPanda-Setup.exe
-          # 版本从 tag 与安装包自身的文件版本号看，不靠文件名区分。
+          name: release-${{ matrix.profile }}
+          path: release/staged/*
+          if-no-files-found: error
+  publish:
+    name: Publish complete release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+      - name: Verify matrix and generate download index
+        run: node scripts/release-assets.js publish "${GITHUB_REF_NAME#v}"
+      - name: Refuse overwriting an already published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft > release/state.json; then
+            node -e "if (!require('./release/state.json').isDraft) throw Error('Published releases are immutable; use a new version tag')"
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DBPanda ${{ github.ref_name }}
+          body_path: release/RELEASE-NOTES.md
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: true
           files: |
             release/DBPanda-Setup.exe
             release/DBPanda-Setup.zip
             release/DBPanda-Setup.exe.blockmap
+            release/DBPanda-Win7-x64-Setup.exe
+            release/DBPanda-Win7-x64-Setup.zip
+            release/DBPanda-Win7-x64-Setup.exe.blockmap
+            release/DBPanda-Linux-x64.AppImage
+            release/DBPanda-Linux-x64.deb
+            release/DBPanda-Linux-arm64.AppImage
+            release/DBPanda-Linux-arm64.deb
             release/latest.yml
+            release/win7.yml
+            release/latest-linux.yml
+            release/latest-linux-arm64.yml
+            release/SHA256SUMS.txt
+            release/downloads.json
+      - name: Make the fully uploaded release visible
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

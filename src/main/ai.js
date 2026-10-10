@@ -1,5 +1,6 @@
 // AI 客户端：对接 OpenAI 兼容的大模型接口（DeepSeek / OpenAI / Moonshot / 通义 / 智谱 / Ollama 等）
-// 仅用全局 fetch（Electron 主进程自带 undici）。
+// Electron 22 / Node 16 的兼容包通过 node-fetch 的异步可迭代响应体提供流式接口。
+const fetch = globalThis.fetch || ((...args) => require('node-fetch')(...args));
 
 /** 由 baseUrl 推导 chat/completions 地址 */
 function buildUrl(baseUrl) {

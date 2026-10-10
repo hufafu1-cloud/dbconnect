@@ -6,6 +6,7 @@
   "main": "src/main/main.js",
   "author": "DBPanda",
   "license": "MIT",
+  "homepage": "https://github.com/hufafu1-cloud/dbconnect",
   "packageManager": "npm@9.6.5",
   "scripts": {
     "start": "electron .",
@@ -16,7 +17,8 @@
     "types:test": "node scripts/test-db-types.js",
     "workspace:test": "node scripts/test-workspace.js",
     "core:test": "node scripts/test-step1.js",
-    "verify": "npm run brand:test && npm run ui:test && npm run workflow:test && npm run types:test && npm run workspace:test && npm run core:test && npm run selftest && npm run smoke",
+    "verify": "npm run brand:test && npm run ui:test && npm run workflow:test && npm run release:test && npm run types:test && npm run workspace:test && npm run core:test && npm run selftest && npm run smoke",
+    "release:test": "node scripts/test-release.js",
     "integration": "node scripts/integration-db.js",
     "demo": "electron . --demo",
     "icon": "node scripts/gen-icon.js",
@@ -83,7 +85,7 @@
     },
     "publish": {
       "provider": "generic",
-      "url": "https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/"
+      "url": "https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/"
     },
     "releaseInfo": {
       "releaseNotesFile": "release-notes.md"
