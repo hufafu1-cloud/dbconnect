@@ -67,10 +67,11 @@
       "!**/node_modules/oracledb/build{,/**/*}"
     ],
     "npmRebuild": false,
-    "asarUnpack": [
-      "**/node_modules/better-sqlite3/**",
-      "**/node_modules/sql.js/dist/**"
-    ],
+  "asarUnpack": [
+    "**/node_modules/better-sqlite3/**",
+    "**/node_modules/sql.js/dist/**",
+    "**/node_modules/call-bind-apply-helpers/**"
+  ],
     "win": {
       "target": [
         {
