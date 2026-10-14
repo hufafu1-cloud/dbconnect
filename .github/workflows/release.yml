@@ -24,7 +24,7 @@ jobs:
           - { profile: win7-x64, runner: windows-2022, platform: win, arch: x64 }
           - { profile: linux-x64, runner: ubuntu-22.04, platform: linux, arch: x64 }
           - { profile: linux-arm64, runner: ubuntu-22.04-arm, platform: linux, arch: arm64 }
-          - { profile: macos-x64, runner: macos-13, platform: mac, arch: x64 }
+          - { profile: macos-x64, runner: macos-14, platform: mac, arch: x64 }
           - { profile: macos-arm64, runner: macos-14, platform: mac, arch: arm64 }
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'

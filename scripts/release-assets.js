@@ -20,9 +20,12 @@ function validate(dir, id, version) {
   // Windows ZIP 和 macOS DMG 是下载分发包，不要求出现在 updater files 数组。
   const expected = profile.files.filter(n => /\.(exe|AppImage|deb)$/.test(n)
     || (profile.platform === 'darwin' && n.endsWith('.zip')));
+  const allowed = profile.platform === 'darwin'
+    ? profile.files.filter(n => /\.(dmg|zip)$/.test(n))
+    : expected;
   const entries = manifest.files || [];
   for (const entry of entries) {
-    if (!expected.includes(entry.url)) throw new Error(`Wrong channel asset: ${entry.url}`);
+    if (!allowed.includes(entry.url)) throw new Error(`Wrong channel asset: ${entry.url}`);
     const file = path.join(dir, entry.url);
     if (entry.sha512 !== digest(file, 'sha512', 'base64') || entry.size !== fs.statSync(file).size) {
       throw new Error(`Invalid asset hash/size: ${entry.url}`);
