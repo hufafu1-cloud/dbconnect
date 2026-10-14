@@ -11,7 +11,9 @@ const DEFAULT_PROXY_PREFIX = '';
 
 // 构建时写入发行变体；不能根据当前 OS 自动换通道（兼容版也可能运行于 Win10）。
 function getUpdateChannel(pkg = require('../../package.json')) {
-  return pkg.releaseVariant === 'win7-x64' ? 'win7' : 'latest';
+  if (pkg.releaseVariant === 'win7-x64') return 'win7';
+  if (pkg.releaseVariant === 'macos-arm64') return 'latest-arm64';
+  return 'latest';
 }
 
 // 即使镜像误放了清单，也不能把标准版安装到 Win7 或跨架构安装。

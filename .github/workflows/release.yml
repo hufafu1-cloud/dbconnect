@@ -155,7 +155,7 @@ jobs:
             release/DBPanda-Mac-arm64.dmg
             release/DBPanda-Mac-arm64.zip
             release/latest-mac.yml
-            release/latest-mac-arm64.yml
+            release/latest-arm64-mac.yml
             release/SHA256SUMS.txt
             release/downloads.json
       - name: Make the fully uploaded release visible

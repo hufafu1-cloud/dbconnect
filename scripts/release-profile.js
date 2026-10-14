@@ -8,7 +8,7 @@ const profiles = {
   'linux-x64': { platform: 'linux', arch: 'x64', channel: 'latest', files: ['DBPanda-Linux-x86_64.AppImage', 'DBPanda-Linux-amd64.deb', 'latest-linux.yml'] },
   'linux-arm64': { platform: 'linux', arch: 'arm64', channel: 'latest', files: ['DBPanda-Linux-arm64.AppImage', 'DBPanda-Linux-arm64.deb', 'latest-linux-arm64.yml'] },
   'macos-x64': { platform: 'darwin', arch: 'x64', channel: 'latest', files: ['DBPanda-Mac-x64.dmg', 'DBPanda-Mac-x64.zip', 'latest-mac.yml'] },
-  'macos-arm64': { platform: 'darwin', arch: 'arm64', channel: 'latest', files: ['DBPanda-Mac-arm64.dmg', 'DBPanda-Mac-arm64.zip', 'latest-mac-arm64.yml'] },
+  'macos-arm64': { platform: 'darwin', arch: 'arm64', channel: 'latest-arm64', files: ['DBPanda-Mac-arm64.dmg', 'DBPanda-Mac-arm64.zip', 'latest-arm64-mac.yml'] },
 };
 function prepare(id, version) {
   if (!profiles[id] || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected profile and stable x.y.z version');
