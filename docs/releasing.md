@@ -10,6 +10,8 @@
 | win7-x64 | Electron 22.3.27 / 独立锁文件 | win7.yml |
 | linux-x64 | 标准运行时 | latest-linux.yml |
 | linux-arm64 | 标准运行时 | latest-linux-arm64.yml |
+| macos-x64 | macOS Intel | latest-mac.yml |
+| macos-arm64 | macOS Apple Silicon | latest-mac-arm64.yml |
 
 所有任务使用同一份业务代码。CI 在独立 checkout 中写入 `releaseVariant` 和版本号，Win7 替换为 `build/win7` 的依赖树，然后 `npm ci`、重建原生模块、执行 selftest/smoke、打包并校验。ARM64 原生构建避免 SQLite 跨架构 ABI 混用；DEB 使用原生 fpm。
 

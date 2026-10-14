@@ -16,7 +16,11 @@ function getUpdateChannel(pkg = require('../../package.json')) {
 
 // 即使镜像误放了清单，也不能把标准版安装到 Win7 或跨架构安装。
 function validateUpdateInfo(info, pkg = require('../../package.json'), platform = process.platform, arch = process.arch) {
-  const allowed = platform === 'win32' && arch === 'x64'
+  const allowed = platform === 'darwin' && arch === 'x64'
+    ? ['DBPanda-Mac-x64.dmg', 'DBPanda-Mac-x64.zip']
+    : platform === 'darwin' && arch === 'arm64'
+      ? ['DBPanda-Mac-arm64.dmg', 'DBPanda-Mac-arm64.zip']
+      : platform === 'win32' && arch === 'x64'
     ? [getUpdateChannel(pkg) === 'win7' ? 'DBPanda-Win7-x64-Setup.exe' : 'DBPanda-Setup.exe']
     : platform === 'linux' && ['x64', 'arm64'].includes(arch)
       ? (arch === 'x64'

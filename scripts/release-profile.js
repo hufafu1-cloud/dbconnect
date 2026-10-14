@@ -7,6 +7,8 @@ const profiles = {
   'win7-x64': { platform: 'win32', arch: 'x64', channel: 'win7', files: ['DBPanda-Win7-x64-Setup.exe', 'DBPanda-Win7-x64-Setup.zip', 'DBPanda-Win7-x64-Setup.exe.blockmap', 'win7.yml'] },
   'linux-x64': { platform: 'linux', arch: 'x64', channel: 'latest', files: ['DBPanda-Linux-x86_64.AppImage', 'DBPanda-Linux-amd64.deb', 'latest-linux.yml'] },
   'linux-arm64': { platform: 'linux', arch: 'arm64', channel: 'latest', files: ['DBPanda-Linux-arm64.AppImage', 'DBPanda-Linux-arm64.deb', 'latest-linux-arm64.yml'] },
+  'macos-x64': { platform: 'darwin', arch: 'x64', channel: 'latest', files: ['DBPanda-Mac-x64.dmg', 'DBPanda-Mac-x64.zip', 'latest-mac.yml'] },
+  'macos-arm64': { platform: 'darwin', arch: 'arm64', channel: 'latest', files: ['DBPanda-Mac-arm64.dmg', 'DBPanda-Mac-arm64.zip', 'latest-mac-arm64.yml'] },
 };
 function prepare(id, version) {
   if (!profiles[id] || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected profile and stable x.y.z version');

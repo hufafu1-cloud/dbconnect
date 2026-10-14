@@ -24,6 +24,8 @@ jobs:
           - { profile: win7-x64, runner: windows-2022, platform: win, arch: x64 }
           - { profile: linux-x64, runner: ubuntu-22.04, platform: linux, arch: x64 }
           - { profile: linux-arm64, runner: ubuntu-22.04-arm, platform: linux, arch: arm64 }
+          - { profile: macos-x64, runner: macos-13, platform: mac, arch: x64 }
+          - { profile: macos-arm64, runner: macos-14, platform: mac, arch: arm64 }
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
@@ -78,12 +80,18 @@ jobs:
           ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/test-release-runtime.js
           # Hosted Linux runners 没有可解锁的用户 Secret Service；安全存储本身已在
           # Windows/Win7 selftest 覆盖，Linux 这里执行 Electron/驱动启动级检查。
+      - name: Verify runtime on macOS runner
+        if: matrix.platform == 'mac'
+        timeout-minutes: 5
+        run: ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/test-release-runtime.js
       - name: Build installers and update manifests
         run: |
           if [[ '${{ matrix.platform }}' == win ]]; then
             npx --no-install electron-builder --config build/electron-builder.cjs --win nsis zip --x64 --publish never
-          else
+          elif [[ '${{ matrix.platform }}' == linux ]]; then
             npx --no-install electron-builder --config build/electron-builder.cjs --linux --${{ matrix.arch }} --publish never
+          else
+            npx --no-install electron-builder --config build/electron-builder.cjs --mac --${{ matrix.arch }} --publish never
           fi
       - name: Validate hashes and stage distributable assets
         run: node scripts/release-assets.js stage ${{ matrix.profile }}
@@ -142,6 +150,12 @@ jobs:
             release/win7.yml
             release/latest-linux.yml
             release/latest-linux-arm64.yml
+            release/DBPanda-Mac-x64.dmg
+            release/DBPanda-Mac-x64.zip
+            release/DBPanda-Mac-arm64.dmg
+            release/DBPanda-Mac-arm64.zip
+            release/latest-mac.yml
+            release/latest-mac-arm64.yml
             release/SHA256SUMS.txt
             release/downloads.json
       - name: Make the fully uploaded release visible

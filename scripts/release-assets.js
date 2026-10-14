@@ -16,7 +16,10 @@ function validate(dir, id, version) {
   }
   const manifest = yaml.load(fs.readFileSync(path.join(dir, profile.files.find(n => n.endsWith('.yml'))), 'utf8'));
   if (manifest.version !== version) throw new Error(`Version mismatch: ${id}`);
-  const expected = profile.files.filter(n => /\.(exe|AppImage|deb)$/.test(n));
+  // updater 清单只引用可自动更新的主包：Windows EXE、Linux 包、macOS ZIP。
+  // Windows ZIP 和 macOS DMG 是下载分发包，不要求出现在 updater files 数组。
+  const expected = profile.files.filter(n => /\.(exe|AppImage|deb)$/.test(n)
+    || (profile.platform === 'darwin' && n.endsWith('.zip')));
   const entries = manifest.files || [];
   for (const entry of entries) {
     if (!expected.includes(entry.url)) throw new Error(`Wrong channel asset: ${entry.url}`);

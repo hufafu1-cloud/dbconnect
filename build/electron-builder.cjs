@@ -18,4 +18,10 @@ module.exports = {
     maintainer: 'DBPanda <hufafu1-cloud@users.noreply.github.com>',
     executableName: 'dbpanda',
   },
+  mac: {
+    target: ['dmg', 'zip'],
+    artifactName: 'DBPanda-Mac-${arch}.${ext}',
+    icon: 'assets/icon.png',
+    category: 'public.app-category.developer-tools',
+  },
 };

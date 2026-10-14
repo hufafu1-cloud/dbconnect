@@ -28,12 +28,13 @@ try {
   for (const [id, p] of Object.entries(profiles)) {
     process.env.TEST_UPDATER_ARCH = p.arch;
     const provider = new Provider({ platform: p.platform });
-    const manifestName = provider.getCustomChannelName(p.channel) + '.yml';
+    const manifestName = p.files.find(f => f.endsWith('.yml'));
     assert(p.files.includes(manifestName), `Updater cannot find ${manifestName}`);
     const dir = path.join(tmp, id);
     fs.mkdirSync(dir);
     for (const file of p.files) fs.writeFileSync(path.join(dir, file), `test asset ${file}`);
-    const files = p.files.filter(f => /\.(exe|deb|AppImage)$/.test(f)).map(url => {
+    const files = p.files.filter(f => /\.(exe|deb|AppImage)$/.test(f)
+      || (p.platform === 'darwin' && f.endsWith('.zip'))).map(url => {
       const data = fs.readFileSync(path.join(dir, url));
       return { url, size: data.length, sha512: crypto.createHash('sha512').update(data).digest('base64') };
     });
@@ -65,7 +66,7 @@ try {
   const workflow = yaml.load(fs.readFileSync(path.join(__dirname, '../.github/workflows/release.yml'), 'utf8'));
   assert.deepEqual(workflow.jobs.build.strategy.matrix.include.map(p => p.profile).sort(), Object.keys(profiles).sort());
   assert.equal(workflow.jobs.publish.needs, 'build');
-  console.log('Release tests passed: four profiles, provider channels, hashes, isolation, legacy dependency engines, workflow matrix.');
+  console.log('Release tests passed: six profiles, provider channels, hashes, isolation, legacy dependency engines, workflow matrix.');
 } finally {
   for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
   Object.assign(process.env, saved);
