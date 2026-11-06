@@ -99,12 +99,14 @@ jobs:
           node - <<'NODE'
           const asar = require('@electron/asar');
           const fs = require('fs');
+          const path = require('path');
           const archive = 'release/win-unpacked/resources/app.asar';
           if (!fs.existsSync(archive)) throw new Error(`Missing ${archive}`);
           // Read actual files, including their unpacked payload when applicable.
-          const pkg = JSON.parse(asar.extractFile(archive, 'node_modules/call-bind-apply-helpers/package.json').toString());
+          const helper = path.join('node_modules', 'call-bind-apply-helpers');
+          const pkg = JSON.parse(asar.extractFile(archive, path.join(helper, 'package.json')).toString());
           if (pkg.name !== 'call-bind-apply-helpers') throw new Error('Unexpected helper package');
-          asar.extractFile(archive, 'node_modules/call-bind-apply-helpers/index.js');
+          asar.extractFile(archive, path.join(helper, 'index.js'));
           console.log('Win7 runtime helper is present in app.asar');
           NODE
       - name: Verify packaged Windows runtime
