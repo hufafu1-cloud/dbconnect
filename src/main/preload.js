@@ -177,7 +177,7 @@ contextBridge.exposeInMainWorld('api', {
     write: (p, content) => inv('file:write', p, content),
     writeBase64: (p, b64) => inv('file:writeBase64', p, b64),
     droppedSqlFile: (file) => {
-      const droppedPath = webUtils.getPathForFile(file);
+      const droppedPath = webUtils && webUtils.getPathForFile ? webUtils.getPathForFile(file) : file && file.path;
       return inv('file:grantDroppedSql', { path: droppedPath, name: file && file.name });
     },
   },

@@ -21,15 +21,12 @@ class MySQLAdapter extends BaseAdapter {
 
   async connect() {
     const c = this.cfg;
-    this.pool = mysql.createPool({
+    const options = {
       host: c.host || 'localhost',
       port: Number(c.port) || 3306,
       user: c.user,
       password: c.password || '',
       database: c.database || undefined,
-      waitForConnections: true,
-      connectionLimit: 5,
-      resetOnRelease: true,
       multipleStatements: false,
       dateStrings: true,
       supportBigNumbers: true,
@@ -37,12 +34,51 @@ class MySQLAdapter extends BaseAdapter {
       // mysql2 otherwise JSON.parse()s JSON columns and irreversibly rounds
       // 64-bit identifiers / high-precision decimals before raw export.
       jsonStrings: true,
-      charset: 'utf8mb4',
+      // Bootstrap with a collation understood by MySQL 5.0.
+      charset: 'utf8',
       connectTimeout: 8000,
       ...this.extraPoolOptions(),
-    });
-    const [rows] = await this.pool.query('SELECT VERSION() AS v');
-    this.serverVersion = 'MySQL ' + rows[0].v;
+    };
+    let probe;
+    try {
+      probe = await mysql.createConnection(options);
+      const [versions] = await probe.query('SELECT VERSION() AS v');
+      const version = String(versions[0].v);
+      const oldMySQL = /^5\.(?:[0-6]\.|7\.[0-2](?:\D|$))/.test(version) && !/mariadb/i.test(version);
+      const [charsets] = await probe.query("SHOW CHARACTER SET LIKE 'utf8mb4'");
+      options.charset = charsets.length ? 'utf8mb4' : 'utf8';
+      await probe.end();
+      probe = null;
+      this.pool = mysql.createPool({ ...options, waitForConnections: true, connectionLimit: 5, resetOnRelease: true });
+      if (oldMySQL) {
+        this.pool.on('connection', conn => {
+          // COM_CHANGE_USER predates COM_RESET_CONNECTION and also clears
+          // transactions, temporary tables and session variables. Do not merely
+          // disable reset: that leaks state between pooled operations.
+          conn.reset = callback => conn.changeUser({
+            user: options.user, password: options.password,
+            database: options.database || '', charset: options.charset,
+          }, error => {
+            if (error) return callback(error);
+            // MySQL 5.0 can reset charset variables to server defaults during
+            // COM_CHANGE_USER despite the charset field in the request.
+            conn.query(`SET NAMES ${options.charset}`, callback);
+          });
+        });
+      }
+      const [rows] = await this.pool.query('SELECT VERSION() AS v');
+      this.serverVersion = 'MySQL ' + rows[0].v;
+    } catch (error) {
+      // A failed initial connection must not leave an unused pool alive.
+      const pool = this.pool;
+      this.pool = null;
+      if (probe) probe.destroy();
+      if (pool) void pool.end().catch(() => {});
+      if (error.code === 'ETIMEDOUT') {
+        error.message = `MySQL 建连超时：${c.host || 'localhost'}:${Number(c.port) || 3306}，未及时收到服务端响应（ETIMEDOUT）。请检查针对 DBPanda 的防火墙/安全软件规则，并确认服务端是否收到此次连接。`;
+      }
+      throw error;
+    }
   }
 
   async close() {

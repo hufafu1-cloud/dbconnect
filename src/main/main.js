@@ -11,7 +11,8 @@ const isDemo = process.argv.includes('--demo');
 
 // 测试/演示模式使用临时用户数据目录，避免污染真实配置
 if (isSmoke || isSelfTest || isDemo) {
-  app.setPath('userData', path.join(os.tmpdir(), 'dbpanda-test-' + process.pid));
+  // PID 会被系统复用；多运行时回归不能读到上次测试留下的备份/配置。
+  app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'dbpanda-test-')));
 } else {
   // 将 Datavia / DBConnect 的本地配置一次性迁移到 DBPanda，避免已存连接“丢失”
   migrateOldData();
@@ -169,10 +170,27 @@ if (!isSmoke && !isSelfTest && !isDemo) {
   }
 }
 
-Menu.setApplicationMenu(null); // 菜单为应用内自绘（renderer menubar.js）
+// macOS needs native editing roles for Command shortcuts in focused inputs,
+// including password fields. The renderer menu alone cannot provide them.
+if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 ipc.register(() => win);
 
 app.whenReady().then(async () => {
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { label: '编辑', submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'selectAll', label: '全选' },
+      ] },
+      { role: 'windowMenu' },
+    ]));
+  }
   if (isSelfTest) {
     try {
       const { runSelfTest } = require('./selftest');

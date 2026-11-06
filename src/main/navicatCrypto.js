@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 const { TextDecoder } = require('util');
-const { Blowfish } = require('egoroof-blowfish');
+const blowfishModule = require('egoroof-blowfish');
+// 标准版使用命名导出；Node 16 兼容包锁定为 CommonJS 版本。
+const Blowfish = blowfishModule.Blowfish || blowfishModule;
 
 const V2_KEY = Buffer.from('libcckeylibcckey', 'ascii');
 const V2_IV = Buffer.from('libcciv libcciv ', 'ascii');

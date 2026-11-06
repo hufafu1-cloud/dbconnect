@@ -1,11 +1,12 @@
 {
   "name": "dbpanda",
   "productName": "DBPanda",
-  "version": "2.8.1",
+  "version": "2.8.2",
   "description": "DBPanda — 专业数据库管理工具，内置 AI 助手与生产库危险 SQL 二次确认 (MySQL / MariaDB / PostgreSQL / SQLite / SQL Server / ClickHouse / TiDB / PolarDB / StarRocks / Doris / KingbaseES / openGauss / Greenplum / Oracle / OceanBase / 达梦 / Redis / Elasticsearch / MongoDB)",
   "main": "src/main/main.js",
   "author": "DBPanda",
   "license": "MIT",
+  "homepage": "https://github.com/hufafu1-cloud/dbconnect",
   "packageManager": "npm@9.6.5",
   "scripts": {
     "start": "electron .",
@@ -16,7 +17,8 @@
     "types:test": "node scripts/test-db-types.js",
     "workspace:test": "node scripts/test-workspace.js",
     "core:test": "node scripts/test-step1.js",
-    "verify": "npm run brand:test && npm run ui:test && npm run workflow:test && npm run types:test && npm run workspace:test && npm run core:test && npm run selftest && npm run smoke",
+    "verify": "npm run brand:test && npm run ui:test && npm run workflow:test && npm run release:test && npm run types:test && npm run workspace:test && npm run core:test && npm run selftest && npm run smoke",
+    "release:test": "node scripts/test-release.js",
     "integration": "node scripts/integration-db.js",
     "demo": "electron . --demo",
     "icon": "node scripts/gen-icon.js",
@@ -65,10 +67,11 @@
       "!**/node_modules/oracledb/build{,/**/*}"
     ],
     "npmRebuild": false,
-    "asarUnpack": [
-      "**/node_modules/better-sqlite3/**",
-      "**/node_modules/sql.js/dist/**"
-    ],
+  "asarUnpack": [
+    "**/node_modules/better-sqlite3/**",
+    "**/node_modules/sql.js/dist/**",
+    "**/node_modules/call-bind-apply-helpers/**"
+  ],
     "win": {
       "target": [
         {

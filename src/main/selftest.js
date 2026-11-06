@@ -1518,8 +1518,13 @@ async function runSelfTest() {
   }
   const afterPrune = (await backup.list({ connId: bkConn.id })).filter((x) => x.db === 'main');
   check('backup 按保留份数自动清理旧备份', afterPrune.length === 2, afterPrune.length);
+  // 只统计本次测试连接/库对应的元数据，避免用户目录中其它备份影响断言。
+  const retainedDataFiles = afterPrune
+    .filter((item) => item.connId === bkConn.id && item.db === 'main' && !item.missing)
+    .map((item) => item.dataFile);
   check('backup 清理后不留孤儿数据文件',
-    fs.readdirSync(backup.backupRoot()).filter((n) => n.endsWith('.sql.gz')).length === 2);
+    retainedDataFiles.length === 2
+      && retainedDataFiles.every((name) => fs.existsSync(path.join(backup.backupRoot(), name))));
 
   // 数据文件被手工删除时要如实标出，而不是假装备份还在
   const victim = afterPrune[0];
