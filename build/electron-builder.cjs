@@ -5,7 +5,13 @@ if (!profile) throw new Error('Prepare a release profile first');
 module.exports = {
   extends: null,
   ...require('../package.json').build,
-  files: [...require('../package.json').build.files, 'scripts/test-release-runtime.js'],
+  files: [...require('../package.json').build.files, 'scripts/test-release-runtime.js',
+    ...(releaseVariant === 'win7-x64' ? [{
+      from: 'node_modules/call-bind-apply-helpers',
+      to: 'node_modules/call-bind-apply-helpers',
+      filter: ['**/*'],
+    }] : []),
+  ],
   directories: { output: 'release' },
   generateUpdatesFilesForAllChannels: false,
   publish: { provider: 'generic', url: 'https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/', channel: profile.channel },
