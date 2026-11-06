@@ -197,8 +197,11 @@ function renderConnNode(conn) {
   }
 
   const isOpenNow = () => state.open.has(conn.id);
+  let opening = false;
+  let loadingDatabases = false;
 
   async function toggle() {
+    if (opening || loadingDatabases) return;
     if (!isOpenNow()) {
       await openConnection(conn);
       return;
@@ -209,6 +212,8 @@ function renderConnNode(conn) {
   }
 
   async function openConnection(c) {
+    if (opening) return;
+    opening = true;
     row.style.opacity = '0.6';
     statusbar.setLeft(`正在连接 ${c.name} …`);
     try {
@@ -243,11 +248,14 @@ function renderConnNode(conn) {
       toast.error(`连接失败：${err.message}`);
       statusbar.setLeft('连接失败');
     } finally {
+      opening = false;
       row.style.opacity = '';
     }
   }
 
   async function loadDatabases() {
+    if (loadingDatabases) return;
+    loadingDatabases = true;
     children.innerHTML = '';
     const loading = el('div', { class: 'tree-loading', style: { paddingLeft: '38px' } }, '加载中…');
     children.append(loading);
@@ -263,6 +271,8 @@ function renderConnNode(conn) {
       loaded = true;
     } catch (err) {
       loading.textContent = '加载失败: ' + err.message;
+    } finally {
+      loadingDatabases = false;
     }
   }
 

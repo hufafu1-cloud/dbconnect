@@ -41,8 +41,19 @@ class MySQLAdapter extends BaseAdapter {
       connectTimeout: 8000,
       ...this.extraPoolOptions(),
     });
-    const [rows] = await this.pool.query('SELECT VERSION() AS v');
-    this.serverVersion = 'MySQL ' + rows[0].v;
+    try {
+      const [rows] = await this.pool.query('SELECT VERSION() AS v');
+      this.serverVersion = 'MySQL ' + rows[0].v;
+    } catch (error) {
+      // A failed initial connection must not leave an unused pool alive.
+      const pool = this.pool;
+      this.pool = null;
+      void pool.end().catch(() => {});
+      if (error.code === 'ETIMEDOUT') {
+        error.message = `MySQL 建连超时：${c.host || 'localhost'}:${Number(c.port) || 3306}，未及时收到服务端响应（ETIMEDOUT）。请检查针对 DBPanda 的防火墙/安全软件规则，并确认服务端是否收到此次连接。`;
+      }
+      throw error;
+    }
   }
 
   async close() {
