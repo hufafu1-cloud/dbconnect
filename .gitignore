@@ -4,3 +4,4 @@ shots/
 *.log
 .DS_Store
 .superpowers/
+.tmp-mysql5022/
