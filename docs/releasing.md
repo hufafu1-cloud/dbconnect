@@ -36,7 +36,7 @@ Win7 降级了 SQLite、MongoDB、SQL Server、Oracle 等驱动，并补充 Node
 - DEB：由系统 dpkg/apt 安装，可能请求管理员授权；无授权环境手动下载交管理员安装。
 - 离线或 GitHub 无法访问：显示检查/下载错误，不自动切换到不可信代理，不关闭 TLS 验证。
 
-旧 v2.8.1 已安装客户端中仍写着旧代理地址，修改服务器上的新包不能修复它自身的 403。第一次迁移请手动安装新版本，或在启动前设置 `DBPANDA_UPDATE_PROXY=direct`。之后使用新默认源。
+v2.8.2 默认使用 gh-proxy。旧客户端保持各自打包时的配置；如旧源不可用，可手动安装新版，或在支持环境变量覆盖的版本启动前设置 `DBPANDA_UPDATE_PROXY=direct`。
 
 ## 国内/内网镜像
 
