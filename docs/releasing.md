@@ -40,7 +40,7 @@ Win7 降级了 SQLite、MongoDB、SQL Server、Oracle 等驱动，并补充 Node
 
 ## 国内/内网镜像
 
-默认源为 `https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/`。没有预设自有服务器，仓库改动不会自动获得国内 CDN。
+默认源为 `https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/`。没有预设自有服务器，仓库改动不会自动获得国内 CDN。
 
 可将同一 Release 的全部附件同步到自有 HTTPS 目录，在客户端启动环境设置：
 
@@ -50,7 +50,7 @@ DBPANDA_UPDATE_URL=https://downloads.example.com/dbpanda/stable/
 
 镜像必须保留四份 YAML 和原安装包文件名/字节内容；先同步安装包，再原子切换清单（推荐按版本目录上传后切换 stable 指向）。不得把 win7.yml 内容替换成 latest.yml，不要只同步 EXE。SHA-512 校验可检测传输损坏，但不替代可信源和代码签名。
 
-`DBPANDA_UPDATE_PROXY` 保留兼容，默认空；`direct`/`off` 表示直连。`DBPANDA_UPDATE_URL` 优先级更高。下载索引 `downloads.json` 中是对应 tag 的不可变下载链接，方便官网/镜像消费；README 则使用 latest 的固定链接。
+`DBPANDA_UPDATE_PROXY` 默认 https://gh-proxy.com/；`direct`/`off` 表示直连。`DBPANDA_UPDATE_URL` 优先级更高。下载索引 `downloads.json` 中是经 gh-proxy 加速的对应 tag 下载链接，方便官网/镜像消费；README 则使用 latest 的固定链接。
 
 ## 上线前验收与限制
 

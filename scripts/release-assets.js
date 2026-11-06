@@ -50,7 +50,7 @@ function main(mode, arg) {
   if (mode !== 'publish' || !/^\d+\.\d+\.\d+$/.test(arg)) throw new Error('Expected stage profile or publish version');
   const names = Object.keys(profiles).flatMap(id => validate(output, id, arg));
   if (new Set(names).size !== names.length) throw new Error('Release asset name collision');
-  const base = `https://github.com/hufafu1-cloud/dbconnect/releases/download/v${arg}/`;
+  const base = `https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/download/v${arg}/`;
   const downloads = Object.entries(profiles).map(([id, p]) => ({
     id, platform: p.platform, arch: p.arch, channel: p.channel,
     assets: p.files.filter(n => !/\.(yml|blockmap)$/.test(n)).map(name => ({ name, url: base + name, sha256: digest(path.join(output, name), 'sha256', 'hex') })),

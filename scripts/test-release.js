@@ -17,7 +17,10 @@ const saved = { ...process.env };
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dbpanda-release-test-'));
 try {
   for (const key of Object.keys(process.env)) if (key.startsWith('DBPANDA_UPDATE_')) delete process.env[key];
+  assert.equal(getFeedOptions().url, 'https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/');
+  process.env.DBPANDA_UPDATE_PROXY = 'direct';
   assert.equal(getFeedOptions().url, 'https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/');
+  delete process.env.DBPANDA_UPDATE_PROXY;
   process.env.DBPANDA_UPDATE_URL = 'https://mirror.example/dbpanda';
   assert.equal(getFeedOptions().url, 'https://mirror.example/dbpanda/');
   process.env.CI = 'false';

@@ -1,4 +1,4 @@
-// 默认直连 GitHub Releases，不依赖可能返回 403 的公共代理。
+// 默认通过 gh-proxy 加速 GitHub Releases，支持环境变量切换直连或镜像。
 // Windows 标准版 latest.yml，兼容版 win7.yml；Linux 由 updater 添加平台/架构后缀。
 //
 // 环境变量覆盖：
@@ -7,7 +7,7 @@
 // - DBPANDA_UPDATE_OWNER / DBPANDA_UPDATE_REPO     改仓库
 const DEFAULT_OWNER = 'hufafu1-cloud';
 const DEFAULT_REPO = 'dbconnect';
-const DEFAULT_PROXY_PREFIX = '';
+const DEFAULT_PROXY_PREFIX = 'https://gh-proxy.com/';
 
 // 构建时写入发行变体；不能根据当前 OS 自动换通道（兼容版也可能运行于 Win10）。
 function getUpdateChannel(pkg = require('../../package.json')) {

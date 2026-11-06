@@ -86,7 +86,7 @@
     },
     "publish": {
       "provider": "generic",
-      "url": "https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/"
+      "url": "https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/"
     },
     "releaseInfo": {
       "releaseNotesFile": "release-notes.md"

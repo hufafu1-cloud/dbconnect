@@ -37,18 +37,18 @@ Greenplum、Oracle、达梦 DM、OceanBase（MySQL 模式 / Oracle 模式·实�
 
 | 运行环境 | 安装包 | 便携包 |
 |---|---|---|
-| Windows 10/11 x64 | [标准版 EXE](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip) |
-| Windows 7 SP1 / 8.1 x64（遗留兼容版） | [兼容版 EXE](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.exe) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.zip) |
-| Linux x64（包括部分 UOS/麒麟） | [DEB](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-amd64.deb) | [AppImage](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-x86_64.AppImage) |
-| Linux ARM64（包括部分 UOS/麒麟） | [DEB](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.deb) | [AppImage](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.AppImage) |
-| macOS Intel | [DMG](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-x64.dmg) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-x64.zip) |
-| macOS Apple Silicon（M 系列） | [DMG](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-arm64.dmg) | [ZIP](https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-arm64.zip) |
+| Windows 10/11 x64 | [标准版 EXE](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.exe) | [ZIP](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Setup.zip) |
+| Windows 7 SP1 / 8.1 x64（遗留兼容版） | [兼容版 EXE](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.exe) | [ZIP](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Win7-x64-Setup.zip) |
+| Linux x64（包括部分 UOS/麒麟） | [DEB](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-amd64.deb) | [AppImage](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-x86_64.AppImage) |
+| Linux ARM64（包括部分 UOS/麒麟） | [DEB](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.deb) | [AppImage](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Linux-arm64.AppImage) |
+| macOS Intel | [DMG](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-x64.dmg) | [ZIP](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-x64.zip) |
+| macOS Apple Silicon（M 系列） | [DMG](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-arm64.dmg) | [ZIP](https://gh-proxy.com/https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/DBPanda-Mac-arm64.zip) |
 
 Win7 版使用已停止安全维护的 Electron 22，不建议用于联网敏感环境。Linux 包按 CPU 架构区分，**不等于信创认证或所有发行版兼容**，不支持龙芯 LoongArch/MIPS；非 Debian 系统优先试 AppImage。首次上线前仍需目标系统实机验收。
 
 应用内检查更新自动区分标准版、Win7 版、Linux x64/ARM64，不跨通道升级。
 Windows ZIP 升级会启动安装程序，需纯便携使用时请手动替换 ZIP；AppImage 需有自身文件及目录写权限，DEB 安装更新需系统授权。
-不再默认依赖第三方 gh-proxy。国内/内网部署可配置自有 HTTPS 镜像，参见[多平台发布与更新说明](docs/releasing.md)。
+默认通过 gh-proxy 加速下载和自动更新。国内/内网部署可配置自有 HTTPS 镜像，参见[多平台发布与更新说明](docs/releasing.md)。
 每次发布还提供 `downloads.json` 下载索引和 `SHA256SUMS.txt` 校验文件。
 
 ## 功能特性

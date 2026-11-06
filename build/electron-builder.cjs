@@ -14,7 +14,7 @@ module.exports = {
   ],
   directories: { output: 'release' },
   generateUpdatesFilesForAllChannels: false,
-  publish: { provider: 'generic', url: 'https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/', channel: profile.channel },
+  publish: { provider: 'generic', url: require('../src/main/updateConfig').githubLatestDownloadUrl('hufafu1-cloud', 'dbconnect'), channel: profile.channel },
   win: { ...require('../package.json').build.win,
     artifactName: releaseVariant === 'win7-x64' ? 'DBPanda-Win7-x64-Setup.${ext}' : 'DBPanda-Setup.${ext}' },
   linux: {
