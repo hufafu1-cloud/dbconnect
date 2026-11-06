@@ -26,6 +26,8 @@ module.exports = {
     executableName: 'dbpanda',
   },
   mac: {
+    sign: './build/sign-mac-test.cjs',
+    hardenedRuntime: false,
     target: ['dmg', 'zip'],
     artifactName: 'DBPanda-Mac-${arch}.${ext}',
     icon: 'assets/icon.png',

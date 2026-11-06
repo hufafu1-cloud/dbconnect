@@ -93,6 +93,14 @@ jobs:
           else
             npx --no-install electron-builder --config build/electron-builder.cjs --mac --${{ matrix.arch }} --publish never
           fi
+      - name: Verify packaged macOS runtime
+        if: matrix.platform == 'mac'
+        timeout-minutes: 5
+        run: |
+          APP=release/mac/DBPanda.app
+          if [[ '${{ matrix.arch }}' == arm64 ]]; then APP=release/mac-arm64/DBPanda.app; fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ELECTRON_RUN_AS_NODE=1 "$APP/Contents/MacOS/DBPanda" "$APP/Contents/Resources/app.asar/scripts/test-release-runtime.js"
       - name: Verify Win7 runtime helper is packaged
         if: matrix.profile == 'win7-x64'
         run: |
