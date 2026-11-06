@@ -5,6 +5,7 @@ if (!profile) throw new Error('Prepare a release profile first');
 module.exports = {
   extends: null,
   ...require('../package.json').build,
+  files: [...require('../package.json').build.files, 'scripts/test-release-runtime.js'],
   directories: { output: 'release' },
   generateUpdatesFilesForAllChannels: false,
   publish: { provider: 'generic', url: 'https://github.com/hufafu1-cloud/dbconnect/releases/latest/download/', channel: profile.channel },
